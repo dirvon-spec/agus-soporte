@@ -1,0 +1,14 @@
+{
+  "name": "agus-soporte",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Demo MVP offline de cobro diario a credito",
+  "type": "module",
+  "scripts": {
+    "start": "npx serve .",
+    "verify:node": "node js/dev-verify-node.mjs"
+  },
+  "dependencies": {
+    "sql.js": "^1.14.2"
+  }
+}

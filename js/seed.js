@@ -1,0 +1,243 @@
+// Datos de ejemplo (contrato 2.6 del PLAN-MVP.md).
+// generarSeed() es una función de generación PURA (sin acceso a DB): devuelve
+// arrays de filas ya formadas (con id vía uuid.js), listas para insertar.
+// db.js es quien las inserta dentro de una transacción y marca modo_demo=1
+// (así seed.js queda desacoplado y testeable en aislamiento, igual que calendar.js).
+//
+// Genera todo dinámicamente relativo a hoy() en el momento de llamarla — nunca
+// fechas absolutas hardcodeadas (así el re-sembrado anti-congelamiento de D1
+// siempre produce una demo "viva").
+
+import { uuidV7 } from './utils/uuid.js';
+import { hoy, sumarDias, rango } from './utils/date.js';
+
+const SERVICIOS = ['AGUA', 'LUZ', 'INTERNET', 'GAS', 'CABLE', 'OTRO'];
+
+function ts(fechaIso, hhmmss = '09:00:00') {
+  return `${fechaIso}T${hhmmss}.000Z`;
+}
+
+function nuevoCliente({ nombre, telefono, notas, fechaAlta }) {
+  return {
+    id: uuidV7(),
+    nombre,
+    telefono: telefono || null,
+    notas: notas || null,
+    created_at: ts(fechaAlta),
+    updated_at: ts(fechaAlta),
+  };
+}
+
+function nuevoAcuerdo({ clienteId, montoCuotaCentavos, vigenteDesde, vigenteHasta = null, fechaCreacion }) {
+  const fc = fechaCreacion || vigenteDesde;
+  return {
+    id: uuidV7(),
+    cliente_id: clienteId,
+    monto_cuota_centavos: montoCuotaCentavos,
+    vigente_desde: vigenteDesde,
+    vigente_hasta: vigenteHasta,
+    created_at: ts(fc, '09:05:00'),
+    updated_at: ts(fc, '09:05:00'),
+  };
+}
+
+function nuevoMovimiento({ clienteId, tipo, montoCentavos, fecha, servicio = null, referencia = null, nota = null, movimientoOriginalId = null }) {
+  return {
+    id: uuidV7(),
+    cliente_id: clienteId,
+    tipo,
+    monto_centavos: montoCentavos,
+    fecha,
+    servicio,
+    referencia,
+    nota,
+    movimiento_original_id: movimientoOriginalId,
+    created_at: ts(fecha, '18:00:00'),
+    updated_at: ts(fecha, '18:00:00'),
+  };
+}
+
+/**
+ * Genera el set completo de datos de ejemplo, cubriendo los 9 casos
+ * obligatorios de 2.6 entre 10 clientes con ~2 meses de movimientos.
+ * @returns {{clientes: object[], acuerdos: object[], movimientos: object[]}}
+ */
+export function generarSeed() {
+  const clientes = [];
+  const acuerdos = [];
+  const movimientos = [];
+
+  const hoyStr = hoy();
+  const inicioRango = sumarDias(hoyStr, -60);
+
+  // ---- Caso 1: cliente siempre PAGADO (abona su cuota todos los días) ----
+  const cliente1 = nuevoCliente({
+    nombre: 'Rosa Martínez',
+    telefono: '5215512340001',
+    notas: 'Cliente puntual, paga todos los días.',
+    fechaAlta: inicioRango,
+  });
+  clientes.push(cliente1);
+  const cuota1 = 5000; // $50.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente1.id, montoCuotaCentavos: cuota1, vigenteDesde: inicioRango }));
+  for (const fecha of rango(inicioRango, hoyStr)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente1.id, tipo: 'ABONO', montoCentavos: cuota1, fecha, nota: 'Cuota diaria' }));
+  }
+
+  // ---- Caso 2: cliente con GRACIA-ADELANTO (adelanta varios días y luego no abona) ----
+  const inicio2 = sumarDias(hoyStr, -14);
+  const cliente2 = nuevoCliente({
+    nombre: 'Jorge Delgado',
+    telefono: '5215512340002',
+    notas: 'Adelantó varios días de golpe.',
+    fechaAlta: inicio2,
+  });
+  clientes.push(cliente2);
+  const cuota2 = 4000; // $40.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente2.id, montoCuotaCentavos: cuota2, vigenteDesde: inicio2 }));
+  movimientos.push(
+    nuevoMovimiento({ clienteId: cliente2.id, tipo: 'ABONO', montoCentavos: cuota2 * 10, fecha: inicio2, nota: 'Adelanto de 10 cuotas' })
+  );
+  // sin más abonos después: el arrastre cubre varios días y luego cae en deuda.
+
+  // ---- Caso 3: cliente con PARCIAL recurrente (abona menos que la cuota casi todos los días) ----
+  const inicio3 = sumarDias(hoyStr, -30);
+  const cliente3 = nuevoCliente({
+    nombre: 'Lucía Fernández',
+    telefono: '5215512340003',
+    notas: 'Abona menos que la cuota casi todos los días.',
+    fechaAlta: inicio3,
+  });
+  clientes.push(cliente3);
+  const cuota3 = 6000; // $60.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente3.id, montoCuotaCentavos: cuota3, vigenteDesde: inicio3 }));
+  for (const fecha of rango(inicio3, hoyStr)) {
+    movimientos.push(
+      nuevoMovimiento({ clienteId: cliente3.id, tipo: 'ABONO', montoCentavos: Math.round(cuota3 * 0.6), fecha, nota: 'Pago parcial' })
+    );
+  }
+
+  // ---- Caso 4: cliente en DEUDA franca (dejó de abonar hace semanas) ----
+  const inicio4 = sumarDias(hoyStr, -45);
+  const finAbonos4 = sumarDias(hoyStr, -20);
+  const cliente4 = nuevoCliente({
+    nombre: 'Manuel Torres',
+    telefono: '5215512340004',
+    notas: 'Dejó de abonar hace varias semanas.',
+    fechaAlta: inicio4,
+  });
+  clientes.push(cliente4);
+  const cuota4 = 3000; // $30.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente4.id, montoCuotaCentavos: cuota4, vigenteDesde: inicio4 }));
+  for (const fecha of rango(inicio4, finAbonos4)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente4.id, tipo: 'ABONO', montoCentavos: cuota4, fecha, nota: 'Cuota diaria' }));
+  }
+  // sin abonos desde finAbonos4 hasta hoy.
+
+  // ---- Caso 5: cliente nuevo a mitad del rango (SIN_OBLIGACION antes de vigente_desde) ----
+  const inicio5 = sumarDias(hoyStr, -10);
+  const cliente5 = nuevoCliente({
+    nombre: 'Karla Núñez',
+    telefono: '5215512340005',
+    notas: 'Cliente nueva, alta reciente.',
+    fechaAlta: inicio5,
+  });
+  clientes.push(cliente5);
+  const cuota5 = 4500; // $45.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente5.id, montoCuotaCentavos: cuota5, vigenteDesde: inicio5 }));
+  for (const fecha of rango(inicio5, hoyStr)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente5.id, tipo: 'ABONO', montoCentavos: cuota5, fecha, nota: 'Cuota diaria' }));
+  }
+
+  // ---- Caso 6: cliente con cambio de cuota (dos acuerdos consecutivos) ----
+  const inicio6 = sumarDias(hoyStr, -40);
+  const cambio6 = sumarDias(hoyStr, -12);
+  const cliente6 = nuevoCliente({
+    nombre: 'Andrés Ibarra',
+    telefono: '5215512340006',
+    notas: 'Renegoció su cuota diaria.',
+    fechaAlta: inicio6,
+  });
+  clientes.push(cliente6);
+  const cuota6a = 3500; // $35.00
+  const cuota6b = 5500; // $55.00
+  acuerdos.push(
+    nuevoAcuerdo({ clienteId: cliente6.id, montoCuotaCentavos: cuota6a, vigenteDesde: inicio6, vigenteHasta: sumarDias(cambio6, -1) })
+  );
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente6.id, montoCuotaCentavos: cuota6b, vigenteDesde: cambio6 }));
+  for (const fecha of rango(inicio6, hoyStr)) {
+    const cuotaVigente = fecha < cambio6 ? cuota6a : cuota6b;
+    movimientos.push(nuevoMovimiento({ clienteId: cliente6.id, tipo: 'ABONO', montoCentavos: cuotaVigente, fecha, nota: 'Cuota diaria' }));
+  }
+
+  // ---- Caso 7: cliente con al menos un AJUSTE en su historial ----
+  const inicio7 = sumarDias(hoyStr, -25);
+  const cliente7 = nuevoCliente({
+    nombre: 'Patricia Gómez',
+    telefono: '5215512340007',
+    notas: 'Se le cargó un servicio de más y se corrigió con un ajuste.',
+    fechaAlta: inicio7,
+  });
+  clientes.push(cliente7);
+  const cuota7 = 5000; // $50.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente7.id, montoCuotaCentavos: cuota7, vigenteDesde: inicio7 }));
+  for (const fecha of rango(inicio7, hoyStr)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente7.id, tipo: 'ABONO', montoCentavos: cuota7, fecha, nota: 'Cuota diaria' }));
+  }
+  const fechaCargo7 = sumarDias(hoyStr, -8);
+  const cargoMalCargado = nuevoMovimiento({
+    clienteId: cliente7.id,
+    tipo: 'CARGO',
+    montoCentavos: 12000,
+    fecha: fechaCargo7,
+    servicio: SERVICIOS[1], // LUZ
+    referencia: 'F-00123',
+    nota: 'Pago de luz',
+  });
+  movimientos.push(cargoMalCargado);
+  movimientos.push(
+    nuevoMovimiento({
+      clienteId: cliente7.id,
+      tipo: 'AJUSTE',
+      montoCentavos: -3000,
+      fecha: sumarDias(hoyStr, -7),
+      nota: 'Se cargó de más por error de tipeo; se corrige.',
+      movimientoOriginalId: cargoMalCargado.id,
+    })
+  );
+
+  // ---- Caso 8: cliente sin teléfono cargado ----
+  const inicio8 = sumarDias(hoyStr, -20);
+  const cliente8 = nuevoCliente({
+    nombre: 'Ricardo Peña',
+    telefono: null,
+    notas: 'Todavía no dejó su número de teléfono.',
+    fechaAlta: inicio8,
+  });
+  clientes.push(cliente8);
+  const cuota8 = 2500; // $25.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente8.id, montoCuotaCentavos: cuota8, vigenteDesde: inicio8 }));
+  for (const fecha of rango(inicio8, hoyStr)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente8.id, tipo: 'ABONO', montoCentavos: cuota8, fecha, nota: 'Cuota diaria' }));
+  }
+
+  // ---- Caso 9: clientes de relleno (para probar listas/paginación) ----
+  const inicio9 = sumarDias(hoyStr, -5);
+  const cliente9 = nuevoCliente({ nombre: 'Sofía Ramírez', telefono: '5215512340009', notas: null, fechaAlta: inicio9 });
+  clientes.push(cliente9);
+  const cuota9 = 2000; // $20.00
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente9.id, montoCuotaCentavos: cuota9, vigenteDesde: inicio9 }));
+  for (const fecha of rango(inicio9, hoyStr)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente9.id, tipo: 'ABONO', montoCentavos: cuota9, fecha, nota: 'Cuota diaria' }));
+  }
+
+  const inicio10 = sumarDias(hoyStr, -3);
+  const cliente10 = nuevoCliente({ nombre: 'Tomás Vega', telefono: '5215512340010', notas: null, fechaAlta: inicio10 });
+  clientes.push(cliente10);
+  const cuota10 = 15000; // $150.00, tope superior del rango de cuotas
+  acuerdos.push(nuevoAcuerdo({ clienteId: cliente10.id, montoCuotaCentavos: cuota10, vigenteDesde: inicio10 }));
+  movimientos.push(nuevoMovimiento({ clienteId: cliente10.id, tipo: 'ABONO', montoCentavos: cuota10, fecha: inicio10, nota: 'Cuota diaria' }));
+  // sin abonar los últimos días: aporta variedad reciente (PARCIAL/DEUDA).
+
+  return { clientes, acuerdos, movimientos };
+}
