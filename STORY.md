@@ -28,6 +28,16 @@ Cifra final de esta etapa: 40/40 checks en navegador + 19/19 en Node, con seguri
 
 MVP completo (5 pantallas, seed demo auto-renovable, export/import de respaldo), pendiente de la validación en vivo del dueño (gate §4.5 del plan). Fuera de alcance todavía: Capacitor (B-001), sync en la nube (B-002), PDF real (B-003) — backlog completo en PLAN-MVP.md §6.
 
+## Evolución del producto
+
+*Esta sección crece con cada cambio de alcance aprobado por el dueño. Registra el qué y el porqué de negocio, no el cómo técnico (eso vive en PLAN-MVP.md y en los commits).*
+
+**25-ago-2026 — Pestaña Calendario de primer nivel.** Al probar la demo publicada, el dueño detectó que la vista central de su app anterior — el calendario grande del mes — quedaba escondida dentro del detalle de cada cliente. Se agregó la pestaña "Calendario" con mockup aprobado antes de construir: modo por persona (grilla de estados + monto abonado por día) y modo "todas las personas" (cuántos cumplieron de cuántos esperados por día, con lista ✓/✗ al tocar). El umbral del rojo global (faltó la mitad o más) fue decisión explícita del dueño.
+
+**25-ago-2026 — Buscador de clientes en el selector.** El usuario final maneja más de 100 clientes; un menú desplegable no escala. El selector de persona se convirtió en buscador con filtro por nombre/teléfono y paginación (componente compartido con el formulario de movimientos). Probado con 130 clientes reales: búsqueda fluida y calendario global en ~30 ms.
+
+**25-ago-2026 — Frecuencia de cobro configurable (cambio de modelo de negocio).** El dueño aclaró que el cobro no siempre es diario: hay clientes que pagan un día específico del mes o cada semana, y cada cliente varía. Decisión de negocio confirmada por el dueño: la deuda se acumula por fecha de cobro vencida (el semanal que no paga su viernes debe esa cuota; a la semana siguiente, dos). El acuerdo de cada cliente gana frecuencia Diaria / Semanal (día de la semana) / Mensual (día del mes, con ajuste a fin de mes en meses cortos), la cuota se exige solo los días que tocan, y la pantalla Hoy pasa a listar únicamente a quienes les toca cobrar ese día. Es el primer cambio que amplía el modelo de datos después de la publicación (schema_version 1 → 2, con migración transparente). En el mismo lote: números del calendario más grandes (legibilidad en teléfono reportada por el dueño) e iconos SVG propios en lugar de emoji, para identidad visual consistente.
+
 ## Para el que viene después
 
 Lee [CLAUDE.md](CLAUDE.md) (reglas y cicatrices operativas) y [PLAN-MVP.md](PLAN-MVP.md) (el contrato). No rompas el ledger, no metas flotantes al dinero, no toques el calendario sin correr los casos de ventana-a-mitad-de-historial, y no des nada por hecho que no hayas visto correr.

@@ -9,12 +9,16 @@
 // siempre produce una demo "viva").
 
 import { uuidV7 } from './utils/uuid.js';
-import { hoy, sumarDias, rango } from './utils/date.js';
+import { hoy, sumarDias, rango, diaDeSemana } from './utils/date.js';
 
 const SERVICIOS = ['AGUA', 'LUZ', 'INTERNET', 'GAS', 'CABLE', 'OTRO'];
 
 function ts(fechaIso, hhmmss = '09:00:00') {
   return `${fechaIso}T${hhmmss}.000Z`;
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
 }
 
 function nuevoCliente({ nombre, telefono, notas, fechaAlta }) {
@@ -28,17 +32,55 @@ function nuevoCliente({ nombre, telefono, notas, fechaAlta }) {
   };
 }
 
-function nuevoAcuerdo({ clienteId, montoCuotaCentavos, vigenteDesde, vigenteHasta = null, fechaCreacion }) {
+function nuevoAcuerdo({
+  clienteId,
+  montoCuotaCentavos,
+  vigenteDesde,
+  vigenteHasta = null,
+  fechaCreacion,
+  frecuencia = 'DIARIA',
+  diaSemana = null,
+  diaMes = null,
+}) {
   const fc = fechaCreacion || vigenteDesde;
   return {
     id: uuidV7(),
     cliente_id: clienteId,
     monto_cuota_centavos: montoCuotaCentavos,
+    frecuencia,
+    dia_semana: diaSemana,
+    dia_mes: diaMes,
     vigente_desde: vigenteDesde,
     vigente_hasta: vigenteHasta,
     created_at: ts(fc, '09:05:00'),
     updated_at: ts(fc, '09:05:00'),
   };
+}
+
+/** Primer viernes (u otro día de semana) en/después de una fecha 'YYYY-MM-DD'. */
+function primerDiaSemanaDesde(fechaIso, diaSemanaObjetivo) {
+  let f = fechaIso;
+  while (diaDeSemana(f) !== diaSemanaObjetivo) f = sumarDias(f, 1);
+  return f;
+}
+
+/**
+ * Fechas exigibles de un acuerdo MENSUAL (con clamp a fin de mes) dentro de
+ * [desde, hasta] — para poder sembrar abonos exactamente en esos días.
+ */
+function fechasExigiblesMensuales(desde, hasta, diaMes) {
+  const fechas = [];
+  let cursorMes = `${desde.slice(0, 7)}-01`;
+  while (cursorMes <= hasta) {
+    const anio = Number(cursorMes.slice(0, 4));
+    const mes = Number(cursorMes.slice(5, 7));
+    const ultimoDiaDelMes = new Date(anio, mes, 0).getDate();
+    const diaClamp = Math.min(diaMes, ultimoDiaDelMes);
+    const fechaExigible = `${cursorMes.slice(0, 7)}-${pad2(diaClamp)}`;
+    if (fechaExigible >= desde && fechaExigible <= hasta) fechas.push(fechaExigible);
+    cursorMes = mes === 12 ? `${anio + 1}-01-01` : `${anio}-${pad2(mes + 1)}-01`;
+  }
+  return fechas;
 }
 
 function nuevoMovimiento({ clienteId, tipo, montoCentavos, fecha, servicio = null, referencia = null, nota = null, movimientoOriginalId = null }) {
@@ -59,7 +101,8 @@ function nuevoMovimiento({ clienteId, tipo, montoCentavos, fecha, servicio = nul
 
 /**
  * Genera el set completo de datos de ejemplo, cubriendo los 9 casos
- * obligatorios de 2.6 entre 10 clientes con ~2 meses de movimientos.
+ * obligatorios de 2.6 entre 10 clientes con ~2 meses de movimientos, más 2
+ * clientes adicionales de §2.8 (frecuencia SEMANAL y MENSUAL) — 12 en total.
  * @returns {{clientes: object[], acuerdos: object[], movimientos: object[]}}
  */
 export function generarSeed() {
@@ -238,6 +281,41 @@ export function generarSeed() {
   acuerdos.push(nuevoAcuerdo({ clienteId: cliente10.id, montoCuotaCentavos: cuota10, vigenteDesde: inicio10 }));
   movimientos.push(nuevoMovimiento({ clienteId: cliente10.id, tipo: 'ABONO', montoCentavos: cuota10, fecha: inicio10, nota: 'Cuota diaria' }));
   // sin abonar los últimos días: aporta variedad reciente (PARCIAL/DEUDA).
+
+  // ---- Caso 10 (§2.8): SEMANAL (viernes) con una semana pagada por adelantado ----
+  const primerViernes = primerDiaSemanaDesde(sumarDias(hoyStr, -14), 5);
+  const cliente11 = nuevoCliente({
+    nombre: 'Valentina Cruz',
+    telefono: '5215512340011',
+    notas: 'Cobro semanal, todos los viernes.',
+    fechaAlta: primerViernes,
+  });
+  clientes.push(cliente11);
+  const cuotaSemanal = 20000; // $200.00 por semana
+  acuerdos.push(
+    nuevoAcuerdo({ clienteId: cliente11.id, montoCuotaCentavos: cuotaSemanal, vigenteDesde: primerViernes, frecuencia: 'SEMANAL', diaSemana: 5 })
+  );
+  movimientos.push(
+    nuevoMovimiento({ clienteId: cliente11.id, tipo: 'ABONO', montoCentavos: cuotaSemanal * 2, fecha: primerViernes, nota: 'Adelanta una semana' })
+  );
+  // sin más abonos: el viernes siguiente queda en GRACIA_ADELANTO.
+
+  // ---- Caso 11 (§2.8): MENSUAL, día 31 (clamp visible en meses de menos de 31 días) ----
+  const inicioMensual = sumarDias(hoyStr, -60);
+  const cliente12 = nuevoCliente({
+    nombre: 'Emilio Cárdenas',
+    telefono: '5215512340012',
+    notas: 'Cobro mensual, día 31 (se ajusta al último día en meses cortos).',
+    fechaAlta: inicioMensual,
+  });
+  clientes.push(cliente12);
+  const cuotaMensual = 80000; // $800.00 por mes
+  acuerdos.push(
+    nuevoAcuerdo({ clienteId: cliente12.id, montoCuotaCentavos: cuotaMensual, vigenteDesde: inicioMensual, frecuencia: 'MENSUAL', diaMes: 31 })
+  );
+  for (const fecha of fechasExigiblesMensuales(inicioMensual, hoyStr, 31)) {
+    movimientos.push(nuevoMovimiento({ clienteId: cliente12.id, tipo: 'ABONO', montoCentavos: cuotaMensual, fecha, nota: 'Cuota mensual' }));
+  }
 
   return { clientes, acuerdos, movimientos };
 }

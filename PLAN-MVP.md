@@ -351,6 +351,26 @@ Notas de diseño del algoritmo:
 - Botón/entrada de archivo **"Importar respaldo"** en la misma sección: selecciona un `.sqlite` local, llama `importarRespaldo()`, y tras éxito recarga la app para reflejar los datos importados. Antes de importar, se le pide confirmación explícita al usuario ("Esto reemplaza todos los datos actuales por los del archivo. ¿Continuar?"), porque es una operación destructiva sobre el estado local.
 - Este flujo de export/import es, en el MVP, también la única forma de "mover" datos entre dispositivos o de tener un respaldo fuera del propio navegador — se lo comunica así en la microcopy de esa pantalla.
 
+### 2.8 Frecuencia de cobro configurable + pase visual (gate del dueño, 25-ago-2026)
+
+Solicitado por el dueño tras probar la demo publicada. Decisión de negocio confirmada: **la deuda se acumula por fecha de cobro vencida** (un semanal que no paga su viernes debe esa cuota; a la siguiente semana, dos).
+
+**Esquema (schema_version pasa de 1 a 2):**
+- `acuerdos` gana: `frecuencia TEXT NOT NULL DEFAULT 'DIARIA' CHECK (frecuencia IN ('DIARIA','SEMANAL','MENSUAL'))`, `dia_semana INTEGER` (0=domingo..6=sábado, solo SEMANAL), `dia_mes INTEGER` (1..31, solo MENSUAL), con CHECK de coherencia (SEMANAL exige dia_semana no nulo; MENSUAL exige dia_mes; DIARIA exige ambos nulos).
+- Migración en `initDb()`: si `schema_version = 1`, ALTER TABLE para agregar las columnas (default DIARIA) y actualizar `meta` a 2 — sin tocar datos. `importarRespaldo` acepta versión 1 o 2; si importa v1, migra en memoria antes de activar.
+
+**Algoritmo (`calendar.js`):** nueva noción de **día exigible**: DIARIA = todos los días; SEMANAL = solo el `dia_semana`; MENSUAL = solo el `dia_mes` (si el mes no tiene ese día, el ÚLTIMO día del mes). El barrido consume cuota SOLO en días exigibles; los no exigibles no generan ni consumen arrastre y se pintan SIN_OBLIGACION (visualmente "neutro", no deuda). Los abonos de cualquier día siguen sumando crédito. `calcularArrastreCumplimiento` (db.js) aplica la misma regla. El resto de estados (PAGADO/GRACIA/PARCIAL/DEUDA) se evalúa igual pero solo en días exigibles.
+
+**Contratos (`db.js`):** `crearClienteConAcuerdo` y `crearAcuerdo` aceptan `{frecuencia, dia_semana?, dia_mes?}` (default DIARIA) con validación completa (VALIDATION_ERROR claro por campo). `resumenDia`/pantalla Hoy: solo lista clientes con cobro EXIGIBLE ese día según frecuencia. `obtenerCalendarioGlobal`: `esperados` cuenta solo clientes exigibles ese día.
+
+**UI:** formularios de alta y renegociación ganan selector de frecuencia (Diaria / Semanal con día de la semana / Mensual con día del mes), microcopy explicando el clamp de fin de mes; el chip/detalle del cliente muestra la frecuencia ("$200.00 cada viernes"). Calendario individual: días no exigibles en neutro suave.
+
+**Seed:** se agregan 2 clientes — uno SEMANAL (viernes, con una semana pagada por adelantado → azul) y uno MENSUAL (día 31 → verifica visualmente el clamp en meses cortos).
+
+**Verificación (tests en ROJO primero, protocolo completo):** (1) mensual día 31 en mes de 30 días → exigible el 30; (2) semanal que no paga 2 viernes → deuda de 2 cuotas acumuladas; (3) semanal que pagó doble la semana previa → viernes siguiente en GRACIA_ADELANTO; (4) cambio de frecuencia DIARIA→SEMANAL a mitad de mes → días posteriores solo exigibles los viernes, arrastre continuo; (5) migración v1→v2 preserva datos y `frecuencia='DIARIA'`; (6) import de respaldo v1 funciona; (7) Hoy solo lista exigibles del día.
+
+**Pase visual (independiente, sin riesgo):** números del calendario más grandes (número de día y monto legibles en teléfono — el dueño reportó que "casi no se ven"), e iconos SVG inline propios (barra de navegación, badges de estado, botones de acción) en lugar de emoji/texto, para identidad visual consistente entre dispositivos.
+
 ---
 
 ## 3. Análisis de riesgo

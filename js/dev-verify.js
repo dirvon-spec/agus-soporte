@@ -18,12 +18,14 @@ import {
   resumenMensual,
   borrarClienteLogico,
   obtenerCalendarioGlobal,
+  importarRespaldo,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
 } from './db.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { generarSeed } from './seed.js';
-import { hoy, sumarDias, rango } from './utils/date.js';
+import { SCHEMA_VERSION, MIGRACION_V1_A_V2 } from './schema.js';
+import { hoy, sumarDias, rango, diaDeSemana } from './utils/date.js';
 import { uuidV7 } from './utils/uuid.js';
 import { parsearAPesos, formatearCentavos } from './utils/money.js';
 
@@ -37,6 +39,88 @@ function compararMapaEstados(actual, esperado) {
     const obtenido = actual.get(fecha);
     assert(obtenido === estadoEsperado, `día ${fecha}: esperado ${estadoEsperado}, obtenido ${obtenido}`);
   }
+}
+
+// ============================================================
+// Helpers para los tests de migración v1->v2 (2.8): construyen una base
+// sql.js "v1" (esquema viejo, sin columnas de frecuencia) totalmente en
+// memoria, usando el MISMO runtime de sql.js ya cargado por initDb() (vía el
+// constructor de la instancia real, sin necesidad de exportar SQL desde db.js).
+// ============================================================
+
+const DDL_V1_LITERAL = `
+CREATE TABLE IF NOT EXISTS clientes (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 2),
+  telefono      TEXT,
+  notas         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS acuerdos (
+  id                      TEXT PRIMARY KEY,
+  cliente_id              TEXT NOT NULL REFERENCES clientes(id),
+  monto_cuota_centavos    INTEGER NOT NULL CHECK (monto_cuota_centavos > 0),
+  vigente_desde           TEXT NOT NULL,
+  vigente_hasta           TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL,
+  deleted_at              TEXT,
+  CHECK (vigente_hasta IS NULL OR vigente_hasta >= vigente_desde)
+);
+CREATE TABLE IF NOT EXISTS movimientos (
+  id                        TEXT PRIMARY KEY,
+  cliente_id                TEXT NOT NULL REFERENCES clientes(id),
+  tipo                       TEXT NOT NULL CHECK (tipo IN ('CARGO', 'ABONO', 'AJUSTE')),
+  monto_centavos             INTEGER NOT NULL,
+  fecha                      TEXT NOT NULL,
+  servicio                   TEXT,
+  referencia                 TEXT,
+  nota                       TEXT,
+  movimiento_original_id     TEXT REFERENCES movimientos(id),
+  created_at                 TEXT NOT NULL,
+  updated_at                 TEXT NOT NULL,
+  deleted_at                 TEXT,
+  CHECK (
+    (tipo IN ('CARGO','ABONO') AND monto_centavos > 0 AND movimiento_original_id IS NULL)
+    OR
+    (tipo = 'AJUSTE' AND monto_centavos != 0 AND movimiento_original_id IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_movimientos_cliente_fecha ON movimientos (cliente_id, fecha);
+CREATE INDEX IF NOT EXISTS idx_movimientos_cliente_tipo  ON movimientos (cliente_id, tipo);
+CREATE INDEX IF NOT EXISTS idx_acuerdos_cliente_vigencia ON acuerdos (cliente_id, vigente_desde);
+CREATE TABLE IF NOT EXISTS meta (
+  clave  TEXT PRIMARY KEY,
+  valor  TEXT NOT NULL
+);
+`;
+
+function crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo }) {
+  const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+  const dbV1 = new DatabaseCtor();
+  dbV1.run(DDL_V1_LITERAL);
+  const ts = '2026-01-01T00:00:00.000Z';
+  dbV1.run('INSERT INTO clientes (id,nombre,telefono,notas,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,NULL)', [
+    clienteId,
+    'Cliente Migracion V1 Verify',
+    '5215500000099',
+    null,
+    ts,
+    ts,
+  ]);
+  dbV1.run(
+    'INSERT INTO acuerdos (id,cliente_id,monto_cuota_centavos,vigente_desde,vigente_hasta,created_at,updated_at,deleted_at) VALUES (?,?,?,?,NULL,?,?,NULL)',
+    [acuerdoId, clienteId, 7500, fechaAcuerdo, ts, ts]
+  );
+  dbV1.run(
+    `INSERT INTO movimientos (id,cliente_id,tipo,monto_centavos,fecha,servicio,referencia,nota,movimiento_original_id,created_at,updated_at,deleted_at)
+     VALUES (?,?,?,?,?,NULL,NULL,NULL,NULL,?,?,NULL)`,
+    [movimientoId, clienteId, 'ABONO', 3000, fechaAcuerdo, ts, ts]
+  );
+  dbV1.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', '1')");
+  return dbV1;
 }
 
 export async function ejecutarVerificacion() {
@@ -487,7 +571,7 @@ export async function ejecutarVerificacion() {
   // ============================================================
   await verificar('generarSeed() produce los 9 casos obligatorios de 2.6', async () => {
     const datos = generarSeed();
-    assert(datos.clientes.length >= 8 && datos.clientes.length <= 10, `cantidad de clientes fuera de 8-10: ${datos.clientes.length}`);
+    assert(datos.clientes.length >= 10 && datos.clientes.length <= 12, `cantidad de clientes fuera de 10-12: ${datos.clientes.length}`);
 
     const [c1, c2, c3, c4, c5, c6, c7, c8] = datos.clientes;
     const movDe = (clienteId) => datos.movimientos.filter((m) => m.cliente_id === clienteId);
@@ -742,6 +826,193 @@ export async function ejecutarVerificacion() {
     assert(
       global.resumen.diasCompletos === 0 && global.resumen.diasConFaltantes === 0 && global.resumen.totalCobradoCentavos === 0,
       'el resumen de un mes sin ningún cliente activo debería ser todo 0'
+    );
+  });
+
+  // ============================================================
+  // Sección 12 — §2.8 (gate del dueño 25-ago-2026): frecuencia de cobro
+  // configurable (DIARIA/SEMANAL/MENSUAL). Los 7 casos exigidos por el
+  // protocolo de mutation-check, en el orden del encargo salvo el test de
+  // importarRespaldo (6), que se deja AL FINAL de esta sección porque
+  // reemplaza toda la DB activa de verificación y rompería los tests
+  // siguientes si corriera antes.
+  // ============================================================
+
+  // (1) MENSUAL día 31 en un mes de 30 días -> exigible el día 30 (clamp).
+  await verificar('2.8 (1): MENSUAL día 31 en abril (30 días) es exigible el día 30', async () => {
+    const cuota = 10000;
+    const acuerdos = [
+      { vigente_desde: '2026-04-01', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'MENSUAL', dia_mes: 31, dia_semana: null },
+    ];
+    const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota, fecha: '2026-04-30' }];
+    const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-04-01', '2026-04-30');
+    compararMapaEstados(estados, {
+      '2026-04-01': Estado.SIN_OBLIGACION,
+      '2026-04-15': Estado.SIN_OBLIGACION,
+      '2026-04-29': Estado.SIN_OBLIGACION,
+      '2026-04-30': Estado.PAGADO,
+    });
+  });
+
+  // (2) SEMANAL que no paga 2 viernes seguidos -> deuda de 2 cuotas acumuladas.
+  // Prueba numérica: tras los 2 viernes impagos (arrastre = -2*cuota), un
+  // adelanto de 10 cuotas en el 3er viernes deja EXACTAMENTE 7 viernes en
+  // GRACIA_ADELANTO antes de volver a DEUDA (si solo se hubiera debido 1
+  // cuota en vez de 2, serían 8 — la cuenta exacta demuestra la magnitud).
+  await verificar('2.8 (2): SEMANAL con 2 viernes impagos acumula deuda de exactamente 2 cuotas', async () => {
+    const cuota = 10000;
+    const acuerdos = [
+      { vigente_desde: '2026-01-02', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
+    ];
+    const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota * 10, fecha: '2026-01-16' }];
+    const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-02', '2026-03-13');
+    compararMapaEstados(estados, {
+      '2026-01-02': Estado.DEUDA, // viernes 1, impago
+      '2026-01-05': Estado.SIN_OBLIGACION, // lunes: no exigible
+      '2026-01-09': Estado.DEUDA, // viernes 2, impago
+      '2026-01-16': Estado.PAGADO, // viernes 3, adelanto de 10 cuotas
+      '2026-01-23': Estado.GRACIA_ADELANTO, // viernes 4 (1er viernes de gracia)
+      '2026-02-27': Estado.GRACIA_ADELANTO, // viernes 9 (7º y último viernes de gracia)
+      '2026-03-06': Estado.GRACIA_ADELANTO, // viernes 10 (7º y último viernes de gracia, borde disponible==cuota)
+      '2026-03-13': Estado.DEUDA, // viernes 11: la gracia ya se agotó
+    });
+  });
+
+  // (3) SEMANAL con pago doble la semana previa -> viernes siguiente en GRACIA_ADELANTO.
+  await verificar('2.8 (3): SEMANAL con pago doble deja el viernes siguiente en GRACIA_ADELANTO', async () => {
+    const cuota = 10000;
+    const acuerdos = [
+      { vigente_desde: '2026-01-02', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
+    ];
+    const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota * 2, fecha: '2026-01-02' }];
+    const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-02', '2026-01-09');
+    compararMapaEstados(estados, {
+      '2026-01-02': Estado.PAGADO,
+      '2026-01-09': Estado.GRACIA_ADELANTO,
+    });
+  });
+
+  // (4) Cambio DIARIA -> SEMANAL a mitad de mes, arrastre continuo (no se reinicia).
+  await verificar('2.8 (4): cambio DIARIA->SEMANAL a mitad de mes mantiene el arrastre continuo', async () => {
+    const acuerdos = [
+      { vigente_desde: '2026-01-01', vigente_hasta: '2026-01-15', monto_cuota_centavos: 10000, frecuencia: 'DIARIA', dia_semana: null, dia_mes: null },
+      { vigente_desde: '2026-01-16', vigente_hasta: null, monto_cuota_centavos: 10000, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
+    ];
+    const movimientos = rango('2026-01-01', '2026-01-14').map((fecha) => ({ tipo: 'ABONO', monto_centavos: 10000, fecha }));
+    movimientos.push({ tipo: 'ABONO', monto_centavos: 30000, fecha: '2026-01-15' }); // último día DIARIA: adelanta 2 cuotas extra
+    const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-01', '2026-01-23');
+    compararMapaEstados(estados, {
+      '2026-01-01': Estado.PAGADO,
+      '2026-01-14': Estado.PAGADO,
+      '2026-01-15': Estado.PAGADO, // último día de la fase DIARIA
+      '2026-01-16': Estado.GRACIA_ADELANTO, // 1er viernes de la fase SEMANAL: usa el arrastre heredado (20000), no se reinicia
+      '2026-01-17': Estado.SIN_OBLIGACION, // sábado: ya no exigible (SEMANAL)
+      '2026-01-20': Estado.SIN_OBLIGACION, // martes: no exigible
+      '2026-01-22': Estado.SIN_OBLIGACION, // jueves: no exigible
+      '2026-01-23': Estado.GRACIA_ADELANTO, // 2do viernes: arrastre 20000 -> 10000 -> 0, todavía cubre
+    });
+  });
+
+  // (5) Migración v1->v2 (vía initDb): las mismas sentencias que usa initDb()
+  // preservan los datos existentes y dejan frecuencia='DIARIA' en acuerdos viejos.
+  await verificar('2.8 (5): MIGRACION_V1_A_V2 preserva datos y deja frecuencia=DIARIA', async () => {
+    const clienteId = uuidV7();
+    const acuerdoId = uuidV7();
+    const movimientoId = uuidV7();
+    const dbV1 = crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: '2026-01-01' });
+    try {
+      dbV1.run('BEGIN;');
+      for (const sql of MIGRACION_V1_A_V2) dbV1.run(sql);
+      dbV1.run("UPDATE meta SET valor = '2' WHERE clave = 'schema_version'");
+      dbV1.run('COMMIT;');
+
+      const stmtMeta = dbV1.prepare("SELECT valor FROM meta WHERE clave='schema_version'");
+      stmtMeta.step();
+      const versionFinal = stmtMeta.getAsObject().valor;
+      stmtMeta.free();
+      assert(versionFinal === SCHEMA_VERSION, `schema_version tras migrar debería ser ${SCHEMA_VERSION}, es ${versionFinal}`);
+
+      const stmtAcuerdo = dbV1.prepare('SELECT * FROM acuerdos WHERE id = ?');
+      stmtAcuerdo.bind([acuerdoId]);
+      stmtAcuerdo.step();
+      const acuerdoMigrado = stmtAcuerdo.getAsObject();
+      stmtAcuerdo.free();
+      assert(acuerdoMigrado.frecuencia === 'DIARIA', `frecuencia debería quedar DIARIA, es ${acuerdoMigrado.frecuencia}`);
+      assert(acuerdoMigrado.dia_semana === null, `dia_semana debería quedar NULL, es ${acuerdoMigrado.dia_semana}`);
+      assert(acuerdoMigrado.dia_mes === null, `dia_mes debería quedar NULL, es ${acuerdoMigrado.dia_mes}`);
+      assert(acuerdoMigrado.monto_cuota_centavos === 7500, 'el monto de la cuota no debería haber cambiado con la migración');
+
+      const stmtMov = dbV1.prepare('SELECT COUNT(*) AS c FROM movimientos WHERE id = ?');
+      stmtMov.bind([movimientoId]);
+      stmtMov.step();
+      assert(stmtMov.getAsObject().c === 1, 'el movimiento original debería seguir intacto tras la migración');
+      stmtMov.free();
+    } finally {
+      dbV1.close();
+    }
+  });
+
+  // (7) Hoy (resumenDia) solo lista clientes con cobro EXIGIBLE ese día.
+  await verificar('2.8 (7): resumenDia solo incluye clientes con cobro exigible hoy', async () => {
+    const hoyDow = diaDeSemana(hoy());
+    const dowDistinto = (hoyDow + 1) % 7;
+
+    const { cliente: clienteDiaria } = await crearClienteConAcuerdo({
+      nombre: 'Cliente Frecuencia Diaria Hoy Verify',
+      monto_cuota_centavos: 1000,
+      vigente_desde: hoy(),
+      frecuencia: 'DIARIA',
+    });
+    const { cliente: clienteSemanalHoy } = await crearClienteConAcuerdo({
+      nombre: 'Cliente Frecuencia Semanal Hoy Verify',
+      monto_cuota_centavos: 2000,
+      vigente_desde: hoy(),
+      frecuencia: 'SEMANAL',
+      dia_semana: hoyDow,
+    });
+    const { cliente: clienteSemanalNoHoy } = await crearClienteConAcuerdo({
+      nombre: 'Cliente Frecuencia Semanal NoHoy Verify',
+      monto_cuota_centavos: 3000,
+      vigente_desde: hoy(),
+      frecuencia: 'SEMANAL',
+      dia_semana: dowDistinto,
+    });
+
+    const resumen = await resumenDia(hoy());
+    const idsEnResumen = new Set(resumen.clientes.map((c) => c.cliente_id));
+
+    assert(idsEnResumen.has(clienteDiaria.id), 'DIARIA siempre es exigible: debería estar en resumenDia de hoy');
+    assert(idsEnResumen.has(clienteSemanalHoy.id), 'SEMANAL cuyo día coincide con hoy debería estar en resumenDia');
+    assert(!idsEnResumen.has(clienteSemanalNoHoy.id), 'SEMANAL cuyo día NO es hoy no debería aparecer en resumenDia');
+  });
+
+  // (6) Import de respaldo v1 funciona — DEBE IR AL FINAL: importarRespaldo
+  // reemplaza toda la DB activa, así que cualquier test posterior que
+  // dependa del seed/los clientes ya creados en esta corrida se rompería.
+  await verificar('2.8 (6): importarRespaldo() acepta un archivo v1 y lo migra en memoria', async () => {
+    const clienteId = uuidV7();
+    const acuerdoId = uuidV7();
+    const movimientoId = uuidV7();
+    const dbV1 = crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: '2026-01-01' });
+    const bytes = dbV1.export();
+    dbV1.close();
+    const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+
+    await importarRespaldo(arrayBuffer);
+
+    const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V1 Verify', tamanioPagina: 5 });
+    assert(clientes.length === 1, 'el cliente del respaldo v1 debería existir tras importar');
+    assert(clientes[0].id === clienteId, 'el id del cliente importado debería coincidir con el del archivo v1');
+
+    const acuerdosCliente = await listarAcuerdos(clienteId);
+    assert(acuerdosCliente.length === 1, 'el acuerdo del respaldo v1 debería existir tras importar');
+    assert(acuerdosCliente[0].frecuencia === 'DIARIA', `el acuerdo migrado debería tener frecuencia DIARIA, tiene ${acuerdosCliente[0].frecuencia}`);
+
+    const dbInterna = _dbInternaParaVerificacion();
+    const filaVersion = dbInterna.exec("SELECT valor FROM meta WHERE clave='schema_version'");
+    assert(
+      filaVersion.length && filaVersion[0].values[0][0] === SCHEMA_VERSION,
+      `schema_version tras importar debería ser ${SCHEMA_VERSION}`
     );
   });
 

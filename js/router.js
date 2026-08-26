@@ -10,7 +10,7 @@
 // técnico en un <details> colapsado — nunca una pantalla en blanco.
 
 import { estaSoloLectura } from './db.js';
-import { escapeHtml } from './ui/componentes.js';
+import { escapeHtml, Iconos } from './ui/componentes.js';
 import { renderPantallaHoy } from './ui/pantalla-hoy.js';
 import { renderPantallaCalendario } from './ui/pantalla-calendario.js';
 import { renderPantallaClientes } from './ui/pantalla-clientes.js';
@@ -50,11 +50,11 @@ let elContenido = null;
 let generacionActual = 0; // evita que una respuesta async vieja pise una navegación más nueva
 
 function iconoTab(tab) {
-  if (tab === 'hoy') return '📅';
-  if (tab === 'calendario') return '🗓️';
-  if (tab === 'clientes') return '👥';
-  if (tab === 'resumen') return '📊';
-  return '•';
+  if (tab === 'hoy') return Iconos.hoy();
+  if (tab === 'calendario') return Iconos.calendario();
+  if (tab === 'clientes') return Iconos.personas();
+  if (tab === 'resumen') return Iconos.resumen();
+  return Iconos.guion();
 }
 
 function armarShell() {
@@ -62,7 +62,7 @@ function armarShell() {
     <div id="aviso-solo-lectura" class="aviso-banner aviso-solo-lectura" hidden role="alert"></div>
     <div id="aviso-persist" class="aviso-banner aviso-discreto" hidden></div>
     <main id="pantalla-contenido" class="pantalla-contenido" aria-live="polite"></main>
-    <button type="button" id="fab-nuevo-movimiento" class="fab" hidden aria-label="Registrar movimiento">+</button>
+    <button type="button" id="fab-nuevo-movimiento" class="fab" hidden aria-label="Registrar movimiento">${Iconos.mas()}</button>
     <nav id="nav-inferior" class="nav-inferior" aria-label="Navegación principal">
       <a href="#/hoy" data-tab="hoy" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('hoy')}</span><span class="nav-texto">Hoy</span>

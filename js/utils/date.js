@@ -106,3 +106,37 @@ export function compararFechas(a, b) {
 export function ahoraIso() {
   return new Date().toISOString();
 }
+
+// ============================================================
+// Frecuencia de cobro configurable (2.8, gate del dueño 25-ago-2026)
+// ============================================================
+
+/**
+ * Día de la semana LOCAL de una fecha 'YYYY-MM-DD' (0=domingo..6=sábado,
+ * convención de Date.prototype.getDay()).
+ * @param {string} fechaIso
+ * @returns {number}
+ */
+export function diaDeSemana(fechaIso) {
+  return parsearFechaLocal(fechaIso).getDay();
+}
+
+/**
+ * Día del mes (1..31) de una fecha 'YYYY-MM-DD'.
+ * @param {string} fechaIso
+ * @returns {number}
+ */
+export function diaDelMes(fechaIso) {
+  return parsearFechaLocal(fechaIso).getDate();
+}
+
+/**
+ * Último día del mes calendario al que pertenece una fecha 'YYYY-MM-DD'
+ * (28, 29, 30 o 31). Usado para el clamp de acuerdos MENSUAL en meses cortos.
+ * @param {string} fechaIso
+ * @returns {number}
+ */
+export function ultimoDiaDelMes(fechaIso) {
+  const d = parsearFechaLocal(fechaIso);
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+}

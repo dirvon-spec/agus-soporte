@@ -11,16 +11,20 @@ import { hoy, sumarDias } from '../utils/date.js';
 import { parsearAPesos, formatearCentavos } from '../utils/money.js';
 import {
   microcopy, estadoVacio, badgeEstado, leyendaEstados, montoOGuion, claseSaldo,
-  formatearFechaCorta, formatearMesAnio, escapeHtml, paginadorHtml,
-  activarPaginador, mostrarToast, errorCampo, errorGeneral,
+  formatearFechaCorta, formatearMesAnio, escapeHtml, paginadorHtml, textoFrecuencia,
+  campoFrecuenciaHtml, activarCampoFrecuencia, leerCampoFrecuencia,
+  activarPaginador, mostrarToast, errorCampo, errorGeneral, Iconos,
 } from './componentes.js';
 
 const MICROCOPY_DETALLE = `
   <p>Acá ves todo sobre este cliente: su saldo actual, su calendario de
   cumplimiento de cuota, y el historial completo de cargos, abonos y ajustes.</p>
-  <p>Tocá un día del calendario para ver qué pasó ese día. Si un movimiento
-  quedó mal cargado, no se edita ni se borra: se corrige con un "ajuste"
-  desde el historial, que queda registrado junto al original.</p>
+  <p>La cuota puede ser diaria, semanal (un día fijo de la semana) o mensual
+  (un día fijo del mes); el calendario solo pinta los días en que corresponde
+  cobrar, el resto queda neutro. Tocá un día del calendario para ver qué pasó
+  ese día. Si un movimiento quedó mal cargado, no se edita ni se borra: se
+  corrige con un "ajuste" desde el historial, que queda registrado junto al
+  original.</p>
 `;
 
 const AVISO_ALCANCE_CALENDARIO =
@@ -71,6 +75,9 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
   let valoresRenegociar = {};
   let ajusteMovimientoId = null;
   let erroresAjuste = {};
+  // Compartido entre renderTodo() y wireEvents(): el acuerdo vigente hoy, para
+  // precargar su frecuencia al abrir "Renegociar cuota".
+  let acuerdoVigenteHoy = null;
 
   const soloLectura = estaSoloLectura();
 
@@ -91,7 +98,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     const saldoParaMostrar = sinMovimientos ? null : saldoActual;
 
     const acuerdos = await listarAcuerdos(id); // asc, incluye cerrados
-    const acuerdoVigenteHoy = acuerdos.find((a) => a.vigente_desde <= hoy() && (!a.vigente_hasta || a.vigente_hasta >= hoy())) || null;
+    acuerdoVigenteHoy = acuerdos.find((a) => a.vigente_desde <= hoy() && (!a.vigente_hasta || a.vigente_hasta >= hoy())) || null;
 
     let enlaceWhatsApp = null;
     let motivoSinWhatsApp = null;
@@ -126,7 +133,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
             <span class="etiqueta-saldo">Saldo actual</span>
             <span class="monto-grande ${sinMovimientos ? '' : claseSaldo(saldoActual)}">${montoOGuion(saldoParaMostrar)}</span>
           </div>
-          <p class="encabezado-cliente-cuota">Cuota vigente: ${acuerdoVigenteHoy ? montoOGuion(acuerdoVigenteHoy.monto_cuota_centavos) : '—'}</p>
+          <p class="encabezado-cliente-cuota">Cuota vigente: ${acuerdoVigenteHoy ? `${montoOGuion(acuerdoVigenteHoy.monto_cuota_centavos)} ${escapeHtml(textoFrecuencia(acuerdoVigenteHoy))}` : '—'}</p>
           ${cliente.notas ? `
             <div class="encabezado-cliente-notas">
               <span class="etiqueta-saldo">Nota</span>
@@ -136,14 +143,14 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
 
         <div class="acciones-cliente">
           ${enlaceWhatsApp
-            ? `<a class="btn btn-secundario" href="${escapeHtml(enlaceWhatsApp)}" target="_blank" rel="noopener">Recordatorio WhatsApp</a>`
-            : `<button type="button" class="btn btn-secundario" disabled title="${escapeHtml(motivoSinWhatsApp || 'Sin teléfono')}">Recordatorio WhatsApp</button>`
+            ? `<a class="btn btn-secundario" href="${escapeHtml(enlaceWhatsApp)}" target="_blank" rel="noopener">${Iconos.mensaje()} Recordatorio WhatsApp</a>`
+            : `<button type="button" class="btn btn-secundario" disabled title="${escapeHtml(motivoSinWhatsApp || 'Sin teléfono')}">${Iconos.mensaje()} Recordatorio WhatsApp</button>`
           }
-          <a class="btn btn-secundario" href="#/clientes/${encodeURIComponent(id)}/imprimir" target="_blank" rel="noopener">Estado de cuenta</a>
+          <a class="btn btn-secundario" href="#/clientes/${encodeURIComponent(id)}/imprimir" target="_blank" rel="noopener">${Iconos.documento()} Estado de cuenta</a>
           <button type="button" class="btn btn-secundario" id="btn-toggle-renegociar" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>
-            ${renegociarAbierto ? 'Cancelar renegociación' : 'Renegociar cuota'}
+            ${Iconos.renegociar()} ${renegociarAbierto ? 'Cancelar renegociación' : 'Renegociar cuota'}
           </button>
-          <a class="btn btn-primario" href="#/nuevo-movimiento/${encodeURIComponent(id)}">Registrar movimiento</a>
+          <a class="btn btn-primario" href="#/nuevo-movimiento/${encodeURIComponent(id)}">${Iconos.mas()} Registrar movimiento</a>
         </div>
 
         <div id="panel-renegociar">${renegociarAbierto ? renderFormularioRenegociar() : ''}</div>
@@ -151,9 +158,9 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
         <h2 class="titulo-seccion">Calendario</h2>
         <div class="calendario-wrap">
           <div class="calendario-nav">
-            <button type="button" class="btn-icono" id="btn-mes-anterior" aria-label="Mes anterior">&larr;</button>
+            <button type="button" class="btn-icono" id="btn-mes-anterior" aria-label="Mes anterior">${Iconos.chevronIzquierda()}</button>
             <span class="calendario-mes-titulo">${escapeHtml(formatearMesAnio(mesCalendario))}</span>
-            <button type="button" class="btn-icono" id="btn-mes-siguiente" aria-label="Mes siguiente">&rarr;</button>
+            <button type="button" class="btn-icono" id="btn-mes-siguiente" aria-label="Mes siguiente">${Iconos.chevronDerecha()}</button>
           </div>
           <div class="calendario-grilla" role="grid">
             ${DIAS_SEMANA.map((d) => `<div class="calendario-encabezado-dia">${d}</div>`).join('')}
@@ -166,7 +173,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
               return `<button type="button" class="calendario-celda calendario-dia estado-fondo-${estadoDia.toLowerCase().replace(/_/g, '-')} ${diaSeleccionado === fechaDia ? 'calendario-dia-seleccionado' : ''}"
                 data-fecha="${fechaDia}" aria-label="${fechaDia}: ${escapeHtml(estadoDia)}">
                 <span class="calendario-dia-numero">${numeroDia}</span>
-                ${cambioCuota !== undefined ? `<span class="marcador-cambio-cuota" title="Nueva cuota desde este día: ${escapeHtml(formatearCentavos(cambioCuota))}">●</span>` : ''}
+                ${cambioCuota !== undefined ? `<span class="marcador-cambio-cuota" title="Nueva cuota desde este día: ${escapeHtml(formatearCentavos(cambioCuota))}">${Iconos.punto()}</span>` : ''}
               </button>`;
             }).join('')}
           </div>
@@ -234,12 +241,13 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
           <summary>Historial de acuerdos (cuotas históricas)</summary>
           ${acuerdos.length === 0 ? estadoVacio('Sin acuerdos registrados.') : `
             <table class="tabla">
-              <thead><tr><th>Vigente desde</th><th>Vigente hasta</th><th>Cuota diaria</th></tr></thead>
+              <thead><tr><th>Vigente desde</th><th>Vigente hasta</th><th>Cuota</th><th>Frecuencia</th></tr></thead>
               <tbody>
                 ${acuerdos.map((a) => `<tr>
                   <td>${escapeHtml(formatearFechaCorta(a.vigente_desde))}</td>
                   <td>${a.vigente_hasta ? escapeHtml(formatearFechaCorta(a.vigente_hasta)) : 'Actual'}</td>
                   <td>${montoOGuion(a.monto_cuota_centavos)}</td>
+                  <td>${escapeHtml(textoFrecuencia(a))}</td>
                 </tr>`).join('')}
               </tbody>
             </table>`}
@@ -256,10 +264,11 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
         <h3>Renegociar cuota</h3>
         <form id="form-renegociar" class="formulario" novalidate>
           <div class="campo">
-            <label for="campo-nueva-cuota">Nueva cuota diaria</label>
+            <label for="campo-nueva-cuota">Nueva cuota</label>
             <input id="campo-nueva-cuota" name="cuota" type="text" inputmode="decimal" value="${escapeHtml(valoresRenegociar.cuota || '')}" required />
             ${errorCampo(erroresRenegociar.monto_cuota_centavos)}
           </div>
+          ${campoFrecuenciaHtml('renegociar', valoresRenegociar, erroresRenegociar)}
           <div class="campo">
             <label for="campo-vigencia-nueva">Vigente desde</label>
             <input id="campo-vigencia-nueva" name="vigente_desde" type="date" max="${hoy()}" value="${escapeHtml(valoresRenegociar.vigente_desde || hoy())}" required />
@@ -346,27 +355,44 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     contenedor.querySelector('#btn-toggle-renegociar').addEventListener('click', () => {
       renegociarAbierto = !renegociarAbierto;
       erroresRenegociar = {};
-      valoresRenegociar = {};
+      // Precarga la frecuencia del acuerdo vigente (§2.8): al abrir el
+      // formulario, no al cerrarlo (para no perder lo tipeado si el usuario
+      // solo está corrigiendo un error de validación).
+      valoresRenegociar = renegociarAbierto && acuerdoVigenteHoy
+        ? { frecuencia: acuerdoVigenteHoy.frecuencia, dia_semana: acuerdoVigenteHoy.dia_semana, dia_mes: acuerdoVigenteHoy.dia_mes }
+        : {};
       renderTodo();
     });
 
     const formRenegociar = contenedor.querySelector('#form-renegociar');
     if (formRenegociar) {
+      activarCampoFrecuencia(formRenegociar, 'renegociar');
       formRenegociar.addEventListener('submit', async (e) => {
         e.preventDefault();
         const datos = new FormData(formRenegociar);
-        valoresRenegociar = { cuota: datos.get('cuota') || '', vigente_desde: datos.get('vigente_desde') || hoy() };
+        valoresRenegociar = {
+          cuota: datos.get('cuota') || '',
+          vigente_desde: datos.get('vigente_desde') || hoy(),
+          ...leerCampoFrecuencia(datos),
+        };
         erroresRenegociar = {};
         let montoCuotaCentavos = null;
         try {
           montoCuotaCentavos = parsearAPesos(valoresRenegociar.cuota.trim());
-          if (montoCuotaCentavos <= 0) erroresRenegociar.monto_cuota_centavos = 'La cuota diaria debe ser mayor a $0.00.';
+          if (montoCuotaCentavos <= 0) erroresRenegociar.monto_cuota_centavos = 'La cuota debe ser mayor a $0.00.';
         } catch (err) {
           erroresRenegociar.monto_cuota_centavos = err.message;
         }
         if (Object.keys(erroresRenegociar).length > 0) { renderTodo(); return; }
         try {
-          await crearAcuerdo({ cliente_id: id, monto_cuota_centavos: montoCuotaCentavos, vigente_desde: valoresRenegociar.vigente_desde });
+          await crearAcuerdo({
+            cliente_id: id,
+            monto_cuota_centavos: montoCuotaCentavos,
+            vigente_desde: valoresRenegociar.vigente_desde,
+            frecuencia: valoresRenegociar.frecuencia,
+            dia_semana: valoresRenegociar.dia_semana,
+            dia_mes: valoresRenegociar.dia_mes,
+          });
           renegociarAbierto = false;
           erroresRenegociar = {};
           valoresRenegociar = {};

@@ -5,7 +5,7 @@ import { resumenDia } from '../db.js';
 import { hoy, sumarDias } from '../utils/date.js';
 import {
   microcopy, estadoVacio, badgeEstado, montoOGuion, claseSaldo,
-  formatearFechaLegible, escapeHtml,
+  formatearFechaLegible, escapeHtml, Iconos,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -46,14 +46,14 @@ export async function renderPantallaHoy(contenedor, { fecha } = {}) {
       ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
 
       <header class="encabezado-hoy">
-        <button type="button" class="btn-icono" data-accion="dia-anterior" aria-label="Día anterior">&larr;</button>
+        <button type="button" class="btn-icono" data-accion="dia-anterior" aria-label="Día anterior">${Iconos.chevronIzquierda()}</button>
         <div class="encabezado-hoy-titulo">
           <h1>${esHoy ? 'Hoy' : 'Viendo'}</h1>
           <p class="encabezado-hoy-fecha">${escapeHtml(formatearFechaLegible(fechaObjetivo))}</p>
           ${!esHoy ? '<button type="button" class="btn-link" data-accion="volver-hoy">Volver a hoy</button>' : ''}
         </div>
         <button type="button" class="btn-icono" data-accion="dia-siguiente" aria-label="Día siguiente"
-          ${esHoy ? 'disabled title="Ya estás viendo hoy: esta pantalla es para revisar días pasados."' : ''}>&rarr;</button>
+          ${esHoy ? 'disabled title="Ya estás viendo hoy: esta pantalla es para revisar días pasados."' : ''}>${Iconos.chevronDerecha()}</button>
       </header>
 
       <div class="tarjetas-resumen">

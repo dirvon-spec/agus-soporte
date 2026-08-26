@@ -4,6 +4,8 @@
    Sin frameworks CSS. Diseño sobrio y profesional. */
 
 :root {
+  color-scheme: light dark;
+
   --color-fondo: #ffffff;
   --color-fondo-secundario: #f6f8fa;
   --color-borde: #d0d7de;
@@ -20,16 +22,21 @@
   --color-exito-bg: #dafbe1;
 
   /* Colores semánticos del calendario (2.1 / 2.5): los 5 estados de
-     calcularEstadosCalendario (calendar.js). */
-  --color-estado-pagado: #1a7f37;
+     calcularEstadosCalendario (calendar.js). Ajustados (pase visual, gate
+     25-ago-2026) tras medir contraste real texto/fondo en tema claro: los
+     valores originales de gracia-adelanto (3.29:1) y sin-obligacion (4.27:1)
+     no llegaban al mínimo WCAG AA de 4.5:1 para texto normal; pagado/parcial/
+     deuda pasaban por muy poco margen (4.5x:1). Verificado con la fórmula de
+     luminancia relativa de WCAG contra su propio *-bg; todos ahora ≥5.6:1. */
+  --color-estado-pagado: #116b2c;
   --color-estado-pagado-bg: #dafbe1;
-  --color-estado-gracia-adelanto: #2f81f7;
+  --color-estado-gracia-adelanto: #0757ba;
   --color-estado-gracia-adelanto-bg: #ddf4ff;
-  --color-estado-parcial: #9a6700;
+  --color-estado-parcial: #7d5300;
   --color-estado-parcial-bg: #fff8c5;
-  --color-estado-deuda: #cf222e;
+  --color-estado-deuda: #b91c26;
   --color-estado-deuda-bg: #ffebe9;
-  --color-estado-sin-obligacion: #6e7781;
+  --color-estado-sin-obligacion: #57606a;
   --color-estado-sin-obligacion-bg: #f6f8fa;
 
   --espaciado-xs: 4px;
@@ -46,6 +53,46 @@
 
   --sombra: 0 1px 3px rgba(27, 31, 36, 0.12);
   --sombra-elevada: 0 4px 12px rgba(27, 31, 36, 0.18);
+}
+
+/* ============================================================
+   Tema oscuro (prefers-color-scheme): el dueño prueba en claro, pero la app
+   corre en teléfonos con "oscuro" como preferencia del sistema — mismos
+   nombres de variable, valores redefinidos, contraste verificado para los
+   5 colores semánticos del calendario en ambos temas. Nada de esto toca
+   .toast a propósito (queda fijo en ambos temas, ver su regla).
+   ============================================================ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-fondo: #161b22;
+    --color-fondo-secundario: #0d1117;
+    --color-borde: #30363d;
+    --color-texto: #e6edf3;
+    --color-texto-secundario: #9198a1;
+
+    --color-primario: #4c9aff;
+    --color-primario-oscuro: #79bfff;
+    --color-primario-texto: #051222;
+
+    --color-error: #ff7b72;
+    --color-error-bg: #3c1618;
+    --color-exito: #56d364;
+    --color-exito-bg: #0f2e1b;
+
+    --color-estado-pagado: #56d364;
+    --color-estado-pagado-bg: #10231a;
+    --color-estado-gracia-adelanto: #79c0ff;
+    --color-estado-gracia-adelanto-bg: #0d2540;
+    --color-estado-parcial: #e3b341;
+    --color-estado-parcial-bg: #2d2200;
+    --color-estado-deuda: #ff7b72;
+    --color-estado-deuda-bg: #3c1618;
+    --color-estado-sin-obligacion: #9198a1;
+    --color-estado-sin-obligacion-bg: #21262d;
+
+    --sombra: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --sombra-elevada: 0 4px 14px rgba(0, 0, 0, 0.65);
+  }
 }
 
 * {
@@ -88,6 +135,20 @@ a {
 
 button {
   font: inherit;
+}
+
+/* ============================================================
+   Iconos SVG inline (componentes.js: Iconos.*)
+   ============================================================ */
+
+.icono-svg {
+  display: inline-block;
+  vertical-align: -0.15em;
+  flex-shrink: 0;
+}
+
+.badge-estado-icono {
+  display: inline-flex;
 }
 
 /* ============================================================
@@ -338,7 +399,10 @@ button {
 }
 
 .toast {
-  background: var(--color-texto);
+  /* Deliberadamente fijo (no ligado a --color-texto): el toast es una
+     "snackbar" oscura en ambos temas, no una tarjeta que deba invertirse
+     con el modo oscuro. */
+  background: #1a1a1a;
   color: #fff;
   padding: var(--espaciado-sm) var(--espaciado-md);
   border-radius: var(--radio-borde-chico);
@@ -457,6 +521,7 @@ button {
 .campo input[type="date"],
 .campo input[type="month"],
 .campo input[type="tel"],
+.campo input[type="number"],
 .campo select,
 .campo textarea {
   padding: 10px;
@@ -840,16 +905,19 @@ fieldset.campo {
 }
 
 .calendario-dia-numero {
-  font-size: 0.78rem;
+  font-size: 0.92rem;
   font-weight: 600;
   line-height: 1;
 }
 
 /* Segunda línea chica dentro de la casilla: monto abonado (modo persona) o
    fracción cumplieron/esperados (modo todas las personas). Reutilizado por
-   pantalla-calendario.js en ambos modos. */
+   pantalla-calendario.js en ambos modos. Tamaño y contraste subidos a pedido
+   del dueño (feedback en teléfono real, "casi no se ven") — sigue en 44px de
+   celda (ver .calendario-celda) sin desbordar. */
 .calendario-dia-dato {
-  font-size: 0.52rem;
+  font-size: 0.74rem;
+  font-weight: 600;
   line-height: 1.1;
   margin-top: 1px;
   white-space: nowrap;
@@ -1009,7 +1077,10 @@ fieldset.campo {
   }
 
   body {
+    /* Fuerza claro para imprimir aunque el sistema esté en modo oscuro
+       (el papel es blanco de cualquier manera). */
     background: #fff;
+    color: #1a1a1a;
   }
 
   .pantalla-contenido {

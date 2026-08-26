@@ -181,9 +181,9 @@ verificar('calendar.js — AJUSTE reduce el crédito efectivo del día (4.2, cas
 // ============================================================
 // seed.js — generarSeed() es pura, no toca DB
 // ============================================================
-verificar('seed.js: generarSeed() produce entre 8 y 10 clientes', () => {
+verificar('seed.js: generarSeed() produce entre 10 y 12 clientes', () => {
   const datos = generarSeed();
-  assert(datos.clientes.length >= 8 && datos.clientes.length <= 10, `clientes=${datos.clientes.length}`);
+  assert(datos.clientes.length >= 10 && datos.clientes.length <= 12, `clientes=${datos.clientes.length}`);
 });
 verificar('seed.js: generarSeed() incluye al menos un AJUSTE', () => {
   const datos = generarSeed();
@@ -197,6 +197,77 @@ verificar('seed.js: generarSeed() incluye un cliente con cambio de cuota (2 acue
   const datos = generarSeed();
   const conDosAcuerdos = datos.clientes.find((c) => datos.acuerdos.filter((a) => a.cliente_id === c.id).length === 2);
   assert(!!conDosAcuerdos);
+});
+
+// ============================================================
+// calendar.js — §2.8 (gate del dueño 25-ago-2026): frecuencia de cobro
+// configurable (DIARIA/SEMANAL/MENSUAL). Mismos 4 casos puros que corren
+// también en el navegador (dev-verify.js); los que dependen de sql.js/DB
+// (migración, importarRespaldo, resumenDia) solo corren ahí.
+// ============================================================
+
+verificar('2.8 (1): MENSUAL día 31 en abril (30 días) es exigible el día 30', () => {
+  const cuota = 10000;
+  const acuerdos = [
+    { vigente_desde: '2026-04-01', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'MENSUAL', dia_mes: 31, dia_semana: null },
+  ];
+  const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota, fecha: '2026-04-30' }];
+  const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-04-01', '2026-04-30');
+  compararMapaEstados(estados, {
+    '2026-04-01': Estado.SIN_OBLIGACION,
+    '2026-04-15': Estado.SIN_OBLIGACION,
+    '2026-04-29': Estado.SIN_OBLIGACION,
+    '2026-04-30': Estado.PAGADO,
+  });
+});
+
+verificar('2.8 (2): SEMANAL con 2 viernes impagos acumula deuda de exactamente 2 cuotas', () => {
+  const cuota = 10000;
+  const acuerdos = [
+    { vigente_desde: '2026-01-02', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
+  ];
+  const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota * 10, fecha: '2026-01-16' }];
+  const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-02', '2026-03-13');
+  compararMapaEstados(estados, {
+    '2026-01-02': Estado.DEUDA,
+    '2026-01-05': Estado.SIN_OBLIGACION,
+    '2026-01-09': Estado.DEUDA,
+    '2026-01-16': Estado.PAGADO,
+    '2026-01-23': Estado.GRACIA_ADELANTO,
+    '2026-02-27': Estado.GRACIA_ADELANTO,
+    '2026-03-06': Estado.GRACIA_ADELANTO,
+    '2026-03-13': Estado.DEUDA,
+  });
+});
+
+verificar('2.8 (3): SEMANAL con pago doble deja el viernes siguiente en GRACIA_ADELANTO', () => {
+  const cuota = 10000;
+  const acuerdos = [
+    { vigente_desde: '2026-01-02', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
+  ];
+  const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota * 2, fecha: '2026-01-02' }];
+  const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-02', '2026-01-09');
+  compararMapaEstados(estados, { '2026-01-02': Estado.PAGADO, '2026-01-09': Estado.GRACIA_ADELANTO });
+});
+
+verificar('2.8 (4): cambio DIARIA->SEMANAL a mitad de mes mantiene el arrastre continuo', () => {
+  const acuerdos = [
+    { vigente_desde: '2026-01-01', vigente_hasta: '2026-01-15', monto_cuota_centavos: 10000, frecuencia: 'DIARIA', dia_semana: null, dia_mes: null },
+    { vigente_desde: '2026-01-16', vigente_hasta: null, monto_cuota_centavos: 10000, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
+  ];
+  const movimientos = rango('2026-01-01', '2026-01-14').map((fecha) => ({ tipo: 'ABONO', monto_centavos: 10000, fecha }));
+  movimientos.push({ tipo: 'ABONO', monto_centavos: 30000, fecha: '2026-01-15' });
+  const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-01', '2026-01-23');
+  compararMapaEstados(estados, {
+    '2026-01-01': Estado.PAGADO,
+    '2026-01-14': Estado.PAGADO,
+    '2026-01-15': Estado.PAGADO,
+    '2026-01-16': Estado.GRACIA_ADELANTO,
+    '2026-01-17': Estado.SIN_OBLIGACION,
+    '2026-01-20': Estado.SIN_OBLIGACION,
+    '2026-01-22': Estado.SIN_OBLIGACION,
+    '2026-01-23': Estado.GRACIA_ADELANTO,
+  });
 });
 
 // ============================================================

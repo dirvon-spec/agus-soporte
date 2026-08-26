@@ -3,16 +3,66 @@
 // aislar la capa y facilitar el reemplazo futuro por un driver nativo de Capacitor.
 // Ningún error se traga: todo se relanza con {code, message} vía crearError().
 
-import { DDL, SCHEMA_VERSION } from './schema.js';
+import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2 } from './schema.js';
 import { generarSeed } from './seed.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { crearError } from './utils/errors.js';
 import { uuidV7 } from './utils/uuid.js';
-import { hoy, ahoraIso, esFechaIsoValida, esFutura, sumarDias, rango } from './utils/date.js';
+import { hoy, ahoraIso, esFechaIsoValida, esFutura, sumarDias, rango, diaDeSemana, diaDelMes, ultimoDiaDelMes } from './utils/date.js';
 import { formatearCentavos } from './utils/money.js';
 import { construirEnlaceWhatsApp } from './utils/whatsapp.js';
 
 const SERVICIOS_VALIDOS = ['AGUA', 'LUZ', 'INTERNET', 'GAS', 'CABLE', 'OTRO'];
+const FRECUENCIAS_VALIDAS = ['DIARIA', 'SEMANAL', 'MENSUAL'];
+
+/**
+ * §2.8: valida {frecuencia?, dia_semana?, dia_mes?} de un acuerdo y devuelve
+ * la terna normalizada (default DIARIA, con dia_semana/dia_mes en NULL salvo
+ * en el campo que corresponda a la frecuencia elegida). Usado por
+ * crearClienteConAcuerdo y crearAcuerdo — una sola fuente de verdad para la
+ * coherencia que el CHECK de la tabla ya exige a nivel DB.
+ * @param {{frecuencia?:string, dia_semana?:?number, dia_mes?:?number}} datos
+ * @returns {{frecuencia:string, dia_semana:?number, dia_mes:?number}}
+ */
+function validarFrecuencia({ frecuencia, dia_semana, dia_mes }) {
+  const frecuenciaFinal = frecuencia === undefined || frecuencia === null ? 'DIARIA' : frecuencia;
+  if (!FRECUENCIAS_VALIDAS.includes(frecuenciaFinal)) {
+    throw crearError('VALIDATION_ERROR', `La frecuencia debe ser una de: ${FRECUENCIAS_VALIDAS.join(', ')}.`, { campo: 'frecuencia' });
+  }
+
+  if (frecuenciaFinal === 'DIARIA') {
+    if (dia_semana !== undefined && dia_semana !== null) {
+      throw crearError('VALIDATION_ERROR', 'La frecuencia DIARIA no admite día de la semana.', { campo: 'dia_semana' });
+    }
+    if (dia_mes !== undefined && dia_mes !== null) {
+      throw crearError('VALIDATION_ERROR', 'La frecuencia DIARIA no admite día del mes.', { campo: 'dia_mes' });
+    }
+    return { frecuencia: 'DIARIA', dia_semana: null, dia_mes: null };
+  }
+
+  if (frecuenciaFinal === 'SEMANAL') {
+    if (dia_mes !== undefined && dia_mes !== null) {
+      throw crearError('VALIDATION_ERROR', 'La frecuencia SEMANAL no admite día del mes.', { campo: 'dia_mes' });
+    }
+    if (!Number.isInteger(dia_semana) || dia_semana < 0 || dia_semana > 6) {
+      throw crearError(
+        'VALIDATION_ERROR',
+        'La frecuencia SEMANAL requiere un día de la semana entre 0 (domingo) y 6 (sábado).',
+        { campo: 'dia_semana' }
+      );
+    }
+    return { frecuencia: 'SEMANAL', dia_semana, dia_mes: null };
+  }
+
+  // MENSUAL
+  if (dia_semana !== undefined && dia_semana !== null) {
+    throw crearError('VALIDATION_ERROR', 'La frecuencia MENSUAL no admite día de la semana.', { campo: 'dia_semana' });
+  }
+  if (!Number.isInteger(dia_mes) || dia_mes < 1 || dia_mes > 31) {
+    throw crearError('VALIDATION_ERROR', 'La frecuencia MENSUAL requiere un día del mes entre 1 y 31.', { campo: 'dia_mes' });
+  }
+  return { frecuencia: 'MENSUAL', dia_semana: null, dia_mes };
+}
 
 // A-002 (auditoría independiente): ?verify=1 usa una base de IndexedDB y un
 // lock de instancia SEPARADOS de los de la demo — la demo nunca se toca en
@@ -172,6 +222,25 @@ function buscarAcuerdoVigenteEnLista(acuerdos, fecha) {
 }
 
 /**
+ * §2.8: réplica local (deliberada, no se importa de calendar.js) de la misma
+ * regla de "día exigible" que usa calendar.js — DIARIA exige todos los días,
+ * SEMANAL solo su dia_semana, MENSUAL solo su dia_mes (clamp a fin de mes).
+ * @param {{frecuencia?:string, dia_semana?:?number, dia_mes?:?number}} acuerdo
+ * @param {string} fecha
+ * @returns {boolean}
+ */
+function esDiaExigible(acuerdo, fecha) {
+  const frecuencia = acuerdo.frecuencia || 'DIARIA';
+  if (frecuencia === 'DIARIA') return true;
+  if (frecuencia === 'SEMANAL') return diaDeSemana(fecha) === acuerdo.dia_semana;
+  if (frecuencia === 'MENSUAL') {
+    const diaExigibleClamp = Math.min(acuerdo.dia_mes, ultimoDiaDelMes(fecha));
+    return diaDelMes(fecha) === diaExigibleClamp;
+  }
+  return true;
+}
+
+/**
  * arrastreInicial de CUMPLIMIENTO DE CUOTA (2.5), NO el saldo del ledger (2.2).
  *
  * FIX (Builder B, verificación en vivo — corregido en PLAN-MVP.md §2.5, gate
@@ -213,6 +282,12 @@ function calcularArrastreCumplimiento(acuerdos, movimientos, hastaFecha) {
     const acuerdoVigente = buscarAcuerdoVigenteEnLista(acuerdos, fecha);
     if (!acuerdoVigente) continue; // SIN_OBLIGACION: no consume ni genera arrastre
     const creditoDelDia = creditoPorFecha.get(fecha) || 0;
+    if (!esDiaExigible(acuerdoVigente, fecha)) {
+      // §2.8: día no exigible por frecuencia — el crédito se banca igual
+      // (abonos de cualquier día suman crédito) sin restar cuota.
+      arrastre += creditoDelDia;
+      continue;
+    }
     arrastre = arrastre + creditoDelDia - acuerdoVigente.monto_cuota_centavos;
   }
   return arrastre;
@@ -375,9 +450,20 @@ async function insertarSeedEnTransaccion() {
     }
     for (const a of datos.acuerdos) {
       db.run(
-        `INSERT INTO acuerdos (id, cliente_id, monto_cuota_centavos, vigente_desde, vigente_hasta, created_at, updated_at, deleted_at)
-         VALUES (?,?,?,?,?,?,?,NULL)`,
-        [a.id, a.cliente_id, a.monto_cuota_centavos, a.vigente_desde, a.vigente_hasta ?? null, a.created_at, a.updated_at]
+        `INSERT INTO acuerdos (id, cliente_id, monto_cuota_centavos, frecuencia, dia_semana, dia_mes, vigente_desde, vigente_hasta, created_at, updated_at, deleted_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
+        [
+          a.id,
+          a.cliente_id,
+          a.monto_cuota_centavos,
+          a.frecuencia ?? 'DIARIA',
+          a.dia_semana ?? null,
+          a.dia_mes ?? null,
+          a.vigente_desde,
+          a.vigente_hasta ?? null,
+          a.created_at,
+          a.updated_at,
+        ]
       );
     }
     for (const m of datos.movimientos) {
@@ -408,6 +494,34 @@ async function insertarSeedEnTransaccion() {
 }
 
 /** Re-sembrado automático anti-congelamiento (mitigación D1), SOLO en modo_demo=1. */
+/**
+ * §2.8 (gate del dueño 25-ago-2026): si la base local existente quedó en
+ * schema_version=1, aplica MIGRACION_V1_A_V2 (ALTER TABLE, sin tocar datos) y
+ * actualiza meta a la versión vigente. No-op si ya está al día.
+ */
+async function migrarEsquemaSiHaceFalta() {
+  const version = obtenerMetaInterno('schema_version');
+  if (version === SCHEMA_VERSION) return;
+  if (version !== '1') {
+    throw crearError(
+      'DB_ERROR',
+      `La base local tiene un schema_version desconocido ("${version}") y no se puede migrar automáticamente.`
+    );
+  }
+
+  ejecutarSQL('BEGIN;');
+  try {
+    for (const sql of MIGRACION_V1_A_V2) db.run(sql);
+    setMetaInterno('schema_version', SCHEMA_VERSION);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw crearError('DB_ERROR', 'No se pudo migrar el esquema local (v1 -> v2, frecuencia de cobro).', { original: String(e) });
+  }
+  await persistirInmediato();
+  console.info(`[db] Migración de esquema aplicada: v1 -> v${SCHEMA_VERSION} (frecuencia de cobro configurable). Datos preservados.`);
+}
+
 async function revisarReSembradoAntiCongelamiento() {
   const modoDemo = obtenerMetaInterno('modo_demo');
   if (modoDemo !== '1') return;
@@ -499,6 +613,7 @@ export async function initDb() {
     await insertarSeedEnTransaccion();
     await persistirInmediato();
   } else if (!soloLectura) {
+    await migrarEsquemaSiHaceFalta();
     await revisarReSembradoAntiCongelamiento();
   }
   // persistirInmediato()/revisarReSembradoAntiCongelamiento() exportan la DB (db.export()),
@@ -537,7 +652,8 @@ export async function exportarRespaldo() {
 }
 
 /**
- * Valida ANTES de reemplazar nada: schema_version exacta + cero huérfanos.
+ * Valida ANTES de reemplazar nada: schema_version soportada (v1 o v2; v1 se
+ * migra en memoria antes de aceptar — §2.8) + cero huérfanos.
  * @param {ArrayBuffer} arrayBuffer
  * @returns {Promise<void>}
  */
@@ -553,8 +669,18 @@ export async function importarRespaldo(arrayBuffer) {
 
   try {
     const filaVersion = unaFila("SELECT valor FROM meta WHERE clave = 'schema_version'", [], dbCandidata);
-    if (!filaVersion || filaVersion.valor !== SCHEMA_VERSION) {
-      throw new Error('schema_version no coincide');
+    if (!filaVersion) {
+      throw new Error('sin schema_version');
+    }
+    if (filaVersion.valor === '1') {
+      // §2.8: un respaldo v1 es válido, pero se migra en memoria (mismas
+      // sentencias que initDb()) ANTES de correr la validación de huérfanos.
+      dbCandidata.run('BEGIN;');
+      for (const sql of MIGRACION_V1_A_V2) dbCandidata.run(sql);
+      dbCandidata.run("UPDATE meta SET valor = ? WHERE clave = 'schema_version'", [SCHEMA_VERSION]);
+      dbCandidata.run('COMMIT;');
+    } else if (filaVersion.valor !== SCHEMA_VERSION) {
+      throw new Error(`schema_version "${filaVersion.valor}" no soportada`);
     }
     const huerfanosMov = unaFila(
       'SELECT COUNT(*) AS c FROM movimientos WHERE cliente_id NOT IN (SELECT id FROM clientes)',
@@ -586,10 +712,10 @@ export async function importarRespaldo(arrayBuffer) {
 // ============================================================
 
 /**
- * @param {{nombre:string, telefono?:string, notas?:string, monto_cuota_centavos:number, vigente_desde:string}} datos
+ * @param {{nombre:string, telefono?:string, notas?:string, monto_cuota_centavos:number, vigente_desde:string, frecuencia?:string, dia_semana?:number, dia_mes?:number}} datos
  * @returns {Promise<{cliente:object, acuerdo:object}>}
  */
-export async function crearClienteConAcuerdo({ nombre, telefono, notas, monto_cuota_centavos, vigente_desde }) {
+export async function crearClienteConAcuerdo({ nombre, telefono, notas, monto_cuota_centavos, vigente_desde, frecuencia, dia_semana, dia_mes }) {
   verificarEscritura();
 
   const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
@@ -605,6 +731,7 @@ export async function crearClienteConAcuerdo({ nombre, telefono, notas, monto_cu
   if (esFutura(vigente_desde)) {
     throw crearError('VALIDATION_ERROR', 'La fecha de vigencia no puede ser futura.', { campo: 'vigente_desde' });
   }
+  const frecuenciaNormalizada = validarFrecuencia({ frecuencia, dia_semana, dia_mes });
 
   const idCliente = uuidV7();
   const idAcuerdo = uuidV7();
@@ -617,8 +744,19 @@ export async function crearClienteConAcuerdo({ nombre, telefono, notas, monto_cu
       [idCliente, nombreLimpio, telefono || null, notas || null, ts, ts]
     );
     db.run(
-      `INSERT INTO acuerdos (id, cliente_id, monto_cuota_centavos, vigente_desde, vigente_hasta, created_at, updated_at, deleted_at) VALUES (?,?,?,?,NULL,?,?,NULL)`,
-      [idAcuerdo, idCliente, monto_cuota_centavos, vigente_desde, ts, ts]
+      `INSERT INTO acuerdos (id, cliente_id, monto_cuota_centavos, frecuencia, dia_semana, dia_mes, vigente_desde, vigente_hasta, created_at, updated_at, deleted_at)
+       VALUES (?,?,?,?,?,?,?,NULL,?,?,NULL)`,
+      [
+        idAcuerdo,
+        idCliente,
+        monto_cuota_centavos,
+        frecuenciaNormalizada.frecuencia,
+        frecuenciaNormalizada.dia_semana,
+        frecuenciaNormalizada.dia_mes,
+        vigente_desde,
+        ts,
+        ts,
+      ]
     );
     db.run('COMMIT;');
   } catch (e) {
@@ -760,10 +898,10 @@ export async function borrarClienteLogico(id, opciones = {}) {
 // ============================================================
 
 /**
- * @param {{cliente_id:string, monto_cuota_centavos:number, vigente_desde:string}} datos
+ * @param {{cliente_id:string, monto_cuota_centavos:number, vigente_desde:string, frecuencia?:string, dia_semana?:number, dia_mes?:number}} datos
  * @returns {Promise<object>}
  */
-export async function crearAcuerdo({ cliente_id, monto_cuota_centavos, vigente_desde }) {
+export async function crearAcuerdo({ cliente_id, monto_cuota_centavos, vigente_desde, frecuencia, dia_semana, dia_mes }) {
   verificarEscritura();
 
   const cliente = unaFila('SELECT * FROM clientes WHERE id = ? AND deleted_at IS NULL', [cliente_id]);
@@ -778,6 +916,7 @@ export async function crearAcuerdo({ cliente_id, monto_cuota_centavos, vigente_d
   if (esFutura(vigente_desde)) {
     throw crearError('VALIDATION_ERROR', 'La fecha de vigencia no puede ser futura.', { campo: 'vigente_desde' });
   }
+  const frecuenciaNormalizada = validarFrecuencia({ frecuencia, dia_semana, dia_mes });
 
   const abierto = unaFila(
     `SELECT * FROM acuerdos WHERE cliente_id = ? AND deleted_at IS NULL AND vigente_hasta IS NULL ORDER BY vigente_desde DESC, created_at DESC LIMIT 1`,
@@ -805,8 +944,19 @@ export async function crearAcuerdo({ cliente_id, monto_cuota_centavos, vigente_d
       }
     }
     db.run(
-      `INSERT INTO acuerdos (id, cliente_id, monto_cuota_centavos, vigente_desde, vigente_hasta, created_at, updated_at, deleted_at) VALUES (?,?,?,?,NULL,?,?,NULL)`,
-      [idAcuerdo, cliente_id, monto_cuota_centavos, vigente_desde, ts, ts]
+      `INSERT INTO acuerdos (id, cliente_id, monto_cuota_centavos, frecuencia, dia_semana, dia_mes, vigente_desde, vigente_hasta, created_at, updated_at, deleted_at)
+       VALUES (?,?,?,?,?,?,?,NULL,?,?,NULL)`,
+      [
+        idAcuerdo,
+        cliente_id,
+        monto_cuota_centavos,
+        frecuenciaNormalizada.frecuencia,
+        frecuenciaNormalizada.dia_semana,
+        frecuenciaNormalizada.dia_mes,
+        vigente_desde,
+        ts,
+        ts,
+      ]
     );
     db.run('COMMIT;');
   } catch (e) {
@@ -1034,6 +1184,7 @@ export async function resumenDia(fecha) {
       [cliente.id, fechaObjetivo, fechaObjetivo]
     );
     if (!acuerdoVigente) continue; // sin obligación vigente ese día
+    if (!esDiaExigible(acuerdoVigente, fechaObjetivo)) continue; // §2.8: vigente pero no exigible hoy (SEMANAL/MENSUAL)
 
     const cuotaCentavos = acuerdoVigente.monto_cuota_centavos;
 

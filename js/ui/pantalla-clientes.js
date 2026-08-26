@@ -1,11 +1,12 @@
 // Pantalla "Clientes" (2.4-2 del PLAN-MVP.md): buscador con debounce, lista
 // paginada, alta de cliente con validación inline.
 
-import { listarClientes, crearClienteConAcuerdo, estaSoloLectura } from '../db.js';
+import { listarClientes, crearClienteConAcuerdo, obtenerAcuerdoVigente, estaSoloLectura } from '../db.js';
 import { hoy } from '../utils/date.js';
 import { parsearAPesos } from '../utils/money.js';
 import {
-  microcopy, estadoVacio, montoOGuion, claseSaldo, escapeHtml,
+  microcopy, estadoVacio, montoOGuion, claseSaldo, escapeHtml, textoFrecuencia,
+  campoFrecuenciaHtml, activarCampoFrecuencia, leerCampoFrecuencia,
   paginadorHtml, activarPaginador, mostrarToast, errorCampo, errorGeneral, debounce,
 } from './componentes.js';
 
@@ -14,7 +15,9 @@ const MICROCOPY = `
   <p>Acá están todos tus clientes activos. Buscá por nombre o teléfono, o dales
   de alta uno nuevo con el botón "Nuevo cliente".</p>
   <p>El saldo se muestra en rojo si el cliente debe, y en verde si está al día.
-  Tocá un cliente para ver su historial completo y su calendario de pagos.</p>
+  La cuota puede cobrarse todos los días, una vez por semana (en un día fijo)
+  o una vez por mes (en un día fijo del mes). Tocá un cliente para ver su
+  historial completo y su calendario de pagos.</p>
 `;
 
 // Estado local del formulario de alta, para no perder lo tipeado si falla la validación.
@@ -26,6 +29,9 @@ function filaCliente(c) {
   // cero", sin necesidad de una consulta extra por fila (A-005).
   const sinMovimientos = !c.tiene_movimientos;
   const saldoParaMostrar = sinMovimientos ? null : c.saldo_centavos;
+  // c.acuerdoVigente se resuelve aparte en refrescarLista() (§2.8: listarClientes
+  // no trae frecuencia/dia_semana/dia_mes, solo el monto ya resuelto).
+  const frecuenciaTexto = c.acuerdoVigente ? ` (${textoFrecuencia(c.acuerdoVigente)})` : '';
   return `
     <li class="lista-item lista-item-clickeable" data-cliente-id="${escapeHtml(c.id)}" tabindex="0" role="button">
       <div class="lista-item-principal">
@@ -34,7 +40,7 @@ function filaCliente(c) {
       </div>
       <div class="lista-item-secundaria">
         <span>${c.telefono ? escapeHtml(c.telefono) : '—'}</span>
-        <span>Cuota: ${montoOGuion(c.cuota_vigente_centavos)}</span>
+        <span>Cuota: ${montoOGuion(c.cuota_vigente_centavos)}${escapeHtml(frecuenciaTexto)}</span>
       </div>
     </li>`;
 }
@@ -57,10 +63,11 @@ function formularioAltaHtml(errores = {}, valores = {}) {
         <textarea id="campo-notas" name="notas" rows="2">${escapeHtml(valores.notas || '')}</textarea>
       </div>
       <div class="campo">
-        <label for="campo-cuota">Cuota diaria</label>
+        <label for="campo-cuota">Monto de la cuota</label>
         <input id="campo-cuota" name="cuota" type="text" inputmode="decimal" placeholder="Ej. 50.00" value="${escapeHtml(valores.cuota || '')}" required />
         ${errorCampo(errores.cuota)}
       </div>
+      ${campoFrecuenciaHtml('alta-cliente', valores, errores)}
       <div class="campo">
         <label for="campo-vigente-desde">Vigente desde</label>
         <input id="campo-vigente-desde" name="vigente_desde" type="date" max="${hoy()}" value="${escapeHtml(valores.vigente_desde || hoy())}" required />
@@ -86,6 +93,12 @@ export async function renderPantallaClientes(contenedor) {
 
   async function refrescarLista() {
     const { clientes, total } = await listarClientes({ busqueda, pagina, tamanioPagina: TAMANIO_PAGINA });
+    // §2.8: listarClientes() no trae frecuencia/dia_semana/dia_mes (solo el
+    // monto ya resuelto); se resuelve acá con una consulta puntual por fila,
+    // acotada al tamaño de página (máx. TAMANIO_PAGINA), sin tocar db.js.
+    await Promise.all(clientes.map(async (c) => {
+      c.acuerdoVigente = await obtenerAcuerdoVigente(c.id, hoy());
+    }));
     const elLista = contenedor.querySelector('#lista-clientes');
     if (!elLista) return;
 
@@ -124,6 +137,7 @@ export async function renderPantallaClientes(contenedor) {
     }
     wrap.innerHTML = `<div class="panel-formulario"><h2 class="titulo-seccion">Nuevo cliente</h2>${formularioAltaHtml(erroresForm, valoresForm)}</div>`;
     const form = wrap.querySelector('#form-alta-cliente');
+    activarCampoFrecuencia(form, 'alta-cliente');
     wrap.querySelector('[data-accion="cancelar-alta"]').addEventListener('click', () => {
       formularioAbierto = false;
       erroresForm = {};
@@ -139,6 +153,7 @@ export async function renderPantallaClientes(contenedor) {
         notas: datos.get('notas') || '',
         cuota: datos.get('cuota') || '',
         vigente_desde: datos.get('vigente_desde') || hoy(),
+        ...leerCampoFrecuencia(datos),
       };
       erroresForm = {};
 
@@ -153,7 +168,7 @@ export async function renderPantallaClientes(contenedor) {
       let montoCuotaCentavos = null;
       try {
         montoCuotaCentavos = parsearAPesos(valoresForm.cuota.trim());
-        if (montoCuotaCentavos <= 0) erroresForm.cuota = 'La cuota diaria debe ser mayor a $0.00.';
+        if (montoCuotaCentavos <= 0) erroresForm.cuota = 'La cuota debe ser mayor a $0.00.';
       } catch (err) {
         erroresForm.cuota = err.message;
       }
@@ -170,6 +185,9 @@ export async function renderPantallaClientes(contenedor) {
           notas: valoresForm.notas.trim() || undefined,
           monto_cuota_centavos: montoCuotaCentavos,
           vigente_desde: valoresForm.vigente_desde,
+          frecuencia: valoresForm.frecuencia,
+          dia_semana: valoresForm.dia_semana,
+          dia_mes: valoresForm.dia_mes,
         });
         formularioAbierto = false;
         erroresForm = {};

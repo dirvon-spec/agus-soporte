@@ -13,10 +13,11 @@ import {
 import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, badgeEstado, leyendaEstados, montoOGuion, montoCortoOGuion,
-  formatearFechaCorta, formatearMesAnio, escapeHtml, errorGeneral, montarSelectorCliente,
+  formatearFechaCorta, formatearMesAnio, escapeHtml, errorGeneral, montarSelectorCliente, Iconos,
+  textoFrecuencia,
 } from './componentes.js';
 
-const OPCION_TODAS_LAS_PERSONAS = { id: '', etiqueta: 'Todas las personas', icono: '👥' };
+const OPCION_TODAS_LAS_PERSONAS = { id: '', etiqueta: 'Todas las personas', icono: Iconos.personas() };
 
 const MICROCOPY = `
   <p>Esta pantalla tiene dos formas de mirar el cumplimiento de la cuota diaria:
@@ -92,9 +93,10 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
   let mesCalendario = hoy().slice(0, 7);
   let diaSeleccionado = null;
   // Compartidos entre renderTodo() y montarSelector(): el cliente resuelto
-  // por id (si lo hay) y su cuota vigente, para armar el chip del selector.
+  // por id (si lo hay) y su acuerdo vigente completo (monto + frecuencia),
+  // para armar el chip del selector y la línea de "Cuota vigente".
   let clienteActual = null;
-  let cuotaVigenteClienteActual = null;
+  let acuerdoVigenteClienteActual = null;
 
   async function renderTodo() {
     // Resolución puntual por id (no un fetch de todos los clientes): escala a
@@ -102,11 +104,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
     const clienteCrudo = clienteId ? await obtenerCliente(clienteId) : null;
     const clienteNoEncontrado = !!clienteId && (!clienteCrudo || clienteCrudo.deleted_at);
     clienteActual = clienteCrudo && !clienteCrudo.deleted_at ? clienteCrudo : null;
-    cuotaVigenteClienteActual = null;
-    if (clienteActual) {
-      const acuerdoVigente = await obtenerAcuerdoVigente(clienteActual.id, hoy());
-      cuotaVigenteClienteActual = acuerdoVigente ? acuerdoVigente.monto_cuota_centavos : null;
-    }
+    acuerdoVigenteClienteActual = clienteActual ? await obtenerAcuerdoVigente(clienteActual.id, hoy()) : null;
 
     const { primerDia, ultimoDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesCalendario);
     const primerDiaSemana = new Date(primerDia + 'T12:00:00').getDay();
@@ -151,7 +149,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
       const movimientosDelDia = diaSeleccionado ? movimientosDelMes.filter((m) => m.fecha === diaSeleccionado) : [];
 
       cuerpoHtml = `
-        <p class="encabezado-cliente-cuota">Cuota vigente: ${montoOGuion(cuotaVigenteClienteActual)}</p>
+        <p class="encabezado-cliente-cuota">Cuota vigente: ${acuerdoVigenteClienteActual ? `${montoOGuion(acuerdoVigenteClienteActual.monto_cuota_centavos)} ${escapeHtml(textoFrecuencia(acuerdoVigenteClienteActual))}` : '—'}</p>
 
         <div class="tarjetas-resumen">
           <div class="tarjeta-resumen">
@@ -181,7 +179,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
               data-fecha="${fechaDia}" data-modo="persona" aria-label="${fechaDia}: ${escapeHtml(estadoDia)}, abonado ${montoCortoOGuion(creditoDia)}">
               <span class="calendario-dia-numero">${numeroDia}</span>
               <span class="calendario-dia-dato">${montoCortoOGuion(creditoDia)}</span>
-              ${cambioCuota !== undefined ? `<span class="marcador-cambio-cuota" title="Nueva cuota desde este día: ${escapeHtml(montoOGuion(cambioCuota))}">●</span>` : ''}
+              ${cambioCuota !== undefined ? `<span class="marcador-cambio-cuota" title="Nueva cuota desde este día: ${escapeHtml(montoOGuion(cambioCuota))}">${Iconos.punto()}</span>` : ''}
             </button>`;
           }).join('')}
         </div>
@@ -249,9 +247,9 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
         </div>
         <div class="calendario-leyenda">
           <ul class="leyenda-estados">
-            <li><span class="badge-estado estado-pagado"><span aria-hidden="true">✓</span> Todos cumplieron</span></li>
-            <li><span class="badge-estado estado-parcial"><span aria-hidden="true">½</span> Faltaron algunos</span></li>
-            <li><span class="badge-estado estado-deuda"><span aria-hidden="true">!</span> Faltó la mitad o más</span></li>
+            <li><span class="badge-estado estado-pagado"><span class="badge-estado-icono" aria-hidden="true">${Iconos.check()}</span> Todos cumplieron</span></li>
+            <li><span class="badge-estado estado-parcial"><span class="badge-estado-icono" aria-hidden="true">${Iconos.medio()}</span> Faltaron algunos</span></li>
+            <li><span class="badge-estado estado-deuda"><span class="badge-estado-icono" aria-hidden="true">${Iconos.alerta()}</span> Faltó la mitad o más</span></li>
           </ul>
           <p class="calendario-aviso-alcance">Los días en gris son días futuros o sin ningún cliente con cuota vigente ese día.</p>
         </div>
@@ -268,7 +266,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
                   return `<li class="lista-item lista-item-clickeable" data-cliente-id="${escapeHtml(f.cliente_id)}" tabindex="0" role="button">
                     <div class="lista-item-principal">
                       <span class="lista-item-nombre">${escapeHtml(f.nombre)}</span>
-                      <span class="${cumplio ? 'monto-positivo' : 'monto-negativo'}"><span aria-hidden="true">${cumplio ? '✓' : '✗'}</span> ${badgeEstado(f.estado)}</span>
+                      <span class="${cumplio ? 'monto-positivo' : 'monto-negativo'}"><span class="badge-estado-icono" aria-hidden="true">${cumplio ? Iconos.check() : Iconos.cruz()}</span> ${badgeEstado(f.estado)}</span>
                     </div>
                     <div class="lista-item-secundaria">
                       <span>Abonado: ${montoOGuion(f.abonadoCentavos)}</span>
@@ -290,9 +288,9 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
 
         <div class="calendario-wrap">
           <div class="calendario-nav">
-            <button type="button" class="btn-icono" id="btn-mes-anterior" aria-label="Mes anterior">&larr;</button>
+            <button type="button" class="btn-icono" id="btn-mes-anterior" aria-label="Mes anterior">${Iconos.chevronIzquierda()}</button>
             <span class="calendario-mes-titulo">${escapeHtml(formatearMesAnio(mesCalendario))}</span>
-            <button type="button" class="btn-icono" id="btn-mes-siguiente" aria-label="Mes siguiente">&rarr;</button>
+            <button type="button" class="btn-icono" id="btn-mes-siguiente" aria-label="Mes siguiente">${Iconos.chevronDerecha()}</button>
           </div>
           ${cuerpoHtml}
         </div>
@@ -313,7 +311,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
       etiquetaCampo: 'Persona',
       opcionEspecial: OPCION_TODAS_LAS_PERSONAS,
       seleccionInicial: clienteActual
-        ? { id: clienteActual.id, etiqueta: clienteActual.nombre, sublabel: montoOGuion(cuotaVigenteClienteActual) }
+        ? { id: clienteActual.id, etiqueta: clienteActual.nombre, sublabel: acuerdoVigenteClienteActual ? `${montoOGuion(acuerdoVigenteClienteActual.monto_cuota_centavos)} ${textoFrecuencia(acuerdoVigenteClienteActual)}` : '—' }
         : OPCION_TODAS_LAS_PERSONAS,
       iniciarAbierto: false,
       onCambio: (seleccion) => {

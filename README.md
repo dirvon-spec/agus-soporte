@@ -40,11 +40,14 @@ calendario puro (`calendar.js`), datos de ejemplo (`seed.js`), utilidades
 
 ## Primer arranque
 
-Al abrir la demo por primera vez, `initDb()` crea el esquema y siembra ~8-10
+Al abrir la demo por primera vez, `initDb()` crea el esquema y siembra ~12
 clientes de ejemplo con dos meses de movimientos relativos a la fecha actual
 (cubriendo los 9 casos obligatorios de la sección 2.6 del plan: siempre
 pagado, gracia/adelanto, parcial recurrente, deuda franca, cliente nuevo,
-cambio de cuota, ajuste, sin teléfono, y relleno para paginación). Si el
+cambio de cuota, ajuste, sin teléfono, y relleno para paginación; más 2
+clientes de §2.8 para frecuencia de cobro configurable: uno SEMANAL con una
+semana pagada por adelantado y uno MENSUAL día 31, para ver el clamp de fin
+de mes). Si el
 navegador soporta `navigator.storage.persist()`, se solicita almacenamiento
 persistente automáticamente (el resultado queda logueado en consola). En cada
 arranque posterior, si los datos de la demo quedaron "viejos" respecto a hoy
