@@ -2,10 +2,10 @@
 // cliente con buscador, tipo Cargo/Abono, validación en tiempo real (blur) y
 // al enviar, confirmación visual y regreso al detalle del cliente.
 
-import { listarClientes, obtenerCliente, registrarCargo, registrarAbono, estaSoloLectura } from '../db.js';
+import { obtenerCliente, registrarCargo, registrarAbono, estaSoloLectura } from '../db.js';
 import { hoy, esFechaIsoValida, esFutura } from '../utils/date.js';
 import { parsearAPesos } from '../utils/money.js';
-import { microcopy, estadoVacio, escapeHtml, mostrarToast, errorCampo, errorGeneral, debounce } from './componentes.js';
+import { microcopy, mostrarToast, errorCampo, errorGeneral, montarSelectorCliente } from './componentes.js';
 
 const MICROCOPY = `
   <p>Usá esta pantalla para registrar un <strong>Cargo</strong> (le pagaste un
@@ -69,7 +69,6 @@ function validarNota(texto) {
  */
 export async function renderPantallaMovimientoForm(contenedor, { clienteId } = {}) {
   let clienteSeleccionado = null;
-  let bloqueado = false;
   let tipo = 'CARGO';
   const soloLectura = estaSoloLectura();
 
@@ -77,57 +76,31 @@ export async function renderPantallaMovimientoForm(contenedor, { clienteId } = {
     const c = await obtenerCliente(clienteId);
     if (c && !c.deleted_at) {
       clienteSeleccionado = { id: c.id, nombre: c.nombre };
-      bloqueado = true;
     }
   }
 
+  // Selector de cliente compartido (componentes.js): mismo componente que usa
+  // pantalla-calendario.js, sin opción especial acá (siempre hay que elegir
+  // un cliente real). Arranca en modo chip si viene preseleccionado desde el
+  // detalle de un cliente, o con el buscador abierto si no.
   function renderSelectorCliente() {
     const wrap = contenedor.querySelector('#wrap-selector-cliente');
-    if (clienteSeleccionado && bloqueado) {
-      wrap.innerHTML = `
-        <div class="campo">
-          <label>Cliente</label>
-          <div class="chip-cliente-seleccionado">
-            <span>${escapeHtml(clienteSeleccionado.nombre)}</span>
-            <button type="button" class="btn-link" id="btn-cambiar-cliente">Cambiar</button>
-          </div>
-        </div>`;
-      wrap.querySelector('#btn-cambiar-cliente').addEventListener('click', () => {
-        bloqueado = false;
-        clienteSeleccionado = null;
-        renderSelectorCliente();
-      });
-    } else {
-      wrap.innerHTML = `
-        <div class="campo">
-          <label for="buscador-cliente-movimiento">Cliente</label>
-          <input id="buscador-cliente-movimiento" type="search" placeholder="Buscá por nombre o teléfono…" autocomplete="off" />
-          <div id="resultados-busqueda-cliente" class="resultados-busqueda"></div>
-          <div data-error-para="cliente_id"></div>
-        </div>`;
-      const input = wrap.querySelector('#buscador-cliente-movimiento');
-      const resultadosEl = wrap.querySelector('#resultados-busqueda-cliente');
-      const buscar = debounce(async (texto) => {
-        if (!texto.trim()) { resultadosEl.innerHTML = ''; return; }
-        const { clientes } = await listarClientes({ busqueda: texto, pagina: 1, tamanioPagina: 8 });
-        resultadosEl.innerHTML = clientes.length
-          ? `<ul class="lista lista-resultados-busqueda">${clientes.map((c) =>
-              `<li class="lista-item lista-item-clickeable" data-id="${escapeHtml(c.id)}" data-nombre="${escapeHtml(c.nombre)}" tabindex="0" role="button">${escapeHtml(c.nombre)}${c.telefono ? ' — ' + escapeHtml(c.telefono) : ''}</li>`
-            ).join('')}</ul>`
-          : estadoVacio('No se encontraron clientes.');
-        resultadosEl.querySelectorAll('[data-id]').forEach((li) => {
-          const elegir = () => {
-            clienteSeleccionado = { id: li.dataset.id, nombre: li.dataset.nombre };
-            bloqueado = true;
-            pintarErrorEnCampo(contenedor, 'cliente_id', '');
-            renderSelectorCliente();
-          };
-          li.addEventListener('click', elegir);
-          li.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); elegir(); } });
-        });
-      }, 300);
-      input.addEventListener('input', (e) => buscar(e.target.value));
-    }
+    wrap.innerHTML = '<div data-error-para="cliente_id"></div>';
+    const host = document.createElement('div');
+    wrap.prepend(host);
+    montarSelectorCliente(host, {
+      idBase: 'selector-cliente-movimiento',
+      etiquetaCampo: 'Cliente',
+      seleccionInicial: clienteSeleccionado ? { id: clienteSeleccionado.id, etiqueta: clienteSeleccionado.nombre } : null,
+      onCambio: (seleccion) => {
+        if (seleccion) {
+          clienteSeleccionado = { id: seleccion.id, nombre: seleccion.etiqueta };
+          pintarErrorEnCampo(contenedor, 'cliente_id', '');
+        } else {
+          clienteSeleccionado = null;
+        }
+      },
+    });
   }
 
   function renderCamposPorTipo() {

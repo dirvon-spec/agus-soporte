@@ -7,14 +7,16 @@
 // pantalla solo consulta y renderiza — no se toca db.js/calendar.js.
 
 import {
-  listarClientes, listarAcuerdos, listarMovimientos,
+  obtenerCliente, obtenerAcuerdoVigente, listarAcuerdos, listarMovimientos,
   obtenerEstadoCalendario, obtenerCalendarioGlobal,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, badgeEstado, leyendaEstados, montoOGuion, montoCortoOGuion,
-  formatearFechaCorta, formatearMesAnio, escapeHtml, errorGeneral,
+  formatearFechaCorta, formatearMesAnio, escapeHtml, errorGeneral, montarSelectorCliente,
 } from './componentes.js';
+
+const OPCION_TODAS_LAS_PERSONAS = { id: '', etiqueta: 'Todas las personas', icono: '👥' };
 
 const MICROCOPY = `
   <p>Esta pantalla tiene dos formas de mirar el cumplimiento de la cuota diaria:
@@ -89,11 +91,22 @@ function claseSemaforoGlobal(esperados, cumplieron) {
 export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
   let mesCalendario = hoy().slice(0, 7);
   let diaSeleccionado = null;
+  // Compartidos entre renderTodo() y montarSelector(): el cliente resuelto
+  // por id (si lo hay) y su cuota vigente, para armar el chip del selector.
+  let clienteActual = null;
+  let cuotaVigenteClienteActual = null;
 
   async function renderTodo() {
-    const { clientes: clientesActivos } = await listarClientes({ tamanioPagina: 500 });
-    const clienteActual = clienteId ? clientesActivos.find((c) => c.id === clienteId) : null;
-    const clienteNoEncontrado = !!clienteId && !clienteActual;
+    // Resolución puntual por id (no un fetch de todos los clientes): escala a
+    // 100+ clientes igual que el selector de persona (ver montarSelector()).
+    const clienteCrudo = clienteId ? await obtenerCliente(clienteId) : null;
+    const clienteNoEncontrado = !!clienteId && (!clienteCrudo || clienteCrudo.deleted_at);
+    clienteActual = clienteCrudo && !clienteCrudo.deleted_at ? clienteCrudo : null;
+    cuotaVigenteClienteActual = null;
+    if (clienteActual) {
+      const acuerdoVigente = await obtenerAcuerdoVigente(clienteActual.id, hoy());
+      cuotaVigenteClienteActual = acuerdoVigente ? acuerdoVigente.monto_cuota_centavos : null;
+    }
 
     const { primerDia, ultimoDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesCalendario);
     const primerDiaSemana = new Date(primerDia + 'T12:00:00').getDay();
@@ -138,7 +151,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
       const movimientosDelDia = diaSeleccionado ? movimientosDelMes.filter((m) => m.fecha === diaSeleccionado) : [];
 
       cuerpoHtml = `
-        <p class="encabezado-cliente-cuota">Cuota vigente: ${montoOGuion(clienteActual.cuota_vigente_centavos)}</p>
+        <p class="encabezado-cliente-cuota">Cuota vigente: ${montoOGuion(cuotaVigenteClienteActual)}</p>
 
         <div class="tarjetas-resumen">
           <div class="tarjeta-resumen">
@@ -273,13 +286,7 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
         ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
         <h1>Calendario</h1>
 
-        <div class="campo">
-          <label for="selector-persona-calendario">Persona</label>
-          <select id="selector-persona-calendario">
-            <option value="" ${!clienteId ? 'selected' : ''}>Todas las personas</option>
-            ${clientesActivos.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === clienteId ? 'selected' : ''}>${escapeHtml(c.nombre)} — ${montoOGuion(c.cuota_vigente_centavos)}</option>`).join('')}
-          </select>
-        </div>
+        <div id="wrap-selector-persona"></div>
 
         <div class="calendario-wrap">
           <div class="calendario-nav">
@@ -292,15 +299,31 @@ export async function renderPantallaCalendario(contenedor, { clienteId } = {}) {
       </section>
     `;
 
+    montarSelector();
     wireEvents();
   }
 
-  function wireEvents() {
-    contenedor.querySelector('#selector-persona-calendario').addEventListener('change', (e) => {
-      const valor = e.target.value;
-      window.location.hash = valor ? `#/calendario/${encodeURIComponent(valor)}` : '#/calendario';
+  // Selector de persona compartido (componentes.js): escala a 100+ clientes
+  // con buscador paginado en vez de un <select> con una opción por cliente.
+  // "Todas las personas" queda siempre fija como primera opción del buscador.
+  function montarSelector() {
+    const host = contenedor.querySelector('#wrap-selector-persona');
+    montarSelectorCliente(host, {
+      idBase: 'selector-persona-calendario',
+      etiquetaCampo: 'Persona',
+      opcionEspecial: OPCION_TODAS_LAS_PERSONAS,
+      seleccionInicial: clienteActual
+        ? { id: clienteActual.id, etiqueta: clienteActual.nombre, sublabel: montoOGuion(cuotaVigenteClienteActual) }
+        : OPCION_TODAS_LAS_PERSONAS,
+      iniciarAbierto: false,
+      onCambio: (seleccion) => {
+        if (!seleccion) return; // se reabrió el buscador; todavía no eligió nada
+        window.location.hash = seleccion.id ? `#/calendario/${encodeURIComponent(seleccion.id)}` : '#/calendario';
+      },
     });
+  }
 
+  function wireEvents() {
     contenedor.querySelector('#btn-mes-anterior').addEventListener('click', () => {
       mesCalendario = mesAnterior(mesCalendario);
       diaSeleccionado = null;
