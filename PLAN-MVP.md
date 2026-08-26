@@ -260,6 +260,13 @@ Navegación global: barra inferior fija (mobile-first) con 3 accesos — **Hoy**
 - Tabla por cliente: nombre, cargos del mes, abonos del mes, saldo a fin de mes, ordenable por columna (al menos por saldo descendente por defecto).
 - Estado vacío: mes sin ningún movimiento → "No hay movimientos registrados en {mes}".
 
+**6. Calendario (pestaña nueva — gate del dueño 25-ago-2026, mockup aprobado)**
+- Cuarto acceso en la barra inferior: Hoy / **Calendario** / Clientes / Resumen. Ruta `#/calendario` (y `#/calendario/:clienteId`).
+- Selector de persona arriba: opción por defecto **"Todas las personas"** + una entrada por cliente activo ("Nombre — cuota vigente"). Navegación de mes con ‹ › .
+- **Modo una persona:** la misma grilla de estados del Detalle (mismo `calendar.js`), con dos adiciones: cada casilla muestra el monto abonado ese día (formateado corto, "—" si nada en día SIN_OBLIGACION), y arriba un resumen del mes: días pagados (PAGADO+GRACIA), días en deuda, total abonado del mes. Marcador de cambio de cuota y leyenda como en el Detalle. Tocar un día abre sus movimientos.
+- **Modo todas las personas:** cada casilla del mes muestra `cumplieron/esperados` (clientes cuyo estado del día es PAGADO o GRACIA_ADELANTO, sobre clientes con obligación vigente ese día). Color: verde si cumplieron todos, amarillo si faltaron algunos, rojo si faltó la mitad o más (umbral aprobado por el dueño), neutro si nadie tenía obligación. Resumen del mes: días con cobro completo, días con faltantes, total cobrado. Tocar un día abre la lista del día: quién cumplió ✓ y quién no ✗ (con lo abonado), cada fila navega al detalle del cliente. Días futuros: sin conteo, "—" (null honesto).
+- Datos: la agregación vive en `db.js` (`obtenerCalendarioGlobal(anioMes)`), NO en la UI; reutiliza `calendar.js` por cliente.
+
 ### 2.5 Algoritmo del calendario (pseudocódigo)
 
 Función pura en `calendar.js`, sin acceso a DOM ni a la DB directamente (recibe los datos ya consultados, para poder testearla en aislamiento).
@@ -591,6 +598,10 @@ Cada fase es pequeña, verificable de forma aislada, y tiene un criterio de "hec
 **Fase 10 — Pulido UX transversal**
 - Microcopy colapsable en las 5 pantallas, mobile-first real (probado en ventana angosta/teléfono), estados vacíos y "null honesto" revisados pantalla por pantalla, paginación verificada con listas largas (forzar tamaño de página chico contra el seed para probarla), accesibilidad básica de color (no depender solo del color: agregar texto/ícono al badge de estado).
 - *Hecho cuando:* pasa íntegramente el checklist de 4.1 (todas las pantallas) y el punto de accesibilidad de color queda verificado con captura o inspección visual.
+
+**Fase 12 — Pestaña Calendario (post-aprobación de mockup, 25-ago-2026)**
+- `obtenerCalendarioGlobal(anioMes)` en `db.js` (con tests en dev-verify: conteos correctos contra el seed calculados a mano, adelantos cuentan como cumplido, día sin obligaciones = neutro, días futuros excluidos) + `pantalla-calendario.js` con los dos modos del mockup aprobado + cuarto tab en el router.
+- *Hecho cuando:* los conteos del modo global coinciden con la suma manual de estados por cliente para al menos 3 días del seed (uno verde, uno amarillo, uno rojo), el modo una-persona coincide con el calendario del Detalle para el mismo cliente/mes, y ambos modos pasan revisión en viewport 375px.
 
 **Fase 11 — Ensayo general y gate final**
 - Corrida completa de las secciones 4.1 a 4.4 sin encontrar fallos bloqueantes; export de respaldo de seguridad antes de la sesión real.

@@ -17,6 +17,7 @@ import {
   resumenDia,
   resumenMensual,
   borrarClienteLogico,
+  obtenerCalendarioGlobal,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
 } from './db.js';
@@ -634,6 +635,114 @@ export async function ejecutarVerificacion() {
     ];
     const estados = calcularEstadosCalendario(acuerdos, movimientos, 0, '2026-01-01', '2026-01-01');
     compararMapaEstados(estados, { '2026-01-01': Estado.PARCIAL }); // sin el ajuste hubiera sido PAGADO
+  });
+
+  // ============================================================
+  // Sección 11 — Fase 12 (gate del dueño 25-ago-2026, mockup aprobado):
+  // obtenerCalendarioGlobal(anioMes) — modo "Todas las personas" de la
+  // pestaña Calendario. Reutiliza calcularEstadosCalendario por cliente (vía
+  // obtenerEstadoCalendario), no duplica el algoritmo de estados.
+  // ============================================================
+
+  await verificar(
+    'obtenerCalendarioGlobal: esperados/cumplieron coinciden con obtenerEstadoCalendario cliente por cliente para TODOS los días del mes actual',
+    async () => {
+      const anioMes = hoy().slice(0, 7);
+      const primerDia = `${anioMes}-01`;
+      const fechaHastaEfectiva = hoy(); // mes actual: el tope siempre es hoy
+
+      const global = await obtenerCalendarioGlobal(anioMes);
+
+      const { clientes } = await listarClientes({ tamanioPagina: 500 });
+      const estadosPorCliente = new Map();
+      for (const cliente of clientes) {
+        estadosPorCliente.set(cliente.id, await obtenerEstadoCalendario(cliente.id, primerDia, fechaHastaEfectiva));
+      }
+
+      for (const fecha of rango(primerDia, fechaHastaEfectiva)) {
+        let esperadosManual = 0;
+        let cumplieronManual = 0;
+        for (const cliente of clientes) {
+          const estado = estadosPorCliente.get(cliente.id).get(fecha);
+          if (estado === Estado.SIN_OBLIGACION) continue;
+          esperadosManual += 1;
+          if (estado === Estado.PAGADO || estado === Estado.GRACIA_ADELANTO) cumplieronManual += 1;
+        }
+        const agg = global.dias.get(fecha);
+        assert(agg, `falta la clave ${fecha} en el mapa global`);
+        assert(agg.esperados === esperadosManual, `día ${fecha}: esperados global=${agg.esperados}, manual=${esperadosManual}`);
+        assert(agg.cumplieron === cumplieronManual, `día ${fecha}: cumplieron global=${agg.cumplieron}, manual=${cumplieronManual}`);
+        assert(agg.detalle.length === esperadosManual, `día ${fecha}: detalle.length=${agg.detalle.length} debería ser ${esperadosManual}`);
+      }
+    }
+  );
+
+  await verificar('obtenerCalendarioGlobal: un cliente en GRACIA_ADELANTO hoy cuenta como cumplido', async () => {
+    const anioMes = hoy().slice(0, 7);
+    const ayer = sumarDias(hoy(), -1);
+    const cuota = 10000;
+    const { cliente } = await crearClienteConAcuerdo({
+      nombre: 'Cliente CalendarioGlobal GraciaAdelanto Verify',
+      monto_cuota_centavos: cuota,
+      vigente_desde: ayer,
+    });
+    // Adelanta 2 cuotas ayer, no abona hoy: hoy debería quedar en GRACIA_ADELANTO
+    // (disponible == cuota, borde que clasifica GRACIA_ADELANTO, no DEUDA).
+    await registrarAbono({ cliente_id: cliente.id, monto_centavos: cuota * 2, fecha: ayer });
+
+    const estadoDirecto = await obtenerEstadoCalendario(cliente.id, hoy(), hoy());
+    assert(
+      estadoDirecto.get(hoy()) === Estado.GRACIA_ADELANTO,
+      `precondición: el cliente debería estar en GRACIA_ADELANTO hoy, está en ${estadoDirecto.get(hoy())}`
+    );
+
+    const global = await obtenerCalendarioGlobal(anioMes);
+    const aggHoy = global.dias.get(hoy());
+    assert(aggHoy, 'el día de hoy debería estar en el mapa global');
+
+    const filaCliente = aggHoy.detalle.find((d) => d.cliente_id === cliente.id);
+    assert(filaCliente, 'el cliente de prueba debería aparecer en el detalle de hoy');
+    assert(filaCliente.estado === Estado.GRACIA_ADELANTO, `estado esperado GRACIA_ADELANTO, es ${filaCliente.estado}`);
+
+    const cumplidosEsperados = aggHoy.detalle.filter((d) => d.estado === Estado.PAGADO || d.estado === Estado.GRACIA_ADELANTO).length;
+    assert(aggHoy.cumplieron === cumplidosEsperados, 'GRACIA_ADELANTO debería contarse dentro de "cumplieron"');
+  });
+
+  await verificar('obtenerCalendarioGlobal: no incluye claves de días futuros', async () => {
+    const anioMes = hoy().slice(0, 7);
+    const global = await obtenerCalendarioGlobal(anioMes);
+    for (const fecha of global.dias.keys()) {
+      assert(fecha <= hoy(), `el mapa global no debería incluir el día futuro ${fecha}`);
+    }
+
+    // Un mes ÍNTEGRAMENTE futuro debe devolver un mapa vacío (sin ninguna clave).
+    const anio = Number(anioMes.slice(0, 4));
+    const mes = Number(anioMes.slice(5, 7));
+    const anioMesSiguiente = mes === 12 ? `${anio + 1}-01` : `${anio}-${String(mes + 1).padStart(2, '0')}`;
+    const globalFuturo = await obtenerCalendarioGlobal(anioMesSiguiente);
+    assert(globalFuturo.dias.size === 0, `un mes íntegramente futuro debería dar un mapa vacío, tiene ${globalFuturo.dias.size} claves`);
+    assert(
+      globalFuturo.resumen.diasCompletos === 0 && globalFuturo.resumen.diasConFaltantes === 0 && globalFuturo.resumen.totalCobradoCentavos === 0,
+      'el resumen de un mes íntegramente futuro debería ser todo 0'
+    );
+  });
+
+  await verificar('obtenerCalendarioGlobal: un mes muy anterior al seed da esperados=0 en todos los días, sin errores', async () => {
+    // El seed más antiguo arranca a hoy-60; hoy-400 cae muy por fuera de eso.
+    const fechaVieja = sumarDias(hoy(), -400);
+    const anioMesViejo = fechaVieja.slice(0, 7);
+    const global = await obtenerCalendarioGlobal(anioMesViejo);
+
+    assert(global.dias.size > 0, 'un mes íntegramente pasado (no futuro) debería tener clave para cada uno de sus días');
+    for (const [fecha, agg] of global.dias) {
+      assert(agg.esperados === 0, `día ${fecha} de un mes anterior al seed debería tener esperados=0, tiene ${agg.esperados}`);
+      assert(agg.cumplieron === 0, `día ${fecha} debería tener cumplieron=0`);
+      assert(agg.detalle.length === 0, `día ${fecha} debería tener detalle vacío`);
+    }
+    assert(
+      global.resumen.diasCompletos === 0 && global.resumen.diasConFaltantes === 0 && global.resumen.totalCobradoCentavos === 0,
+      'el resumen de un mes sin ningún cliente activo debería ser todo 0'
+    );
   });
 
   // ============================================================

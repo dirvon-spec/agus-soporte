@@ -5,7 +5,7 @@
 
 import { DDL, SCHEMA_VERSION } from './schema.js';
 import { generarSeed } from './seed.js';
-import { calcularEstadosCalendario } from './calendar.js';
+import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { crearError } from './utils/errors.js';
 import { uuidV7 } from './utils/uuid.js';
 import { hoy, ahoraIso, esFechaIsoValida, esFutura, sumarDias, rango } from './utils/date.js';
@@ -145,6 +145,33 @@ function creditoDeMovimiento(m) {
 }
 
 /**
+ * Busca en una lista de acuerdos (ya cargados en memoria) el vigente en una
+ * fecha, con el MISMO desempate que calendar.js (mitigación B1): si hay más
+ * de un acuerdo aplicable a la misma fecha, se toma el de vigente_desde más
+ * reciente, y entre iguales el de created_at más reciente. Compartido por
+ * calcularArrastreCumplimiento() y obtenerCalendarioGlobal() para no repetir
+ * la regla de desempate en tres lugares distintos.
+ * @param {Array<{vigente_desde:string, vigente_hasta:?string, created_at?:string}>} acuerdos
+ * @param {string} fecha
+ * @returns {object|null}
+ */
+function buscarAcuerdoVigenteEnLista(acuerdos, fecha) {
+  const candidatos = acuerdos.filter(
+    (a) => a.vigente_desde <= fecha && (a.vigente_hasta == null || a.vigente_hasta >= fecha)
+  );
+  if (candidatos.length === 0) return null;
+  if (candidatos.length === 1) return candidatos[0];
+  candidatos.sort((a, b) => {
+    if (a.vigente_desde !== b.vigente_desde) return a.vigente_desde < b.vigente_desde ? 1 : -1;
+    const ca = a.created_at || '';
+    const cb = b.created_at || '';
+    if (ca === cb) return 0;
+    return ca < cb ? 1 : -1;
+  });
+  return candidatos[0];
+}
+
+/**
  * arrastreInicial de CUMPLIMIENTO DE CUOTA (2.5), NO el saldo del ledger (2.2).
  *
  * FIX (Builder B, verificación en vivo — corregido en PLAN-MVP.md §2.5, gate
@@ -181,26 +208,9 @@ function calcularArrastreCumplimiento(acuerdos, movimientos, hastaFecha) {
     creditoPorFecha.set(m.fecha, (creditoPorFecha.get(m.fecha) || 0) + credito);
   }
 
-  function acuerdoVigenteEn(fecha) {
-    const candidatos = acuerdos.filter(
-      (a) => a.vigente_desde <= fecha && (a.vigente_hasta == null || a.vigente_hasta >= fecha)
-    );
-    if (candidatos.length === 0) return null;
-    if (candidatos.length === 1) return candidatos[0];
-    // Mismo desempate que calendar.js (B1): vigente_desde más reciente, luego created_at más reciente.
-    candidatos.sort((a, b) => {
-      if (a.vigente_desde !== b.vigente_desde) return a.vigente_desde < b.vigente_desde ? 1 : -1;
-      const ca = a.created_at || '';
-      const cb = b.created_at || '';
-      if (ca === cb) return 0;
-      return ca < cb ? 1 : -1;
-    });
-    return candidatos[0];
-  }
-
   let arrastre = 0;
   for (const fecha of rango(primerVigenteDesde, hastaFecha)) {
-    const acuerdoVigente = acuerdoVigenteEn(fecha);
+    const acuerdoVigente = buscarAcuerdoVigenteEnLista(acuerdos, fecha);
     if (!acuerdoVigente) continue; // SIN_OBLIGACION: no consume ni genera arrastre
     const creditoDelDia = creditoPorFecha.get(fecha) || 0;
     arrastre = arrastre + creditoDelDia - acuerdoVigente.monto_cuota_centavos;
@@ -1160,6 +1170,105 @@ export async function obtenerEstadoCalendario(cliente_id, fechaDesde, fechaHasta
     [cliente_id, fechaDesde, fechaHasta]
   );
   return calcularEstadosCalendario(acuerdos, movimientos, arrastreInicial, fechaDesde, fechaHasta);
+}
+
+/**
+ * Calendario en modo GLOBAL (pantalla 6, Fase 12, gate del dueño 25-ago-2026):
+ * agregado día por día de "cuántos clientes tenían obligación ese día" vs.
+ * "cuántos cumplieron", para toda la cartera activa en un mes.
+ *
+ * Reutiliza calcularEstadosCalendario de calendar.js por cliente (mismo
+ * camino que obtenerEstadoCalendario) — el algoritmo de estados NO se
+ * duplica acá, solo se agrega su resultado por día.
+ *
+ * Rendimiento: una sola tanda de queries por cliente activo (acuerdos +
+ * movimientos históricos + movimientos del mes), NO una consulta por día;
+ * el barrido día-a-día que sigue es 100% en memoria.
+ *
+ * "esperados" = clientes con acuerdo vigente ese día. "cumplieron" = de esos,
+ * los que están en PAGADO o GRACIA_ADELANTO. Un día sin ningún cliente con
+ * obligación queda con esperados=0 (neutro). Los días futuros (fecha > hoy())
+ * se excluyen del mapa por completo — no hay clave para esos días.
+ *
+ * @param {string} anioMes 'YYYY-MM'
+ * @returns {Promise<{
+ *   dias: Map<string, {esperados:number, cumplieron:number, detalle: Array<{cliente_id:string, nombre:string, estado:string, abonadoCentavos:number, cuotaCentavos:number}>}>,
+ *   resumen: {diasCompletos:number, diasConFaltantes:number, totalCobradoCentavos:number}
+ * }>}
+ */
+export async function obtenerCalendarioGlobal(anioMes) {
+  const [anioStr, mesStr] = anioMes.split('-');
+  const anio = Number(anioStr);
+  const mes = Number(mesStr);
+  const primerDia = `${anioStr}-${mesStr}-01`;
+  const ultimoDiaNum = new Date(anio, mes, 0).getDate(); // último día del mes (componentes locales)
+  const ultimoDiaMes = `${anioStr}-${mesStr}-${pad2(ultimoDiaNum)}`;
+
+  const hoyStr = hoy();
+  // Días futuros excluidos del mapa por completo (null honesto en la UI).
+  const fechaHastaEfectiva = ultimoDiaMes > hoyStr ? hoyStr : ultimoDiaMes;
+  const diasDelMesVisibles = rango(primerDia, fechaHastaEfectiva); // [] si TODO el mes es futuro
+
+  const dias = new Map();
+  for (const fecha of diasDelMesVisibles) {
+    dias.set(fecha, { esperados: 0, cumplieron: 0, detalle: [] });
+  }
+
+  if (diasDelMesVisibles.length === 0) {
+    return { dias, resumen: { diasCompletos: 0, diasConFaltantes: 0, totalCobradoCentavos: 0 } };
+  }
+
+  const clientesActivos = todasLasFilas('SELECT * FROM clientes WHERE deleted_at IS NULL ORDER BY nombre ASC');
+
+  for (const cliente of clientesActivos) {
+    const acuerdos = todasLasFilas('SELECT * FROM acuerdos WHERE cliente_id=? AND deleted_at IS NULL', [cliente.id]);
+    if (acuerdos.length === 0) continue; // sin ningún acuerdo: nunca tiene obligación
+
+    const movimientosHistoricos = todasLasFilas(
+      `SELECT tipo, monto_centavos, fecha FROM movimientos
+       WHERE cliente_id=? AND deleted_at IS NULL AND tipo IN ('ABONO','AJUSTE') AND fecha < ?`,
+      [cliente.id, primerDia]
+    );
+    const arrastreInicial = calcularArrastreCumplimiento(acuerdos, movimientosHistoricos, sumarDias(primerDia, -1));
+
+    const movimientosDelMes = todasLasFilas(
+      `SELECT tipo, monto_centavos, fecha FROM movimientos
+       WHERE cliente_id=? AND deleted_at IS NULL AND tipo IN ('ABONO','AJUSTE') AND fecha BETWEEN ? AND ?`,
+      [cliente.id, primerDia, fechaHastaEfectiva]
+    );
+
+    const estadosCliente = calcularEstadosCalendario(acuerdos, movimientosDelMes, arrastreInicial, primerDia, fechaHastaEfectiva);
+
+    const creditoPorFecha = new Map();
+    for (const m of movimientosDelMes) {
+      creditoPorFecha.set(m.fecha, (creditoPorFecha.get(m.fecha) || 0) + creditoDeMovimiento(m));
+    }
+
+    for (const fecha of diasDelMesVisibles) {
+      const estado = estadosCliente.get(fecha);
+      if (estado === Estado.SIN_OBLIGACION) continue; // este cliente no cuenta como "esperado" ese día
+
+      const acuerdoVigente = buscarAcuerdoVigenteEnLista(acuerdos, fecha);
+      const cuotaCentavos = acuerdoVigente.monto_cuota_centavos;
+      const abonadoCentavos = creditoPorFecha.get(fecha) || 0;
+
+      const diaAgg = dias.get(fecha);
+      diaAgg.esperados += 1;
+      if (estado === Estado.PAGADO || estado === Estado.GRACIA_ADELANTO) diaAgg.cumplieron += 1;
+      diaAgg.detalle.push({ cliente_id: cliente.id, nombre: cliente.nombre, estado, abonadoCentavos, cuotaCentavos });
+    }
+  }
+
+  let diasCompletos = 0;
+  let diasConFaltantes = 0;
+  let totalCobradoCentavos = 0;
+  for (const agg of dias.values()) {
+    if (agg.esperados > 0 && agg.cumplieron === agg.esperados) diasCompletos++;
+    if (agg.esperados > 0 && agg.cumplieron < agg.esperados) diasConFaltantes++;
+    for (const fila of agg.detalle) totalCobradoCentavos += fila.abonadoCentavos;
+  }
+
+  return { dias, resumen: { diasCompletos, diasConFaltantes, totalCobradoCentavos } };
 }
 
 // ============================================================

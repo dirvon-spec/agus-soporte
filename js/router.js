@@ -12,6 +12,7 @@
 import { estaSoloLectura } from './db.js';
 import { escapeHtml } from './ui/componentes.js';
 import { renderPantallaHoy } from './ui/pantalla-hoy.js';
+import { renderPantallaCalendario } from './ui/pantalla-calendario.js';
 import { renderPantallaClientes } from './ui/pantalla-clientes.js';
 import { renderPantallaClienteDetalle, renderEstadoCuentaImprimible } from './ui/pantalla-cliente-detalle.js';
 import { renderPantallaMovimientoForm } from './ui/pantalla-movimiento-form.js';
@@ -22,6 +23,10 @@ const RUTAS = [
     render: (m, el) => renderPantallaHoy(el, { fecha: m[1] }) },
   { patron: /^#\/hoy$/, tab: 'hoy', fab: true,
     render: (m, el) => renderPantallaHoy(el, {}) },
+  { patron: /^#\/calendario\/([^/]+)$/, tab: 'calendario', fab: false,
+    render: (m, el) => renderPantallaCalendario(el, { clienteId: decodeURIComponent(m[1]) }) },
+  { patron: /^#\/calendario$/, tab: 'calendario', fab: false,
+    render: (m, el) => renderPantallaCalendario(el, {}) },
   { patron: /^#\/clientes\/([^/]+)\/imprimir$/, tab: 'clientes', fab: false,
     render: (m, el) => renderEstadoCuentaImprimible(el, { id: decodeURIComponent(m[1]) }) },
   { patron: /^#\/clientes\/([^/]+)$/, tab: 'clientes', fab: false,
@@ -46,6 +51,7 @@ let generacionActual = 0; // evita que una respuesta async vieja pise una navega
 
 function iconoTab(tab) {
   if (tab === 'hoy') return '📅';
+  if (tab === 'calendario') return '🗓️';
   if (tab === 'clientes') return '👥';
   if (tab === 'resumen') return '📊';
   return '•';
@@ -60,6 +66,9 @@ function armarShell() {
     <nav id="nav-inferior" class="nav-inferior" aria-label="Navegación principal">
       <a href="#/hoy" data-tab="hoy" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('hoy')}</span><span class="nav-texto">Hoy</span>
+      </a>
+      <a href="#/calendario" data-tab="calendario" class="nav-item">
+        <span class="nav-icono" aria-hidden="true">${iconoTab('calendario')}</span><span class="nav-texto">Calendario</span>
       </a>
       <a href="#/clientes" data-tab="clientes" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('clientes')}</span><span class="nav-texto">Clientes</span>

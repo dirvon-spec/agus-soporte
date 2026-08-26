@@ -43,6 +43,21 @@ export function claseSaldo(centavos) {
   return 'monto-positivo';
 }
 
+const formateadorCorto = new Intl.NumberFormat('es-MX', {
+  style: 'currency', currency: 'MXN', minimumFractionDigits: 0, maximumFractionDigits: 0,
+});
+
+/**
+ * Monto en centavos formateado sin decimales (ej. "$50"), para espacios muy
+ * chicos como las casillas del calendario. Null honesto: "—" si no hay dato.
+ * @param {number|null|undefined} centavos
+ * @returns {string}
+ */
+export function montoCortoOGuion(centavos) {
+  if (centavos === null || centavos === undefined) return '—';
+  return formateadorCorto.format(Math.round(centavos) / 100);
+}
+
 // ============================================================
 // Fechas legibles en español (solo para mostrar en UI; date.js sigue siendo
 // la única fuente de verdad para lógica de negocio)

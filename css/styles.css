@@ -813,6 +813,30 @@ fieldset.campo {
   outline-offset: -2px;
 }
 
+.calendario-dia-numero {
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Segunda línea chica dentro de la casilla: monto abonado (modo persona) o
+   fracción cumplieron/esperados (modo todas las personas). Reutilizado por
+   pantalla-calendario.js en ambos modos. */
+.calendario-dia-dato {
+  font-size: 0.52rem;
+  line-height: 1.1;
+  margin-top: 1px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.calendario-dia:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .calendario-dia.estado-fondo-pagado { background: var(--color-estado-pagado-bg); color: var(--color-estado-pagado); }
 .calendario-dia.estado-fondo-gracia-adelanto { background: var(--color-estado-gracia-adelanto-bg); color: var(--color-estado-gracia-adelanto); }
 .calendario-dia.estado-fondo-parcial { background: var(--color-estado-parcial-bg); color: var(--color-estado-parcial); }
