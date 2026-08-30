@@ -12,8 +12,9 @@ import { formatearCentavos } from '../utils/money.js';
 import { parsearAPesos } from '../utils/money.js';
 import { hoy, esFechaIsoValida, esFutura } from '../utils/date.js';
 import {
-  crearCategoria, actualizarCategoria, borrarCategoriaLogica,
-  listarConceptos, crearConcepto, registrarCargo, registrarAbono,
+  crearCategoria, actualizarCategoria, borrarCategoriaLogica, listarCategorias,
+  listarConceptos, crearConcepto, borrarConceptoLogico, registrarCargo, registrarAbono,
+  listarClientesAgrupados,
 } from '../db.js';
 
 // ============================================================
@@ -59,6 +60,16 @@ export const Iconos = {
     '<circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>', o),
   lapiz: (o) => svgIcono('<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/><path d="M14 7l3 3"/>', o),
   papelera: (o) => svgIcono('<path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v6M14 11v6"/>', o),
+  // §2.10 A-204: reemplazan los emoji de engrane/globo/caja-archivo/flecha-de-
+  // restaurar/alerta usados antes en la UI — mismo estilo (trazo 2px,
+  // currentColor) que el resto del set.
+  engrane: (o) => svgIcono(
+    '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1' +
+    'M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>', o),
+  globo: (o) => svgIcono('<circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><line x1="3" y1="12" x2="21" y2="12"/>', o),
+  cajaArchivo: (o) => svgIcono('<rect x="3" y="7" width="18" height="13" rx="1"/><path d="M3 7l2-4h14l2 4"/><line x1="9" y1="12" x2="15" y2="12"/>', o),
+  restaurar: (o) => svgIcono('<path d="M9 14l-5-5 5-5"/><path d="M4 9h10a6 6 0 016 6v1"/>', o),
+  alerta: (o) => svgIcono('<path d="M12 3l10 18H2z"/><line x1="12" y1="9" x2="12" y2="13.5"/><circle cx="12" cy="16.5" r="0.6" fill="currentColor" stroke="none"/>', o),
 };
 
 // ============================================================
@@ -535,34 +546,67 @@ export function abrirPanelRapido({ tipo, clienteId, clienteNombre, onGuardado })
   }, { titulo: `${tipo === 'ABONO' ? 'Abono' : 'Cargo'} — ${clienteNombre}` });
 }
 
+/**
+ * Formatea el buffer crudo del keypad (solo dígitos + un punto opcional, sin
+ * comas) a texto legible mientras se tipea, ej. "1234.5" -> "$1,234.5".
+ * Puramente de presentación — el valor que se valida/parsea es el buffer
+ * crudo (parsearAPesos ya acepta "1234.50" sin comas).
+ * @param {string} buffer
+ */
+function formatearBufferMonto(buffer) {
+  if (!buffer) return '$0.00';
+  const [enteroCrudo, decimal] = buffer.split('.');
+  const entero = enteroCrudo === '' ? '0' : enteroCrudo;
+  const enteroConComas = entero.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return buffer.includes('.') ? `$${enteroConComas}.${decimal ?? ''}` : `$${enteroConComas}`;
+}
+
 async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
   let conceptos = tipo === 'CARGO' ? await listarConceptos() : [];
   let conceptoElegido = null;
   let mostrarNuevoConcepto = false;
   let error = {};
-  // Lo que el usuario ya tipeó sobrevive a los re-render que disparan elegir
-  // un concepto o crear uno al vuelo (si no se capturara acá, cada render()
-  // reconstruye el <form> desde cero y el monto/fecha/referencia ya tipeados
-  // se perderían silenciosamente).
+  // B-024 (§2.10): el monto se captura con keypad propio — vive como buffer
+  // en JS (nunca en un <input> real), así que sobrevive a cualquier re-render
+  // sin necesidad de "capturar antes de renderizar" (ya no aplica la técnica
+  // usada para fecha/referencia, porque acá no hay foco de sistema que perder).
   let valorMonto = '';
+  // Lo ya tipeado en fecha/referencia sobrevive a los re-render que disparan
+  // elegir un concepto o crear uno al vuelo (mismo patrón que antes).
   let valorFecha = hoy();
   let valorReferencia = '';
+  let valorNuevoConcepto = '';
 
   function capturarValoresActuales() {
-    const montoEl = host.querySelector('#pr-monto');
-    if (montoEl) valorMonto = montoEl.value;
     const fechaEl = host.querySelector('#pr-fecha');
     if (fechaEl) valorFecha = fechaEl.value;
     const refEl = host.querySelector('#pr-referencia');
     if (refEl) valorReferencia = refEl.value;
+    const nuevoConceptoEl = host.querySelector('#pr-nuevo-concepto-nombre');
+    if (nuevoConceptoEl) valorNuevoConcepto = nuevoConceptoEl.value;
+  }
+
+  function agregarDigito(d) {
+    const [, decimal] = valorMonto.split('.');
+    if (decimal !== undefined && decimal.length >= 2) return; // ya completo a centavos
+    valorMonto += d;
+  }
+
+  function manejarTeclaKeypad(tecla) {
+    if (tecla === 'borrar') valorMonto = valorMonto.slice(0, -1);
+    else if (tecla === '.') { if (!valorMonto.includes('.')) valorMonto = (valorMonto || '0') + '.'; }
+    else if (tecla === '00') { agregarDigito('0'); agregarDigito('0'); }
+    else agregarDigito(tecla);
+    if (error.monto_centavos) error.monto_centavos = null;
+    render();
   }
 
   function render() {
     capturarValoresActuales();
     host.innerHTML = `
-      <form id="form-panel-rapido" class="formulario" novalidate>
-        <div class="campo campo-monto-grande">
-          <input id="pr-monto" name="monto" type="text" inputmode="decimal" placeholder="$0.00" class="input-monto-grande" autocomplete="off" value="${escapeHtml(valorMonto)}" />
+      <form id="form-panel-rapido" class="formulario formulario-panel-rapido" novalidate>
+        <div class="keypad-monto">
+          <div class="keypad-display ${error.monto_centavos ? 'keypad-display-error' : ''}" id="pr-monto-display" role="text" aria-label="Monto">${escapeHtml(formatearBufferMonto(valorMonto))}</div>
           ${errorCampo(error.monto_centavos)}
         </div>
         ${tipo === 'CARGO' ? `
@@ -574,7 +618,7 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
             </div>
             ${mostrarNuevoConcepto ? `
               <div class="fila-nuevo-inline">
-                <input id="pr-nuevo-concepto-nombre" type="text" placeholder="Nombre del concepto" />
+                <input id="pr-nuevo-concepto-nombre" type="text" placeholder="Nombre del concepto" value="${escapeHtml(valorNuevoConcepto)}" />
                 <button type="button" class="btn btn-primario btn-pequeno" id="pr-confirmar-nuevo-concepto">Agregar</button>
               </div>` : ''}
             ${errorCampo(error.concepto)}
@@ -583,19 +627,35 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
             <label for="pr-referencia">Referencia (opcional)</label>
             <input id="pr-referencia" name="referencia" type="text" value="${escapeHtml(valorReferencia)}" />
           </div>` : ''}
+
+        <div class="keypad-grid">
+          <button type="button" class="keypad-tecla" data-tecla="7" style="grid-column:1;grid-row:1;">7</button>
+          <button type="button" class="keypad-tecla" data-tecla="8" style="grid-column:2;grid-row:1;">8</button>
+          <button type="button" class="keypad-tecla" data-tecla="9" style="grid-column:3;grid-row:1;">9</button>
+          <button type="button" class="keypad-tecla keypad-borrar" data-tecla="borrar" aria-label="Borrar" style="grid-column:4;grid-row:1;">⌫</button>
+          <button type="button" class="keypad-tecla" data-tecla="4" style="grid-column:1;grid-row:2;">4</button>
+          <button type="button" class="keypad-tecla" data-tecla="5" style="grid-column:2;grid-row:2;">5</button>
+          <button type="button" class="keypad-tecla" data-tecla="6" style="grid-column:3;grid-row:2;">6</button>
+          <button type="submit" class="keypad-tecla keypad-guardar" style="grid-column:4;grid-row:2 / span 2;">✓<br>Guardar</button>
+          <button type="button" class="keypad-tecla" data-tecla="1" style="grid-column:1;grid-row:3;">1</button>
+          <button type="button" class="keypad-tecla" data-tecla="2" style="grid-column:2;grid-row:3;">2</button>
+          <button type="button" class="keypad-tecla" data-tecla="3" style="grid-column:3;grid-row:3;">3</button>
+          <button type="button" class="keypad-tecla" data-tecla="0" style="grid-column:1;grid-row:4;">0</button>
+          <button type="button" class="keypad-tecla" data-tecla="00" style="grid-column:2;grid-row:4;">00</button>
+          <button type="button" class="keypad-tecla" data-tecla="." style="grid-column:3;grid-row:4;">.</button>
+        </div>
+
         <div class="campo">
           <label for="pr-fecha">Fecha</label>
           <input id="pr-fecha" name="fecha" type="date" max="${hoy()}" value="${escapeHtml(valorFecha)}" />
           ${errorCampo(error.fecha)}
         </div>
         ${errorGeneral(error.general)}
-        <div class="acciones-formulario">
-          <button type="submit" class="btn btn-primario btn-ancho">Guardar</button>
-        </div>
       </form>`;
 
-    const montoInput = host.querySelector('#pr-monto');
-    montoInput.focus();
+    host.querySelectorAll('.keypad-tecla[data-tecla]').forEach((btn) => {
+      btn.addEventListener('click', () => manejarTeclaKeypad(btn.dataset.tecla));
+    });
 
     if (tipo === 'CARGO') {
       host.querySelectorAll('.chip-concepto').forEach((chip) => {
@@ -622,6 +682,7 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
             conceptos = await listarConceptos();
             conceptoElegido = concepto.nombre;
             mostrarNuevoConcepto = false;
+            valorNuevoConcepto = '';
             error = {};
             render();
           } catch (err) {
@@ -640,13 +701,12 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
       e.preventDefault();
       error = {};
 
-      const montoTexto = montoInput.value.trim();
       let montoCentavos = null;
-      if (!montoTexto) {
+      if (!valorMonto || valorMonto === '.') {
         error.monto_centavos = 'El monto es obligatorio.';
       } else {
         try {
-          montoCentavos = parsearAPesos(montoTexto);
+          montoCentavos = parsearAPesos(valorMonto);
           if (montoCentavos <= 0) error.monto_centavos = 'El monto debe ser mayor a $0.00.';
         } catch (err) {
           error.monto_centavos = err.message;
@@ -687,4 +747,199 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
   }
 
   render();
+}
+
+// ============================================================
+// §2.10 — Sheet "Configuración" (engrane de la barra de Clientes):
+// administra el catálogo de categorías y de conceptos desde un solo lugar.
+// Editar/eliminar una categoría o un concepto reutiliza sus propios sheets
+// (abrirSheetCategoria / abrirSheetConcepto); como la infraestructura de
+// sheet es de-a-uno, guardar/eliminar ahí cierra momentáneamente
+// Configuración y la vuelve a abrir al terminar (onGuardado/onEliminada),
+// así el gestor no pierde el lugar.
+// ============================================================
+
+/**
+ * Sheet para crear/editar/eliminar un concepto. No existe `actualizarConcepto`
+ * en la capa de datos (solo crear/borrar-lógico) — "renombrar" se resuelve
+ * borrando el concepto viejo y creando uno nuevo con el nombre nuevo; la
+ * historia no se ve afectada porque `movimientos.servicio` ya guarda el
+ * nombre como texto plano en cada cargo pasado (nunca por referencia).
+ * @param {{concepto?: object|null, onGuardado?: (c:object)=>void, onEliminada?: (id:string)=>void}} cfg
+ */
+export function abrirSheetConcepto({ concepto = null, onGuardado, onEliminada } = {}) {
+  abrirSheet((host) => {
+    let error = {};
+    let valorNombre = concepto ? concepto.nombre : '';
+
+    function capturarValoresActuales() {
+      const nombreEl = host.querySelector('#cpt-nombre');
+      if (nombreEl) valorNombre = nombreEl.value;
+    }
+
+    function render() {
+      capturarValoresActuales();
+      host.innerHTML = `
+        <form id="form-concepto" class="formulario" novalidate>
+          <div class="campo">
+            <label for="cpt-nombre">Nombre</label>
+            <input id="cpt-nombre" name="nombre" type="text" value="${escapeHtml(valorNombre)}" required autofocus />
+            ${errorCampo(error.nombre)}
+          </div>
+          ${concepto ? `<p class="texto-secundario">Los cargos ya registrados con este concepto conservan su texto tal cual, aunque lo renombres o lo elimines acá.</p>` : ''}
+          ${errorGeneral(error.general)}
+          <div class="acciones-formulario acciones-formulario-columna">
+            <button type="submit" class="btn btn-primario btn-ancho">${concepto ? 'Guardar cambios' : 'Crear concepto'}</button>
+            ${concepto ? `<button type="button" class="btn btn-peligro btn-ancho" id="btn-eliminar-concepto">Eliminar concepto</button>` : ''}
+          </div>
+        </form>`;
+
+      const form = host.querySelector('#form-concepto');
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const nombre = form.nombre.value.trim();
+        error = {};
+        if (nombre.length < 1) error.nombre = 'El nombre es obligatorio.';
+        if (Object.keys(error).length > 0) { render(); return; }
+        try {
+          let resultado;
+          if (concepto && nombre.toLowerCase() !== concepto.nombre.toLowerCase()) {
+            // A-203: renombrar al nombre de OTRO concepto ya existente hace un
+            // merge (crearConcepto es idempotente por nombre case-insensitive
+            // y devolvería el existente) — eso es seguro para los datos, pero
+            // NUNCA en silencio: se confirma antes de tocar nada.
+            const existentes = await listarConceptos();
+            const destino = existentes.find((c) => c.id !== concepto.id && c.nombre.toLowerCase() === nombre.toLowerCase());
+            if (destino) {
+              const ok = window.confirm(
+                `Ya existe "${destino.nombre}". ¿Combinar? "${concepto.nombre}" se quitará del catálogo; los cargos anteriores conservan su texto.`
+              );
+              if (!ok) { render(); return; }
+            }
+            await borrarConceptoLogico(concepto.id);
+            resultado = await crearConcepto({ nombre });
+          } else if (!concepto) {
+            resultado = await crearConcepto({ nombre });
+          } else {
+            resultado = concepto; // sin cambios de nombre
+          }
+          cerrarSheet();
+          mostrarToast(concepto ? 'Concepto actualizado.' : 'Concepto creado.', 'exito');
+          if (onGuardado) onGuardado(resultado);
+        } catch (err) {
+          if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) error[err.detalle.campo] = err.message;
+          else if (err.code === 'CONFLICT') error.nombre = err.message;
+          else error.general = err.message || 'No se pudo guardar el concepto.';
+          render();
+        }
+      });
+
+      const btnEliminar = host.querySelector('#btn-eliminar-concepto');
+      if (btnEliminar) {
+        btnEliminar.addEventListener('click', async () => {
+          const ok = window.confirm(`¿Eliminar el concepto "${concepto.nombre}"? Los cargos ya registrados con este concepto conservan su texto.`);
+          if (!ok) return;
+          try {
+            await borrarConceptoLogico(concepto.id);
+            cerrarSheet();
+            mostrarToast('Concepto eliminado.', 'exito');
+            if (onEliminada) onEliminada(concepto.id);
+          } catch (err) {
+            error.general = err.message || 'No se pudo eliminar el concepto.';
+            render();
+          }
+        });
+      }
+    }
+    render();
+  }, { titulo: concepto ? 'Editar concepto' : 'Nuevo concepto' });
+}
+
+/**
+ * Sheet "Configuración" (§2.10): lista de categorías (bolita, nombre, nº de
+ * clientes del grupo, ✎ Editar) y de conceptos (nombre, ✎ Editar), con
+ * "+ Nueva/Nuevo" en cada sección.
+ * @param {{onCambios?: () => void}} cfg - se llama tras cualquier alta/edición/
+ *   baja, para que la pantalla que abrió Configuración (Clientes) refresque.
+ */
+export function abrirSheetConfiguracion({ onCambios } = {}) {
+  abrirSheet((host) => {
+    let categorias = [];
+    let conceptosList = [];
+    let conteoPorCategoria = {};
+    let cargando = true;
+
+    function avisarCambio() { if (onCambios) onCambios(); }
+
+    async function reabrir() {
+      cerrarSheet();
+      await avisarCambio();
+      abrirSheetConfiguracion({ onCambios });
+    }
+
+    async function cargarDatos() {
+      const [cats, concs, agrupados] = await Promise.all([
+        listarCategorias(), listarConceptos(), listarClientesAgrupados({}),
+      ]);
+      categorias = cats;
+      conceptosList = concs;
+      conteoPorCategoria = {};
+      agrupados.grupos.forEach((g) => { if (g.categoria_id) conteoPorCategoria[g.categoria_id] = g.clientes.length; });
+      cargando = false;
+    }
+
+    function render() {
+      if (cargando) { host.innerHTML = '<p class="cargando">Cargando…</p>'; return; }
+      host.innerHTML = `
+        <div class="config-seccion">
+          <h3 class="config-seccion-titulo">Categorías</h3>
+          ${categorias.length === 0 ? estadoVacio('Todavía no creaste ninguna categoría.') : `
+            <ul class="lista lista-config">
+              ${categorias.map((c) => `
+                <li class="lista-item fila-config">
+                  ${bolitaHtml(c.color)}
+                  <span class="fila-config-nombre">${escapeHtml(c.nombre)}</span>
+                  <span class="fila-config-conteo">${conteoPorCategoria[c.id] || 0} cliente(s)</span>
+                  <button type="button" class="btn-icono" data-editar-categoria="${escapeHtml(c.id)}" aria-label="Editar categoría">${Iconos.lapiz()}</button>
+                </li>`).join('')}
+            </ul>`}
+          <button type="button" class="btn btn-secundario btn-ancho" id="btn-config-nueva-categoria">${Iconos.mas()} Nueva categoría</button>
+        </div>
+        <div class="config-seccion">
+          <h3 class="config-seccion-titulo">Conceptos</h3>
+          ${conceptosList.length === 0 ? estadoVacio('Todavía no creaste ningún concepto.') : `
+            <ul class="lista lista-config">
+              ${conceptosList.map((c) => `
+                <li class="lista-item fila-config">
+                  <span class="fila-config-nombre">${escapeHtml(c.nombre)}</span>
+                  <button type="button" class="btn-icono" data-editar-concepto="${escapeHtml(c.id)}" aria-label="Editar concepto">${Iconos.lapiz()}</button>
+                </li>`).join('')}
+            </ul>`}
+          <button type="button" class="btn btn-secundario btn-ancho" id="btn-config-nuevo-concepto">${Iconos.mas()} Nuevo concepto</button>
+        </div>
+      `;
+
+      host.querySelectorAll('[data-editar-categoria]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const cat = categorias.find((c) => c.id === btn.dataset.editarCategoria);
+          abrirSheetCategoria({ categoria: cat, onGuardado: reabrir, onEliminada: reabrir });
+        });
+      });
+      host.querySelectorAll('[data-editar-concepto]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const cpt = conceptosList.find((c) => c.id === btn.dataset.editarConcepto);
+          abrirSheetConcepto({ concepto: cpt, onGuardado: reabrir, onEliminada: reabrir });
+        });
+      });
+      host.querySelector('#btn-config-nueva-categoria').addEventListener('click', () => {
+        abrirSheetCategoria({ onGuardado: reabrir });
+      });
+      host.querySelector('#btn-config-nuevo-concepto').addEventListener('click', () => {
+        abrirSheetConcepto({ onGuardado: reabrir });
+      });
+    }
+
+    render();
+    cargarDatos().then(render);
+  }, { titulo: 'Configuración' });
 }

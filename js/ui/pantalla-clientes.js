@@ -1,13 +1,19 @@
-// Pantalla "Clientes" (inicio) — contrato vigente §2.9 (PLAN-MVP.md):
-// chips de filtro por categoría, buscador, lista agrupada con orden manual
-// por arrastre, fila Σ por grupo, alta de cliente simplificada (sin cuota).
+// Pantalla "Clientes" (inicio) — contrato vigente §2.10 (PLAN-MVP.md, itera-
+// ción v3 "Excel"): filas de una sola línea (monto-es-botón), chips de filtro
+// por categoría, buscador, orden manual por arrastre, fila Σ por grupo,
+// engrane de Configuración (categorías/conceptos), y sección colapsable de
+// clientes archivados con restauración.
 
-import { listarClientesAgrupados, listarCategorias, crearCliente, crearCategoria, actualizarOrdenClientes, estaSoloLectura } from '../db.js';
+import {
+  listarClientesAgrupados, listarClientesArchivados, restaurarCliente,
+  listarCategorias, crearCliente, crearCategoria, actualizarOrdenClientes, estaSoloLectura,
+} from '../db.js';
+import { formatearCompacto } from '../utils/money.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, escapeHtml, debounce,
   mostrarToast, errorCampo, errorGeneral, Iconos, bolitaHtml,
-  abrirSheet, cerrarSheet, abrirSheetCategoria, abrirPanelRapido, activarLongPress, activarArrastreOrden,
-  PALETA_COLORES_CATEGORIA,
+  abrirSheet, cerrarSheet, abrirSheetCategoria, abrirSheetConfiguracion, abrirPanelRapido,
+  activarLongPress, activarArrastreOrden, PALETA_COLORES_CATEGORIA,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -15,12 +21,30 @@ const MICROCOPY = `
   (categorías con color, o sin categoría). Los cobros son como tú los
   acuerdes con cada quien: no hay cuotas fijas — vos registrás cada abono y
   cada cargo cuando pasa.</p>
-  <p>Tocá el nombre de un cliente para ver su calendario completo. Tocá
-  <strong>+Abono</strong> o <strong>+Cargo</strong> para registrar un
-  movimiento sin salir de esta pantalla. Mantené presionado el agarre ⋮⋮
-  para reordenar dentro de un grupo, o un chip de categoría para editarla o
-  eliminarla.</p>
+  <p><strong>El monto ES el botón:</strong> tocá el verde para registrar un
+  abono, el rojo para un cargo, o el nombre para ver el calendario completo
+  de ese cliente. Mantené presionado el agarre ⋮⋮ para reordenar dentro de un
+  grupo, o un chip de categoría para editarla o eliminarla. El engrane
+  abre la Configuración de categorías y conceptos.</p>
 `;
+
+// §2.10 A-201: a partir de $100,000.00 el monto se muestra en notación
+// compacta ("$150 k", "$1.2 M") SOLO en esta vista de lista — el monto
+// completo con centavos sigue disponible siempre en Persona y en el panel
+// rápido. Evita que columnas angostas fuercen el nombre a colapsar.
+const UMBRAL_COMPACTO_CENTAVOS = 100000 * 100; // $100,000.00
+
+function montoListaOGuion(centavos) {
+  if (centavos === null || centavos === undefined) return '—';
+  return Math.abs(centavos) >= UMBRAL_COMPACTO_CENTAVOS ? formatearCompacto(centavos) : montoOGuion(centavos);
+}
+
+/** Envuelve el texto del monto en un <span> de bloque — necesario para que la
+ * elipsis por overflow funcione bien dentro de un contenedor flex alineado a
+ * la derecha (ver comentario de .fila-excel-monto-texto en styles.css). */
+function montoSpan(texto) {
+  return `<span class="fila-excel-monto-texto">${texto}</span>`;
+}
 
 /** Sentinel de estado local: "Todos" no es una categoría real. */
 const FILTRO_TODOS = Symbol('todos');
@@ -30,32 +54,35 @@ function filaClienteHtml(c, categoriaColor) {
   const sinMovimientos = !c.tiene_movimientos;
   const saldoParaMostrar = sinMovimientos ? null : c.saldo_centavos;
   return `
-    <li class="lista-item fila-cliente" data-cliente-id="${escapeHtml(c.id)}">
-      <div class="fila-cliente-principal">
-        <span class="asa-arrastre" aria-hidden="true" title="Mantené presionado para reordenar">${Iconos.arrastre()}</span>
-        ${bolitaHtml(categoriaColor)}
-        <button type="button" class="fila-cliente-nombre" data-accion="ver-persona">${escapeHtml(c.nombre)}</button>
-        <span class="fila-cliente-saldo ${sinMovimientos ? '' : claseSaldo(c.saldo_centavos)}">${montoOGuion(saldoParaMostrar)}</span>
-      </div>
-      <div class="fila-cliente-botones">
-        <button type="button" class="btn-dato btn-dato-abono" data-accion="abono">+Abono <strong>${montoOGuion(c.abonos_mes_centavos)}</strong></button>
-        <button type="button" class="btn-dato btn-dato-cargo" data-accion="cargo">+Cargo <strong>${montoOGuion(c.cargos_mes_centavos)}</strong></button>
-      </div>
+    <li class="lista-item fila-cliente fila-excel" data-cliente-id="${escapeHtml(c.id)}">
+      <span class="asa-arrastre" aria-hidden="true" title="Mantené presionado para reordenar">${Iconos.arrastre()}</span>
+      ${bolitaHtml(categoriaColor)}
+      <button type="button" class="fila-excel-nombre" data-accion="ver-persona" title="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</button>
+      <button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" title="${escapeHtml(montoOGuion(c.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(c.abonos_mes_centavos))}</button>
+      <button type="button" class="fila-excel-monto monto-negativo" data-accion="cargo" title="${escapeHtml(montoOGuion(c.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(c.cargos_mes_centavos))}</button>
+      <span class="fila-excel-monto ${sinMovimientos ? '' : claseSaldo(c.saldo_centavos)}" title="${escapeHtml(montoOGuion(saldoParaMostrar))}">${montoSpan(montoListaOGuion(saldoParaMostrar))}</span>
     </li>`;
 }
 
 function filaSumaHtml(grupo) {
   const colorEstilo = grupo.categoria_color ? `color:${escapeHtml(grupo.categoria_color)}` : '';
   return `
-    <li class="lista-item fila-suma-grupo" style="${colorEstilo}">
-      <div class="fila-cliente-principal">
-        <span class="fila-suma-etiqueta">Σ ${escapeHtml(grupo.categoria_nombre)}</span>
-        <span class="fila-cliente-saldo">${montoOGuion(grupo.totales.saldo_centavos)}</span>
-      </div>
-      <div class="fila-cliente-botones fila-suma-datos">
-        <span>Abonos: ${montoOGuion(grupo.totales.abonos_mes_centavos)}</span>
-        <span>Cargos: ${montoOGuion(grupo.totales.cargos_mes_centavos)}</span>
-      </div>
+    <li class="lista-item fila-suma-grupo fila-excel" style="${colorEstilo}">
+      <span class="asa-arrastre-vacia" aria-hidden="true"></span>
+      <span class="fila-suma-etiqueta">Σ ${escapeHtml(grupo.categoria_nombre)}</span>
+      <span class="fila-excel-monto monto-positivo" title="${escapeHtml(montoOGuion(grupo.totales.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.abonos_mes_centavos))}</span>
+      <span class="fila-excel-monto monto-negativo" title="${escapeHtml(montoOGuion(grupo.totales.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.cargos_mes_centavos))}</span>
+      <span class="fila-excel-monto" title="${escapeHtml(montoOGuion(grupo.totales.saldo_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.saldo_centavos))}</span>
+    </li>`;
+}
+
+function filaArchivadoHtml(c) {
+  return `
+    <li class="lista-item fila-archivado" data-cliente-archivado-id="${escapeHtml(c.id)}">
+      ${bolitaHtml(c.categoria ? c.categoria.color : null)}
+      <span class="fila-archivado-nombre">${escapeHtml(c.nombre)}</span>
+      <span class="fila-excel-monto ${claseSaldo(c.saldo_centavos)}" title="${escapeHtml(montoOGuion(c.saldo_centavos))}">${montoSpan(montoListaOGuion(c.saldo_centavos))}</span>
+      <button type="button" class="btn btn-secundario btn-pequeno" data-accion="restaurar">${Iconos.restaurar()} Restaurar</button>
     </li>`;
 }
 
@@ -110,6 +137,7 @@ export async function renderPantallaClientes(contenedor) {
     await refrescarCategorias();
     renderChipsCategoria();
     await refrescarLista();
+    await refrescarArchivados();
   }
 
   async function refrescarLista() {
@@ -150,7 +178,7 @@ export async function renderPantallaClientes(contenedor) {
       ul.querySelectorAll('[data-accion="abono"], [data-accion="cargo"]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const li = btn.closest('[data-cliente-id]');
-          const nombre = li.querySelector('.fila-cliente-nombre').textContent;
+          const nombre = li.querySelector('.fila-excel-nombre').textContent;
           abrirPanelRapido({
             tipo: btn.dataset.accion === 'abono' ? 'ABONO' : 'CARGO',
             clienteId: li.dataset.clienteId,
@@ -166,6 +194,34 @@ export async function renderPantallaClientes(contenedor) {
           mostrarToast(e.message || 'No se pudo guardar el nuevo orden.', 'error');
         }
         await refrescarLista();
+      });
+    });
+  }
+
+  async function refrescarArchivados() {
+    const elDetalles = contenedor.querySelector('#seccion-archivados');
+    const elLista = contenedor.querySelector('#lista-archivados');
+    if (!elDetalles || !elLista) return;
+    const archivados = await listarClientesArchivados();
+    const elResumen = contenedor.querySelector('#resumen-archivados');
+    if (elResumen) elResumen.innerHTML = `${Iconos.cajaArchivo()} Archivados (${archivados.length})`;
+    if (archivados.length === 0) {
+      elLista.innerHTML = estadoVacio('No hay clientes archivados.');
+      return;
+    }
+    elLista.innerHTML = `<ul class="lista lista-archivados">${archivados.map(filaArchivadoHtml).join('')}</ul>`;
+    elLista.querySelectorAll('[data-accion="restaurar"]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const li = btn.closest('[data-cliente-archivado-id]');
+        const idCliente = li.dataset.clienteArchivadoId;
+        try {
+          await restaurarCliente(idCliente);
+          mostrarToast('Cliente restaurado.', 'exito');
+          await refrescarArchivados();
+          await refrescarLista();
+        } catch (e) {
+          mostrarToast(e.message || 'No se pudo restaurar el cliente.', 'error');
+        }
       });
     });
   }
@@ -304,7 +360,10 @@ export async function renderPantallaClientes(contenedor) {
   contenedor.innerHTML = `
     <section class="pantalla" data-pantalla="clientes">
       ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
-      <h1>Clientes</h1>
+      <div class="encabezado-clientes">
+        <h1>Clientes</h1>
+        <button type="button" class="btn-icono" id="btn-config" aria-label="Configuración de categorías y conceptos">${Iconos.engrane()}</button>
+      </div>
       <div class="campo">
         <label id="etiqueta-filtro-categoria">Filtrar por categoría</label>
         <div class="chips-fila" id="wrap-chips-categoria" aria-labelledby="etiqueta-filtro-categoria"></div>
@@ -314,14 +373,25 @@ export async function renderPantallaClientes(contenedor) {
         <input id="buscador-clientes" type="search" placeholder="Ej. Rosa, 5215..." />
       </div>
       <button type="button" class="btn btn-primario" id="btn-nuevo-cliente" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>${Iconos.mas()} Nuevo cliente</button>
-      <p class="cabecera-columnas">Abonos (mes) · Cargos (mes) · Saldo</p>
+      <div class="cabecera-columnas cabecera-columnas-excel">
+        <span></span><span></span><span class="cabecera-columnas-nombre">Cliente</span>
+        <span class="cabecera-columnas-monto">Abonos</span><span class="cabecera-columnas-monto">Cargos</span><span class="cabecera-columnas-monto">Saldo</span>
+      </div>
       <div id="lista-clientes-agrupados" aria-live="polite"></div>
+
+      <details class="panel-colapsable panel-archivados" id="seccion-archivados">
+        <summary id="resumen-archivados">${Iconos.cajaArchivo()} Archivados (0)</summary>
+        <div id="lista-archivados" aria-live="polite"></div>
+      </details>
     </section>
   `;
 
   await refrescarTodo();
 
   contenedor.querySelector('#btn-nuevo-cliente').addEventListener('click', abrirSheetNuevoCliente);
+  contenedor.querySelector('#btn-config').addEventListener('click', () => {
+    abrirSheetConfiguracion({ onCambios: refrescarTodo });
+  });
 
   const buscador = contenedor.querySelector('#buscador-clientes');
   const onBuscar = debounce(async (valor) => {

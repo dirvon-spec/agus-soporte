@@ -15,6 +15,17 @@ const formateador = new Intl.NumberFormat(LOCALE, {
   maximumFractionDigits: 2,
 });
 
+// §2.10 A-201: notación compacta es-MX (ej. "$150 k", "$1.2 M") para espacios
+// angostos donde el monto completo no entra — hoy solo la fila "Excel" de la
+// pantalla Clientes. NUNCA usar donde el monto completo deba ser confiable
+// (Persona, panel rápido, impresión): ahí siempre formatearCentavos().
+const formateadorCompacto = new Intl.NumberFormat(LOCALE, {
+  style: 'currency',
+  currency: MONEDA,
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+
 // Acepta: dígitos sin separador de miles ("1234.50"), o agrupados correctamente
 // de a 3 con coma ("1,234.50"); "$" inicial opcional; parte decimal opcional de
 // 1 o 2 dígitos.
@@ -30,6 +41,21 @@ export function formatearCentavos(centavos) {
     throw crearError('VALIDATION_ERROR', 'El monto debe ser un entero de centavos.', { centavos });
   }
   return formateador.format(centavos / 100);
+}
+
+/**
+ * §2.10 A-201: variante compacta de formatearCentavos (ej. "$150 k", "$1.2 M"),
+ * para vistas de lista angostas donde el monto completo no entra. El monto
+ * completo con centavos SIEMPRE debe seguir disponible en algún otro lugar
+ * (Persona, panel rápido) — este helper es solo de presentación abreviada.
+ * @param {number} centavos
+ * @returns {string}
+ */
+export function formatearCompacto(centavos) {
+  if (!Number.isInteger(centavos)) {
+    throw crearError('VALIDATION_ERROR', 'El monto debe ser un entero de centavos.', { centavos });
+  }
+  return formateadorCompacto.format(centavos / 100);
 }
 
 /**

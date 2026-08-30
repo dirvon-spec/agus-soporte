@@ -741,19 +741,6 @@ button {
   margin: 0 0 var(--espaciado-sm);
 }
 
-.fila-cliente {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: var(--espaciado-sm);
-}
-
-.fila-cliente-principal {
-  display: flex;
-  align-items: center;
-  gap: var(--espaciado-sm);
-}
-
 .asa-arrastre {
   display: inline-flex;
   color: var(--color-texto-secundario);
@@ -764,61 +751,13 @@ button {
   flex-shrink: 0;
 }
 
-.fila-cliente-nombre {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: none;
-  padding: 0;
-  text-align: left;
-  font-weight: 600;
-  font-size: 0.95rem;
-  color: var(--color-texto);
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
+.asa-arrastre-vacia {
+  /* A-201: ocupa las DOS columnas de agarre+bolita en la fila Σ (que no tiene
+     bolita propia) — sin esto, "Σ {categoría}" cae en la angosta columna de
+     la bolita en vez de la del nombre, y se recorta a casi nada. */
+  display: inline-block;
+  grid-column: span 2;
 }
-
-.fila-cliente-saldo {
-  font-weight: 700;
-  font-size: 0.92rem;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.fila-cliente-botones {
-  display: flex;
-  gap: var(--espaciado-sm);
-  padding-left: calc(10px + 6px + 8px + var(--espaciado-sm)); /* alinea bajo el nombre (agarre + bolita + gaps) */
-}
-
-.btn-dato {
-  flex: 1;
-  min-height: 40px;
-  padding: 6px 10px;
-  border-radius: var(--radio-borde-chico);
-  border: 1px solid var(--color-borde);
-  background: var(--color-fondo-secundario);
-  color: var(--color-texto);
-  font-size: 0.78rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.btn-dato strong {
-  font-size: 0.85rem;
-}
-
-.btn-dato-abono strong { color: var(--color-exito); }
-.btn-dato-cargo strong { color: var(--color-error); }
 
 .fila-arrastrando {
   opacity: 0.6;
@@ -832,15 +771,377 @@ button {
 
 .fila-suma-etiqueta {
   font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.fila-suma-datos {
-  padding-left: 0;
+/* ============================================================
+   §2.10 — Filas "Excel" de una línea: el monto ES el botón.
+   Grid: agarre | bolita | nombre (elástico, elipsis) | abono | cargo | saldo
+   ============================================================ */
+
+.cabecera-columnas-excel,
+.fila-excel {
+  /* A-201: el nombre tiene un piso digno (no puede colapsar a ~0 cuando los
+     montos son grandes) y las columnas de monto tienen un techo (no crecen
+     sin límite) — la notación compacta (money.js: formatearCompacto) evita
+     que un monto gigante fuerce el techo de todas formas. */
+  display: grid;
+  grid-template-columns: 20px 12px minmax(90px, 1fr) minmax(50px, 86px) minmax(50px, 86px) minmax(50px, 86px);
+  align-items: center;
+  gap: 3px;
+  min-height: 44px;
+  padding: 4px 6px;
+}
+
+.cabecera-columnas-excel {
+  min-height: 0;
+  padding: 0 var(--espaciado-sm);
+  margin: var(--espaciado-md) 0 var(--espaciado-xs);
+  font-size: 0.68rem;
+  color: var(--color-texto-secundario);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.cabecera-columnas-nombre {
+  min-width: 0;
+}
+
+.cabecera-columnas-monto {
+  text-align: right;
+}
+
+.fila-excel-nombre {
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--color-texto);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fila-excel-monto {
+  background: none;
+  border: none;
+  padding: 4px 1px;
+  font-weight: 700;
   font-size: 0.78rem;
-  color: inherit;
-  opacity: 0.85;
-  justify-content: flex-start;
-  gap: var(--espaciado-md);
+  text-align: right;
+  color: var(--color-texto);
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0; /* A-201: sin esto, el hijo de texto no encoge y se recorta por la izquierda (queda "45,678.50" sin el "$") */
+}
+
+/* A-201: la elipsis vive en un <span> interno de bloque — aplicada
+   directamente sobre el contenedor flex (.fila-excel-monto), el texto
+   alineado a la derecha se recorta por la IZQUIERDA sin mostrar "…" (el "$"
+   desaparece en silencio). Envolver el texto resuelve el bug. */
+.fila-excel-monto-texto {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+button.fila-excel-monto {
+  cursor: pointer;
+  border-radius: var(--radio-borde-chico);
+}
+
+button.fila-excel-monto:hover,
+button.fila-excel-monto:focus-visible {
+  background: var(--color-fondo-secundario);
+}
+
+/* ============================================================
+   §2.10 — Sección colapsable "📦 Archivados"
+   ============================================================ */
+
+.panel-archivados {
+  margin-top: var(--espaciado-lg);
+}
+
+.fila-archivado {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+  opacity: 0.72;
+}
+
+.fila-archivado-nombre {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+/* ============================================================
+   §2.10 — Sheet "Configuración" (categorías + conceptos)
+   ============================================================ */
+
+.config-seccion {
+  margin-bottom: var(--espaciado-lg);
+}
+
+.config-seccion-titulo {
+  margin: 0 0 var(--espaciado-sm);
+  font-size: 0.95rem;
+}
+
+.fila-config {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+}
+
+.fila-config-nombre {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.fila-config-conteo {
+  font-size: 0.78rem;
+  color: var(--color-texto-secundario);
+  white-space: nowrap;
+}
+
+/* ============================================================
+   §2.10 — Encabezado de Clientes con engrane de Configuración
+   ============================================================ */
+
+.encabezado-clientes {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--espaciado-sm);
+}
+
+.encabezado-clientes h1 {
+  margin: 0;
+}
+
+/* ============================================================
+   §2.10 (B-024) — Teclado numérico integrado del panel rápido: el monto se
+   captura con este keypad, NUNCA con un <input> real (así el teclado del
+   sistema jamás aparece).
+   ============================================================ */
+
+.keypad-monto {
+  margin-bottom: var(--espaciado-sm);
+}
+
+.keypad-display {
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 700;
+  padding: var(--espaciado-sm);
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde);
+  background: var(--color-fondo-secundario);
+  user-select: none;
+}
+
+.keypad-display-error {
+  border-color: var(--color-error);
+}
+
+.keypad-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(4, minmax(48px, 1fr));
+  gap: 6px;
+  margin: var(--espaciado-sm) 0;
+}
+
+.keypad-tecla {
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde-chico);
+  background: var(--color-fondo-secundario);
+  color: var(--color-texto);
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+}
+
+.keypad-tecla:active {
+  background: var(--color-borde);
+}
+
+.keypad-borrar {
+  font-size: 1.3rem;
+}
+
+.keypad-guardar {
+  background: var(--color-primario);
+  color: var(--color-primario-texto);
+  border-color: var(--color-primario);
+  font-size: 0.95rem;
+  line-height: 1.2;
+}
+
+/* ============================================================
+   §2.10 — Persona: ✎ Editar, celdas de calendario más altas (concepto y
+   monto en líneas separadas), zona de archivar, lista de movimientos del mes
+   ============================================================ */
+
+.encabezado-persona-nombre {
+  flex: 1;
+}
+
+#btn-editar-persona {
+  width: auto;
+  height: auto;
+  padding: 6px 10px;
+  gap: 4px;
+  border-radius: var(--radio-borde-chico);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.zona-archivar {
+  margin-top: var(--espaciado-lg);
+  padding-top: var(--espaciado-md);
+  border-top: 1px dashed var(--color-borde);
+}
+
+.zona-archivar-titulo {
+  margin: 0 0 var(--espaciado-xs);
+  font-size: 0.95rem;
+}
+
+.lista-movimientos-mes {
+  margin-bottom: var(--espaciado-lg);
+}
+
+.fila-movimiento-mes {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+}
+
+.fila-movimiento-fecha {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: var(--color-texto-secundario);
+  width: 4.6em;
+}
+
+.fila-movimiento-detalle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   §2.10 — Pestaña Global: calendario compacto de totales por día
+   ============================================================ */
+
+.aviso-recordatorio-respaldo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--espaciado-sm);
+  flex-wrap: wrap;
+  background: var(--color-advertencia-bg);
+  color: var(--color-advertencia);
+  border: 1px solid var(--color-advertencia);
+  border-radius: var(--radio-borde);
+  padding: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-md);
+  position: static;
+}
+
+.global-celda {
+  gap: 0;
+}
+
+.global-celda-futura {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.global-celda-limpia {
+  background: var(--color-fondo);
+}
+
+.global-celda-con-movimientos {
+  background: var(--color-fondo-secundario);
+}
+
+.global-celda-seleccionada {
+  outline: 2px solid var(--color-primario);
+  outline-offset: -2px;
+}
+
+.global-dato-abono,
+.global-dato-cargo {
+  font-size: 0.56rem;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.global-dato-abono { color: var(--color-exito); }
+.global-dato-cargo { color: var(--color-error); }
+
+.lista-desglose-dia {
+  margin-bottom: var(--espaciado-lg);
+}
+
+.fila-desglose-dia {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+  cursor: pointer;
+}
+
+.fila-desglose-cliente {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.fila-desglose-detalle {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: var(--color-texto-secundario);
+}
+
+.panel-archivados-historia {
+  margin-top: var(--espaciado-lg);
+}
+
+.nav-icono-emoji {
+  font-size: 1.1rem;
+  line-height: 1;
 }
 
 .fila-suma-datos span {
@@ -991,8 +1292,7 @@ button {
 }
 
 .mes-celda {
-  aspect-ratio: 1;
-  min-height: 44px;
+  min-height: 62px;
   border: 1px solid var(--color-borde);
   border-radius: 4px;
   background: var(--color-fondo);
@@ -1002,8 +1302,14 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 1px;
+  padding: 2px;
   overflow: hidden;
+}
+
+/* Calendario compacto de Global (§2.10): totales por día, sin concepto — se
+   mantiene chico a propósito, a diferencia del de Persona (más alto). */
+.mes-grilla-global .mes-celda {
+  min-height: 44px;
 }
 
 .mes-celda-vacia {
@@ -1013,7 +1319,7 @@ button {
 }
 
 .mes-celda-numero {
-  font-size: 0.68rem;
+  font-size: 0.74rem;
   font-weight: 600;
   line-height: 1;
 }
@@ -1022,13 +1328,14 @@ button {
   display: flex;
   flex-direction: column;
   align-items: center;
-  line-height: 1.05;
+  line-height: 1.15;
   max-width: 100%;
 }
 
 .mes-dato-abono,
-.mes-dato-cargo {
-  font-size: 0.5rem;
+.mes-dato-cargo-concepto,
+.mes-dato-cargo-monto {
+  font-size: 0.56rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -1037,13 +1344,14 @@ button {
 }
 
 .mes-dato-abono { color: var(--color-exito); }
-.mes-dato-cargo { color: var(--color-error); }
+.mes-dato-cargo-concepto,
+.mes-dato-cargo-monto { color: var(--color-error); }
 
 .mes-celda-saldo {
-  font-size: 0.48rem;
+  font-size: 0.52rem;
   color: var(--color-texto-secundario);
   line-height: 1;
-  margin-top: 1px;
+  margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

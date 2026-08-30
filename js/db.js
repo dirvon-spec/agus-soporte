@@ -716,14 +716,30 @@ function pad2(n) {
 }
 
 /**
+ * §2.10: registra la fecha ISO de este export exitoso en meta.ultimo_respaldo
+ * (para el recordatorio "tu último respaldo fue hace N días" de la pestaña
+ * Global) antes de serializar, así el propio archivo exportado también
+ * queda con el registro honesto de que se exportó.
  * @returns {Promise<{blob: Blob, nombreArchivo: string}>}
  */
 export async function exportarRespaldo() {
+  setMetaInterno('ultimo_respaldo', ahoraIso());
+  await persistirEnIndexedDB();
+
   const bytes = exportarBytesDb();
   const blob = new Blob([bytes], { type: 'application/x-sqlite3' });
   const ahora = new Date();
   const nombreArchivo = `respaldo-${ahora.getFullYear()}${pad2(ahora.getMonth() + 1)}${pad2(ahora.getDate())}-${pad2(ahora.getHours())}${pad2(ahora.getMinutes())}.sqlite`;
   return { blob, nombreArchivo };
+}
+
+/**
+ * §2.10: fecha ISO 8601 (instante) del último exportarRespaldo() exitoso, o
+ * null si nunca se exportó un respaldo desde esta base.
+ * @returns {Promise<string|null>}
+ */
+export async function obtenerUltimoRespaldo() {
+  return obtenerMetaInterno('ultimo_respaldo');
 }
 
 /**
@@ -1398,6 +1414,93 @@ export async function borrarClienteLogico(id, opciones = {}) {
   await persistirEnIndexedDB();
 }
 
+/**
+ * §2.10: "↩ Restaurar" de la sección Archivados. NOT_FOUND si el id no
+ * existe o si existe pero NO está archivado (deleted_at IS NULL). Único-vivo
+ * (A-101): si mientras estuvo archivado otro cliente ACTIVO tomó su nombre,
+ * se rechaza con CONFLICT y NO se restaura (no se pisa al que tiene el
+ * nombre ahora). Entra al FINAL del orden de su grupo — si su categoría
+ * murió mientras estaba archivado, cae en "sin categoría" (mismo criterio
+ * que borrarCategoriaLogica aplica a los clientes activos).
+ * @param {string} id
+ * @returns {Promise<object>}
+ */
+export async function restaurarCliente(id) {
+  verificarEscritura();
+
+  const cliente = unaFila('SELECT * FROM clientes WHERE id = ? AND deleted_at IS NOT NULL', [id]);
+  if (!cliente) throw crearError('NOT_FOUND', 'Cliente archivado no encontrado.', { id });
+
+  const conflicto = unaFila('SELECT id FROM clientes WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?)', [cliente.nombre]);
+  if (conflicto) {
+    throw crearError(
+      'CONFLICT',
+      `No se puede restaurar: ya existe un cliente activo llamado "${cliente.nombre}".`,
+      { campo: 'nombre' }
+    );
+  }
+
+  let categoriaEfectiva = null;
+  if (cliente.categoria_id !== null) {
+    const categoriaViva = unaFila('SELECT id FROM categorias WHERE id = ? AND deleted_at IS NULL', [cliente.categoria_id]);
+    if (categoriaViva) categoriaEfectiva = cliente.categoria_id;
+  }
+
+  const filaOrden =
+    categoriaEfectiva === null
+      ? unaFila('SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM clientes WHERE categoria_id IS NULL AND deleted_at IS NULL')
+      : unaFila('SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM clientes WHERE categoria_id = ? AND deleted_at IS NULL', [categoriaEfectiva]);
+  const ordenNuevo = (filaOrden ? filaOrden.maxOrden : -1) + 1;
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE clientes SET deleted_at=NULL, categoria_id=?, orden=?, updated_at=? WHERE id=?', [categoriaEfectiva, ordenNuevo, ts, id]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM clientes WHERE id = ?', [id]);
+}
+
+/**
+ * §2.10: clientes archivados (deleted_at IS NOT NULL) para la sección
+ * colapsable "📦 Archivados" — fuera del buscador/Σ de listarClientesAgrupados
+ * (ya excluidos ahí por deleted_at; ver test explícito en dev-verify).
+ * `categoria` viene NULL si la categoría del cliente ya no está viva (murió
+ * mientras el cliente estaba archivado y la cascada de borrarCategoriaLogica
+ * no lo tocó, porque esa cascada solo alcanza a clientes ACTIVOS).
+ * @returns {Promise<Array<{id:string, nombre:string, categoria: {id:string,nombre:string,color:string}|null, saldo_centavos:number}>>}
+ */
+export async function listarClientesArchivados() {
+  const hoyStr = hoy();
+  const filas = todasLasFilas(
+    `SELECT c.id, c.nombre, c.categoria_id,
+        cat.nombre AS cat_nombre, cat.color AS cat_color,
+        COALESCE((SELECT SUM(
+            CASE WHEN m.tipo='CARGO' THEN m.monto_centavos
+                 WHEN m.tipo='ABONO' THEN -m.monto_centavos
+                 WHEN m.tipo='AJUSTE' THEN m.monto_centavos
+                 ELSE 0 END)
+          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL AND m.fecha <= ?), 0) AS saldo_centavos
+     FROM clientes c
+     LEFT JOIN categorias cat ON cat.id = c.categoria_id AND cat.deleted_at IS NULL
+     WHERE c.deleted_at IS NOT NULL
+     ORDER BY c.nombre ASC`,
+    [hoyStr]
+  );
+
+  return filas.map((f) => ({
+    id: f.id,
+    nombre: f.nombre,
+    categoria: f.categoria_id && f.cat_nombre !== null ? { id: f.categoria_id, nombre: f.cat_nombre, color: f.cat_color } : null,
+    saldo_centavos: f.saldo_centavos,
+  }));
+}
+
 // ============================================================
 // Acuerdos
 // ============================================================
@@ -1898,6 +2001,86 @@ export async function resumenMensual(anioMes) {
   }
 
   return { totalCargosCentavos, totalAbonosCentavos, carteraPendienteCentavos, porCliente };
+}
+
+/**
+ * §2.10, pestaña Global: calendario de MOVIMIENTOS por fecha (no confundir
+ * con el `obtenerCalendarioGlobal` @deprecated, que es de ESTADOS de
+ * cumplimiento de cuota — ese es otro concepto retirado en v3).
+ *
+ * Por día del mes (solo hasta hoy si `anioMes` es el mes en curso — un mes
+ * íntegramente futuro da un resultado vacío): abonosCentavos/cargosCentavos
+ * son sumas puras por tipo (AJUSTE no suma a ninguno de los dos, igual que
+ * resumenMensual/totalCargosCentavos), y `movimientos` trae el detalle
+ * completo del día (incluye AJUSTE, con concepto:null) para el popover.
+ *
+ * INCLUYE movimientos de clientes archivados (misma filosofía A-001: la
+ * historia por fecha no se falsea porque alguien se haya archivado después).
+ * `totalesMes` reutiliza resumenMensual() (ya corregido por A-001) en vez de
+ * duplicar esa lógica.
+ *
+ * Rendimiento: 1 query para todos los movimientos del rango (con el nombre
+ * del cliente ya resuelto vía JOIN) + resumenMensual() internamente hace sus
+ * propias queries acotadas — nunca una consulta por día.
+ *
+ * @param {string} anioMes 'YYYY-MM'
+ * @returns {Promise<{
+ *   dias: Map<string, {abonosCentavos:number, cargosCentavos:number, movimientos: Array<{cliente_id:string, cliente_nombre:string, tipo:string, concepto:?string, montoCentavos:number, referencia:?string}>}>,
+ *   totalesMes: {abonosCentavos:number, cargosCentavos:number, carteraPendienteCentavos:number}
+ * }>}
+ */
+export async function obtenerCalendarioGlobalMovimientos(anioMes) {
+  const [anioStr, mesStr] = anioMes.split('-');
+  const anio = Number(anioStr);
+  const mes = Number(mesStr);
+  const primerDia = `${anioStr}-${mesStr}-01`;
+  const ultimoDiaMes = `${anioStr}-${mesStr}-${pad2(new Date(anio, mes, 0).getDate())}`;
+
+  const hoyStr = hoy();
+  const fechaHastaEfectiva = ultimoDiaMes > hoyStr ? hoyStr : ultimoDiaMes;
+  const diasVisibles = rango(primerDia, fechaHastaEfectiva); // [] si TODO el mes es futuro
+
+  const dias = new Map();
+  for (const fecha of diasVisibles) {
+    dias.set(fecha, { abonosCentavos: 0, cargosCentavos: 0, movimientos: [] });
+  }
+
+  if (diasVisibles.length === 0) {
+    return { dias, totalesMes: { abonosCentavos: 0, cargosCentavos: 0, carteraPendienteCentavos: 0 } };
+  }
+
+  const filas = todasLasFilas(
+    `SELECT m.cliente_id, c.nombre AS cliente_nombre, m.tipo, m.monto_centavos, m.fecha, m.servicio, m.referencia
+     FROM movimientos m
+     JOIN clientes c ON c.id = m.cliente_id
+     WHERE m.deleted_at IS NULL AND m.tipo IN ('CARGO','ABONO','AJUSTE') AND m.fecha BETWEEN ? AND ?
+     ORDER BY m.fecha ASC, m.created_at ASC`,
+    [primerDia, fechaHastaEfectiva]
+  );
+
+  for (const fila of filas) {
+    const diaAgg = dias.get(fila.fecha);
+    if (!diaAgg) continue; // no debería pasar (la query ya está acotada al rango visible)
+    diaAgg.movimientos.push({
+      cliente_id: fila.cliente_id,
+      cliente_nombre: fila.cliente_nombre,
+      tipo: fila.tipo,
+      concepto: fila.tipo === 'CARGO' ? fila.servicio : null,
+      montoCentavos: fila.monto_centavos,
+      referencia: fila.referencia,
+    });
+    if (fila.tipo === 'ABONO') diaAgg.abonosCentavos += fila.monto_centavos;
+    if (fila.tipo === 'CARGO') diaAgg.cargosCentavos += fila.monto_centavos;
+  }
+
+  const resumen = await resumenMensual(anioMes);
+  const totalesMes = {
+    abonosCentavos: resumen.totalAbonosCentavos,
+    cargosCentavos: resumen.totalCargosCentavos,
+    carteraPendienteCentavos: resumen.carteraPendienteCentavos,
+  };
+
+  return { dias, totalesMes };
 }
 
 /**

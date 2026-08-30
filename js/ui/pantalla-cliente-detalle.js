@@ -1,18 +1,22 @@
-// Pantalla "Persona" (antes "Detalle de cliente") — contrato vigente §2.9
-// (PLAN-MVP.md): encabezado compacto, tarjeta +Abonos/+Cargos/Saldo, y un
-// calendario mensual completo (semana-lunes) como protagonista — esta
-// pantalla ES el reporte que el gestor manda por pantallazo. Debe caber
-// completa (tarjeta + mes entero) en un viewport de teléfono, sin scroll.
+// Pantalla "Persona" (antes "Detalle de cliente") — contrato vigente §2.10
+// (PLAN-MVP.md, iteración v3 "Excel"): encabezado compacto con ✎ Editar,
+// tarjeta +Abonos/+Cargos/Saldo, calendario mensual completo (semana-lunes,
+// celdas más altas con concepto y monto en líneas separadas) — esta pantalla
+// ES el reporte que el gestor manda por pantallazo (tarjeta + mes). Debajo
+// del calendario: lista completa de movimientos del mes visible. Ya no se
+// exige que quepa sin scroll — el pantallazo sigue siendo tarjeta+calendario,
+// el resto se accede con scroll natural.
 //
-// SIN lista de movimientos permanente, SIN WhatsApp, SIN cuotas/frecuencia.
-// El estado de cuenta imprimible se conserva (es gratis mantenerlo) pero sin
-// botón visible en esta pantalla — se llega solo por URL directa.
+// SIN WhatsApp, SIN cuotas/frecuencia. El estado de cuenta imprimible se
+// conserva (es gratis mantenerlo) pero sin botón visible en esta pantalla —
+// se llega solo por URL directa.
 
-import { obtenerCliente, calcularSaldo, listarCategorias, listarMovimientos, obtenerCalendarioMovimientos } from '../db.js';
+import { obtenerCliente, calcularSaldo, listarCategorias, listarMovimientos, obtenerCalendarioMovimientos, actualizarCliente, borrarClienteLogico } from '../db.js';
 import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, montoCortoOGuion, claseSaldo,
   formatearFechaCorta, formatearMesAnio, escapeHtml, bolitaHtml, abrirPanelRapido, Iconos,
+  abrirSheet, cerrarSheet, mostrarToast, errorCampo, errorGeneral,
 } from './componentes.js';
 
 const MICROCOPY_PERSONA = `
@@ -21,8 +25,9 @@ const MICROCOPY_PERSONA = `
   cargaste (rojo), con el concepto. Los cobros son como los acuerdes con
   cada quien — no hay cuotas fijas.</p>
   <p>Tocá <strong>+Abonos</strong> o <strong>+Cargos</strong> para registrar
-  un movimiento. Tocá cualquier día del calendario para ver el detalle
-  completo de ese día.</p>
+  un movimiento, o <strong>✎ Editar</strong> para cambiar sus datos o
+  archivarlo. Tocá cualquier día del calendario para ver el detalle completo
+  de ese día; debajo tenés la lista completa de movimientos del mes.</p>
 `;
 
 const DIAS_SEMANA_LUNES = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
@@ -85,11 +90,35 @@ function lineasCelda(diaInfo) {
   const lineas = [];
   if (diaInfo.abonosCentavos > 0) lineas.push(`<span class="mes-dato-abono">+${montoCortoOGuion(diaInfo.abonosCentavos)}</span>`);
   if (diaInfo.cargosCentavos > 0) {
+    // §2.10: celdas más altas — concepto en su PROPIA línea, monto en otra.
     const cargos = diaInfo.movimientos.filter((m) => m.tipo === 'CARGO');
     const etiqueta = cargos.length === 1 ? cargos[0].concepto : `${cargos.length} cargos`;
-    lineas.push(`<span class="mes-dato-cargo">${escapeHtml(etiqueta)} ${montoCortoOGuion(diaInfo.cargosCentavos)}</span>`);
+    lineas.push(`<span class="mes-dato-cargo-concepto">${escapeHtml(etiqueta)}</span>`);
+    lineas.push(`<span class="mes-dato-cargo-monto">${montoCortoOGuion(diaInfo.cargosCentavos)}</span>`);
   }
   return lineas.join('');
+}
+
+/**
+ * Lista completa de movimientos del mes visible, para debajo del calendario
+ * (§2.10): fecha corta, tipo/concepto, monto a color. Se arma a partir del
+ * mismo Map de `obtenerCalendarioMovimientos` ya cargado — sin queries extra.
+ */
+function listaMovimientosMesHtml(dias) {
+  const filas = [];
+  for (const [fecha, diaInfo] of dias.entries()) {
+    for (const m of diaInfo.movimientos) filas.push({ fecha, ...m });
+  }
+  if (filas.length === 0) return estadoVacio('Sin movimientos este mes.');
+  filas.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)); // más reciente primero
+  return `<ul class="lista lista-movimientos-mes">
+    ${filas.map((m) => `
+      <li class="lista-item fila-movimiento-mes">
+        <span class="fila-movimiento-fecha">${escapeHtml(formatearFechaCorta(m.fecha))}</span>
+        <span class="fila-movimiento-detalle">${m.tipo === 'CARGO' ? escapeHtml(m.concepto || 'Cargo') : 'Abono'}${m.referencia ? ` · ${escapeHtml(m.referencia)}` : ''}</span>
+        <span class="${m.tipo === 'CARGO' ? 'monto-negativo' : 'monto-positivo'}">${m.tipo === 'CARGO' ? '+' : '−'} ${montoOGuion(m.montoCentavos)}</span>
+      </li>`).join('')}
+  </ul>`;
 }
 
 /**
@@ -143,6 +172,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
           <a href="#/clientes" class="btn-icono" aria-label="Volver a Clientes">${Iconos.chevronIzquierda()}</a>
           ${bolitaHtml(categoria ? categoria.color : null, 'bolita-grande')}
           <h1 class="encabezado-persona-nombre">${escapeHtml(cliente.nombre)}</h1>
+          <button type="button" class="btn-icono" id="btn-editar-persona" aria-label="Editar cliente">${Iconos.lapiz()} Editar</button>
         </header>
 
         <div class="tarjeta-persona">
@@ -196,6 +226,9 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
           </label>
         </div>
 
+        <h2 class="titulo-seccion">Movimientos de ${escapeHtml(formatearMesAnio(mesVisible))}</h2>
+        <div id="lista-movimientos-mes">${listaMovimientosMesHtml(dias)}</div>
+
         ${fechaSeleccionada ? `
           <div class="popover-overlay" id="popover-dia-overlay">
             <div class="popover-dia" role="dialog" aria-modal="true">
@@ -217,10 +250,124 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
       </section>
     `;
 
-    wireEvents(cliente);
+    wireEvents(cliente, categorias);
   }
 
-  function wireEvents(cliente) {
+  function abrirSheetEditarCliente(cliente, categorias) {
+    abrirSheet((host) => {
+      let categoriaSeleccionada = cliente.categoria_id || null;
+      let error = {};
+      let valorNombre = cliente.nombre;
+      let valorTelefono = cliente.telefono || '';
+      let valorNotas = cliente.notas || '';
+
+      function capturarValoresActuales() {
+        const nombreEl = host.querySelector('#ec-nombre');
+        if (nombreEl) valorNombre = nombreEl.value;
+        const telefonoEl = host.querySelector('#ec-telefono');
+        if (telefonoEl) valorTelefono = telefonoEl.value;
+        const notasEl = host.querySelector('#ec-notas');
+        if (notasEl) valorNotas = notasEl.value;
+      }
+
+      function render() {
+        capturarValoresActuales();
+        host.innerHTML = `
+          <form id="form-editar-cliente" class="formulario" novalidate>
+            <div class="campo">
+              <label for="ec-nombre">Nombre</label>
+              <input id="ec-nombre" name="nombre" type="text" value="${escapeHtml(valorNombre)}" required autofocus />
+              ${errorCampo(error.nombre)}
+            </div>
+            <div class="campo">
+              <label for="ec-telefono">Teléfono (opcional)</label>
+              <input id="ec-telefono" name="telefono" type="text" value="${escapeHtml(valorTelefono)}" placeholder="Ej. 5215512340000" />
+              ${errorCampo(error.telefono)}
+            </div>
+            <div class="campo">
+              <label>Categoría (opcional)</label>
+              <div class="chips-fila">
+                <button type="button" class="chip ${categoriaSeleccionada === null ? 'chip-activo' : ''}" data-cat="">Sin categoría</button>
+                ${categorias.map((c) => `<button type="button" class="chip ${categoriaSeleccionada === c.id ? 'chip-activo' : ''}" data-cat="${escapeHtml(c.id)}">${bolitaHtml(c.color, 'bolita-chip')}${escapeHtml(c.nombre)}</button>`).join('')}
+              </div>
+            </div>
+            <div class="campo">
+              <label for="ec-notas">Notas (opcional)</label>
+              <textarea id="ec-notas" name="notas" rows="2">${escapeHtml(valorNotas)}</textarea>
+            </div>
+            ${errorGeneral(error.general)}
+            <div class="acciones-formulario">
+              <button type="submit" class="btn btn-primario btn-ancho">Guardar cambios</button>
+            </div>
+          </form>
+          <div class="zona-archivar">
+            <h3 class="zona-archivar-titulo">${Iconos.cajaArchivo()} Archivar cliente</h3>
+            <p class="texto-secundario">Archivar saca a ${escapeHtml(cliente.nombre)} de la lista de Clientes y de las Σ, pero conserva toda su historia (podés restaurarlo después desde "Archivados", y su historia sigue apareciendo en los meses pasados de Global).</p>
+            <button type="button" class="btn btn-peligro btn-ancho" id="btn-archivar-cliente">${Iconos.cajaArchivo()} Archivar cliente</button>
+          </div>`;
+
+        host.querySelectorAll('.chip[data-cat]').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            categoriaSeleccionada = chip.dataset.cat || null;
+            render();
+          });
+        });
+
+        host.querySelector('#form-editar-cliente').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const form = e.target;
+          const nombreLimpio = form.nombre.value.trim();
+          const telefonoLimpio = form.telefono.value.trim();
+          error = {};
+          if (nombreLimpio.length < 2) error.nombre = 'El nombre debe tener al menos 2 caracteres.';
+          if (telefonoLimpio && !/^[\d\s+\-]{7,20}$/.test(telefonoLimpio)) {
+            error.telefono = 'Ingresá solo dígitos, espacios, "+" y "-", entre 7 y 20 caracteres.';
+          }
+          if (Object.keys(error).length > 0) { render(); return; }
+          try {
+            await actualizarCliente(id, {
+              nombre: nombreLimpio,
+              telefono: telefonoLimpio || null,
+              categoria_id: categoriaSeleccionada,
+              notas: form.notas.value.trim() || null,
+            });
+            cerrarSheet();
+            mostrarToast('Cliente actualizado.', 'exito');
+            await renderTodo();
+          } catch (err) {
+            if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) error[err.detalle.campo] = err.message;
+            else if (err.code === 'CONFLICT') error.nombre = err.message;
+            else error.general = err.message || 'No se pudo actualizar el cliente.';
+            render();
+          }
+        });
+
+        host.querySelector('#btn-archivar-cliente').addEventListener('click', async () => {
+          const saldoActual = await calcularSaldo(id);
+          const mensaje = saldoActual !== 0
+            ? `${cliente.nombre} tiene un saldo de ${montoOGuion(saldoActual)}. ¿Archivar de todas formas? Vas a poder restaurarlo después desde "Archivados", con su historia intacta.`
+            : `¿Archivar a ${cliente.nombre}? Vas a poder restaurarlo después desde "Archivados".`;
+          const ok = window.confirm(mensaje);
+          if (!ok) return;
+          try {
+            await borrarClienteLogico(id, { forzar: true });
+            cerrarSheet();
+            mostrarToast('Cliente archivado.', 'exito');
+            window.location.hash = '#/clientes';
+          } catch (err) {
+            error.general = err.message || 'No se pudo archivar el cliente.';
+            render();
+          }
+        });
+      }
+      render();
+    }, { titulo: 'Editar cliente' });
+  }
+
+  function wireEvents(cliente, categorias) {
+    contenedor.querySelector('#btn-editar-persona').addEventListener('click', () => {
+      abrirSheetEditarCliente(cliente, categorias);
+    });
     contenedor.querySelector('#btn-tarjeta-abono').addEventListener('click', () => {
       abrirPanelRapido({ tipo: 'ABONO', clienteId: id, clienteNombre: cliente.nombre, onGuardado: renderTodo });
     });

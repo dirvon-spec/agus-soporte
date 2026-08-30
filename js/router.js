@@ -1,10 +1,11 @@
-// Router por hash — contrato vigente §2.9 (PLAN-MVP.md): rediseño "sencillo",
-// navegación en 2 pestañas (Clientes, Resumen). Se retiraron Hoy y Calendario
-// junto con todo el sistema de cuotas/frecuencias y WhatsApp — ver STORY.md.
+// Router por hash — contrato vigente §2.10 (PLAN-MVP.md, iteración v3
+// "Excel"): navegación en 2 pestañas (Clientes, Global). "Resumen" se
+// retiró y renace como "Global" (mismos datos de fondo, propósito y UI
+// nuevos — ver §2.10 y STORY.md); #/resumen redirige a #/global.
 //
 // Rutas: #/clientes (inicio y default), #/clientes/:id (pantalla Persona),
 // #/clientes/:id/imprimir (estado de cuenta imprimible, sin botón visible en
-// la UI pero conservado — es gratis mantenerlo), #/resumen.
+// la UI pero conservado — es gratis mantenerlo), #/global, #/global/:anioMes.
 //
 // Error boundary global: el render de cada pantalla va envuelto en
 // try/catch; una excepción no capturada muestra un estado de error
@@ -12,10 +13,12 @@
 // en un <details> colapsado — nunca una pantalla en blanco.
 
 import { estaSoloLectura } from './db.js';
-import { escapeHtml, Iconos, cerrarSheet } from './ui/componentes.js';
+import { escapeHtml, cerrarSheet, Iconos } from './ui/componentes.js';
 import { renderPantallaClientes } from './ui/pantalla-clientes.js';
 import { renderPantallaClienteDetalle, renderEstadoCuentaImprimible } from './ui/pantalla-cliente-detalle.js';
-import { renderPantallaResumen } from './ui/pantalla-resumen.js';
+import { renderPantallaGlobal } from './ui/pantalla-global.js';
+
+const RUTA_POR_DEFECTO = '#/clientes';
 
 const RUTAS = [
   { patron: /^#\/clientes\/([^/]+)\/imprimir$/, tab: 'clientes',
@@ -24,13 +27,17 @@ const RUTAS = [
     render: (m, el) => renderPantallaClienteDetalle(el, { id: decodeURIComponent(m[1]) }) },
   { patron: /^#\/clientes$/, tab: 'clientes',
     render: (m, el) => renderPantallaClientes(el, {}) },
-  { patron: /^#\/resumen\/(\d{4}-\d{2})$/, tab: 'resumen',
-    render: (m, el) => renderPantallaResumen(el, { anioMes: m[1] }) },
-  { patron: /^#\/resumen$/, tab: 'resumen',
-    render: (m, el) => renderPantallaResumen(el, {}) },
+  { patron: /^#\/global\/(\d{4}-\d{2})$/, tab: 'global',
+    render: (m, el) => renderPantallaGlobal(el, { anioMes: m[1] }) },
+  { patron: /^#\/global$/, tab: 'global',
+    render: (m, el) => renderPantallaGlobal(el, {}) },
+  // §2.10: "Resumen" renace como "Global" — redirección de compatibilidad
+  // (enlaces viejos, historial del navegador, favoritos guardados).
+  { patron: /^#\/resumen\/(\d{4}-\d{2})$/, tab: 'global',
+    render: (m) => { window.location.replace(`#/global/${m[1]}`); } },
+  { patron: /^#\/resumen$/, tab: 'global',
+    render: () => { window.location.replace('#/global'); } },
 ];
-
-const RUTA_POR_DEFECTO = '#/clientes';
 
 let elApp = null;
 let elContenido = null;
@@ -38,7 +45,7 @@ let generacionActual = 0; // evita que una respuesta async vieja pise una navega
 
 function iconoTab(tab) {
   if (tab === 'clientes') return Iconos.personas();
-  if (tab === 'resumen') return Iconos.resumen();
+  if (tab === 'global') return Iconos.globo();
   return '';
 }
 
@@ -51,8 +58,8 @@ function armarShell() {
       <a href="#/clientes" data-tab="clientes" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('clientes')}</span><span class="nav-texto">Clientes</span>
       </a>
-      <a href="#/resumen" data-tab="resumen" class="nav-item">
-        <span class="nav-icono" aria-hidden="true">${iconoTab('resumen')}</span><span class="nav-texto">Resumen</span>
+      <a href="#/global" data-tab="global" class="nav-item">
+        <span class="nav-icono" aria-hidden="true">${iconoTab('global')}</span><span class="nav-texto">Global</span>
       </a>
     </nav>
   `;
@@ -78,7 +85,7 @@ async function actualizarAvisoPersistencia() {
         aviso.innerHTML =
           'El navegador podría liberar espacio si el dispositivo anda justo de memoria; ' +
           'te recomendamos exportar un respaldo seguido. ' +
-          '<a href="#/resumen">Ir a Resumen y respaldos</a>' +
+          '<a href="#/global">Ir a Global y respaldos</a>' +
           ' <button type="button" class="btn-cerrar-aviso" aria-label="Cerrar aviso">×</button>';
         aviso.querySelector('.btn-cerrar-aviso').addEventListener('click', () => {
           aviso.hidden = true;

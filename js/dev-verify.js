@@ -30,7 +30,12 @@ import {
   resumenDia,
   resumenMensual,
   borrarClienteLogico,
+  restaurarCliente,
+  listarClientesArchivados,
   obtenerCalendarioGlobal,
+  obtenerCalendarioGlobalMovimientos,
+  exportarRespaldo,
+  obtenerUltimoRespaldo,
   importarRespaldo,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
@@ -999,6 +1004,164 @@ export async function ejecutarVerificacion() {
       dias.get(d3).movimientos.some((m) => m.tipo === 'AJUSTE' && m.montoCentavos === -1000),
       'el día 3 debería listar el AJUSTE'
     );
+  });
+
+  // ============================================================
+  // Sección 14 — §2.10 (ITERACIÓN V3 "EXCEL", gate del dueño 28-ago-2026):
+  // restaurarCliente, listarClientesArchivados, obtenerCalendarioGlobalMovimientos,
+  // recordatorio de respaldo (ultimo_respaldo), y confirmación explícita de
+  // que listarClientesAgrupados excluye archivados.
+  // ============================================================
+
+  await verificar('§2.10: restaurarCliente — caso feliz, entra al final del orden de su grupo', async () => {
+    const cat = await crearCategoria({ nombre: 'CategoriaRestaurar Verify', color: 'turquesa' });
+    const otro = await crearCliente({ nombre: 'Cliente Restaurar Otro Verify', categoria_id: cat.id });
+    const cliente = await crearCliente({ nombre: 'Cliente Restaurar Feliz Verify', categoria_id: cat.id });
+    await borrarClienteLogico(cliente.id);
+
+    const restaurado = await restaurarCliente(cliente.id);
+    assert(restaurado.deleted_at === null, 'deleted_at debería quedar NULL tras restaurar');
+    assert(restaurado.categoria_id === cat.id, 'debería conservar su categoría (sigue viva)');
+    assert(restaurado.orden > otro.orden, `orden (${restaurado.orden}) debería quedar al final del grupo, después de otro.orden (${otro.orden})`);
+
+    const { clientes } = await listarClientes({ busqueda: 'Cliente Restaurar Feliz Verify' });
+    assert(clientes.length === 1, 'el cliente restaurado debería volver a aparecer como activo');
+  });
+
+  await verificar('§2.10: restaurarCliente rechaza con CONFLICT si su nombre fue tomado mientras estaba archivado', async () => {
+    const original = await crearCliente({ nombre: 'Cliente A101 Restaurar Tomado Verify' });
+    await borrarClienteLogico(original.id);
+    await crearCliente({ nombre: 'Cliente A101 Restaurar Tomado Verify' }); // permitido: el original está archivado
+
+    let lanzo = false;
+    try {
+      await restaurarCliente(original.id);
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'CONFLICT', `code esperado CONFLICT, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar la restauración si otro cliente activo ya tiene ese nombre');
+
+    const archivados = await listarClientesArchivados();
+    assert(archivados.some((a) => a.id === original.id), 'el original debería seguir archivado tras el intento fallido');
+  });
+
+  await verificar('§2.10: restaurarCliente lanza NOT_FOUND si no existe o no está archivado', async () => {
+    let lanzoInexistente = false;
+    try {
+      await restaurarCliente('no-existe');
+    } catch (e) {
+      lanzoInexistente = true;
+      assert(e.code === 'NOT_FOUND');
+    }
+    assert(lanzoInexistente, 'debería lanzar NOT_FOUND para un id inexistente');
+
+    const clienteActivo = await crearCliente({ nombre: 'Cliente Activo NoArchivado Verify' });
+    let lanzoActivo = false;
+    try {
+      await restaurarCliente(clienteActivo.id);
+    } catch (e) {
+      lanzoActivo = true;
+      assert(e.code === 'NOT_FOUND', `code esperado NOT_FOUND, recibido ${e.code}`);
+    }
+    assert(lanzoActivo, 'debería lanzar NOT_FOUND si el cliente existe pero NO está archivado');
+  });
+
+  await verificar('§2.10: listarClientesArchivados trae categoria (id/nombre/color) y saldo; null si la categoría murió', async () => {
+    const cat = await crearCategoria({ nombre: 'CategoriaArchivados Verify', color: 'rosa' });
+    const conCategoria = await crearCliente({ nombre: 'Cliente Archivado ConCategoria Verify', categoria_id: cat.id });
+    await registrarCargo({ cliente_id: conCategoria.id, monto_centavos: 4000, fecha: hoy(), concepto: 'Agua' });
+    await borrarClienteLogico(conCategoria.id, { forzar: true });
+
+    const catMuerta = await crearCategoria({ nombre: 'CategoriaMuereDespues Verify', color: 'amarillo' });
+    const conCategoriaMuerta = await crearCliente({ nombre: 'Cliente Archivado CategoriaMuerta Verify', categoria_id: catMuerta.id });
+    await borrarClienteLogico(conCategoriaMuerta.id);
+    await borrarCategoriaLogica(catMuerta.id); // la cascada solo alcanza a clientes ACTIVOS: este ya estaba archivado
+
+    const archivados = await listarClientesArchivados();
+
+    const filaConCategoria = archivados.find((a) => a.id === conCategoria.id);
+    assert(filaConCategoria, 'el cliente archivado con categoría debería listarse');
+    assert(
+      filaConCategoria.categoria && filaConCategoria.categoria.id === cat.id && filaConCategoria.categoria.color === 'rosa',
+      'debería traer la categoría {id,nombre,color} completa'
+    );
+    assert(filaConCategoria.saldo_centavos === 4000, `saldo_centavos debería ser 4000, es ${filaConCategoria.saldo_centavos}`);
+
+    const filaCategoriaMuerta = archivados.find((a) => a.id === conCategoriaMuerta.id);
+    assert(filaCategoriaMuerta, 'el cliente con categoría muerta debería listarse igual');
+    assert(filaCategoriaMuerta.categoria === null, 'categoria debería ser null si la categoría ya no está viva');
+  });
+
+  await verificar('§2.10: listarClientesAgrupados EXCLUYE clientes archivados de todos los grupos', async () => {
+    const cliente = await crearCliente({ nombre: 'Cliente ExcluidoDeGrupos Verify' });
+    await borrarClienteLogico(cliente.id);
+
+    const { grupos } = await listarClientesAgrupados({});
+    const apareceEnAlgunGrupo = grupos.some((g) => g.clientes.some((c) => c.id === cliente.id));
+    assert(!apareceEnAlgunGrupo, 'un cliente archivado NO debería aparecer en ningún grupo de listarClientesAgrupados');
+  });
+
+  await verificar(
+    'obtenerCalendarioGlobalMovimientos: totales del día == suma manual del desglose, incluye archivados',
+    async () => {
+      const anioMes = hoy().slice(0, 7);
+      const clienteGlobalActivo = await crearCliente({ nombre: 'Cliente GlobalMov Activo Verify' });
+      const clienteGlobalArchivado = await crearCliente({ nombre: 'Cliente GlobalMov Archivado Verify' });
+
+      await registrarCargo({ cliente_id: clienteGlobalActivo.id, monto_centavos: 6000, fecha: hoy(), concepto: 'Luz' });
+      await registrarAbono({ cliente_id: clienteGlobalActivo.id, monto_centavos: 2500, fecha: hoy() });
+      await registrarAbono({ cliente_id: clienteGlobalArchivado.id, monto_centavos: 9000, fecha: hoy() });
+      await borrarClienteLogico(clienteGlobalArchivado.id, { forzar: true });
+
+      const { dias, totalesMes } = await obtenerCalendarioGlobalMovimientos(anioMes);
+      const diaHoy = dias.get(hoy());
+      assert(diaHoy, 'debería existir una entrada para hoy en el calendario global de movimientos');
+
+      const abonosManual = diaHoy.movimientos.filter((m) => m.tipo === 'ABONO').reduce((acc, m) => acc + m.montoCentavos, 0);
+      const cargosManual = diaHoy.movimientos.filter((m) => m.tipo === 'CARGO').reduce((acc, m) => acc + m.montoCentavos, 0);
+      assert(diaHoy.abonosCentavos === abonosManual, `abonosCentavos (${diaHoy.abonosCentavos}) debería ser la suma manual del desglose (${abonosManual})`);
+      assert(diaHoy.cargosCentavos === cargosManual, `cargosCentavos (${diaHoy.cargosCentavos}) debería ser la suma manual del desglose (${cargosManual})`);
+
+      assert(
+        diaHoy.movimientos.some((m) => m.cliente_id === clienteGlobalArchivado.id && m.tipo === 'ABONO' && m.montoCentavos === 9000),
+        'el movimiento del cliente archivado debería seguir apareciendo (A-001: la historia por fecha no se falsea)'
+      );
+
+      const resumenCruzado = await resumenMensual(anioMes);
+      assert(totalesMes.abonosCentavos === resumenCruzado.totalAbonosCentavos, 'totalesMes.abonosCentavos debería coincidir con resumenMensual');
+      assert(totalesMes.cargosCentavos === resumenCruzado.totalCargosCentavos, 'totalesMes.cargosCentavos debería coincidir con resumenMensual');
+      assert(
+        totalesMes.carteraPendienteCentavos === resumenCruzado.carteraPendienteCentavos,
+        'totalesMes.carteraPendienteCentavos debería coincidir con resumenMensual'
+      );
+    }
+  );
+
+  await verificar('obtenerCalendarioGlobalMovimientos: un mes íntegramente futuro da un resultado vacío', async () => {
+    const anioMes = hoy().slice(0, 7);
+    const anio = Number(anioMes.slice(0, 4));
+    const mes = Number(anioMes.slice(5, 7));
+    const anioMesFuturo = mes === 12 ? `${anio + 1}-01` : `${anio}-${String(mes + 1).padStart(2, '0')}`;
+
+    const { dias, totalesMes } = await obtenerCalendarioGlobalMovimientos(anioMesFuturo);
+    assert(dias.size === 0, `un mes futuro debería dar un mapa vacío, tiene ${dias.size} claves`);
+    assert(
+      totalesMes.abonosCentavos === 0 && totalesMes.cargosCentavos === 0 && totalesMes.carteraPendienteCentavos === 0,
+      'totalesMes de un mes futuro debería ser todo 0'
+    );
+  });
+
+  await verificar('§2.10: exportarRespaldo() registra ultimo_respaldo en meta', async () => {
+    const antes = await obtenerUltimoRespaldo();
+    await exportarRespaldo();
+    const despues = await obtenerUltimoRespaldo();
+
+    assert(typeof despues === 'string' && despues.length > 0, 'obtenerUltimoRespaldo debería devolver una fecha ISO tras exportar');
+    const timestampDespues = new Date(despues).getTime();
+    assert(!Number.isNaN(timestampDespues), `ultimo_respaldo debería ser una fecha ISO válida, es "${despues}"`);
+    assert(Math.abs(Date.now() - timestampDespues) < 10000, 'ultimo_respaldo debería ser un instante muy reciente (< 10s)');
+    assert(antes === null || despues !== antes, 'ultimo_respaldo debería actualizarse con cada export');
   });
 
   // ============================================================
