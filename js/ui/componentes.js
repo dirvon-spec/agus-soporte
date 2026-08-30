@@ -63,9 +63,20 @@ export const Iconos = {
   // §2.10 A-204: reemplazan los emoji de engrane/globo/caja-archivo/flecha-de-
   // restaurar/alerta usados antes en la UI — mismo estilo (trazo 2px,
   // currentColor) que el resto del set.
+  // Feedback del dueño: la versión anterior (círculo + rayos finos) se leía
+  // como un ícono de sol/modo claro-oscuro, no como un engrane. Rediseñado
+  // como círculo + 8 dientes rectangulares perimetrales (silueta clásica de
+  // engrane, inequívoca incluso chica).
   engrane: (o) => svgIcono(
-    '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1' +
-    'M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>', o),
+    '<circle cx="12" cy="12" r="6.3"/><circle cx="12" cy="12" r="2.4"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(45 12 12)"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(90 12 12)"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(135 12 12)"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(180 12 12)"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(225 12 12)"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(270 12 12)"/>' +
+    '<rect x="10.7" y="1.6" width="2.6" height="3.1" rx="0.6" fill="currentColor" stroke="none" transform="rotate(315 12 12)"/>', o),
   globo: (o) => svgIcono('<circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><line x1="3" y1="12" x2="21" y2="12"/>', o),
   cajaArchivo: (o) => svgIcono('<rect x="3" y="7" width="18" height="13" rx="1"/><path d="M3 7l2-4h14l2 4"/><line x1="9" y1="12" x2="15" y2="12"/>', o),
   restaurar: (o) => svgIcono('<path d="M9 14l-5-5 5-5"/><path d="M4 9h10a6 6 0 016 6v1"/>', o),

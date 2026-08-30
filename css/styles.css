@@ -1039,14 +1039,18 @@ button.fila-excel-monto:focus-visible {
 .fila-movimiento-mes {
   display: flex;
   align-items: center;
-  gap: var(--espaciado-sm);
+  gap: var(--espaciado-md);
 }
 
 .fila-movimiento-fecha {
+  /* Feedback del dueño: con un ancho justo (4.6em) el texto de la fecha
+     desbordaba su columna y quedaba pegado al detalle ("30/08/2026Abono").
+     Ancho fijo en px con margen real + nowrap explícito lo resuelve. */
   flex-shrink: 0;
   font-size: 0.8rem;
   color: var(--color-texto-secundario);
-  width: 4.6em;
+  width: 5.6em;
+  white-space: nowrap;
 }
 
 .fila-movimiento-detalle {
@@ -1100,10 +1104,11 @@ button.fila-excel-monto:focus-visible {
 
 .global-dato-abono,
 .global-dato-cargo {
-  font-size: 0.56rem;
+  font-size: 0.62rem;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1.15;
   white-space: nowrap;
+  margin-top: 3px; /* deja lugar al número esquinado arriba (mismo trato que Persona) */
 }
 
 .global-dato-abono { color: var(--color-exito); }
@@ -1116,7 +1121,7 @@ button.fila-excel-monto:focus-visible {
 .fila-desglose-dia {
   display: flex;
   align-items: center;
-  gap: var(--espaciado-sm);
+  gap: var(--espaciado-md);
   cursor: pointer;
 }
 
@@ -1133,6 +1138,7 @@ button.fila-excel-monto:focus-visible {
   flex-shrink: 0;
   font-size: 0.8rem;
   color: var(--color-texto-secundario);
+  white-space: nowrap;
 }
 
 .panel-archivados-historia {
@@ -1292,6 +1298,10 @@ button.fila-excel-monto:focus-visible {
 }
 
 .mes-celda {
+  /* Feedback del dueño: jerarquía visual — el número de día es un dato de
+     referencia (esquinado, chico), el/los monto(s) son el elemento
+     PRINCIPAL de la celda, y el saldo es la nota secundaria de abajo. */
+  position: relative;
   min-height: 62px;
   border: 1px solid var(--color-borde);
   border-radius: 4px;
@@ -1319,23 +1329,28 @@ button.fila-excel-monto:focus-visible {
 }
 
 .mes-celda-numero {
-  font-size: 0.74rem;
-  font-weight: 600;
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  font-size: 0.6rem;
+  font-weight: 700;
   line-height: 1;
+  color: var(--color-texto-secundario);
 }
 
 .mes-celda-datos {
   display: flex;
   flex-direction: column;
   align-items: center;
-  line-height: 1.15;
+  line-height: 1.2;
   max-width: 100%;
+  margin-top: 6px; /* deja lugar al número esquinado arriba */
 }
 
 .mes-dato-abono,
 .mes-dato-cargo-concepto,
 .mes-dato-cargo-monto {
-  font-size: 0.56rem;
+  font-size: 0.66rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -1348,7 +1363,8 @@ button.fila-excel-monto:focus-visible {
 .mes-dato-cargo-monto { color: var(--color-error); }
 
 .mes-celda-saldo {
-  font-size: 0.52rem;
+  font-size: 0.5rem;
+  font-weight: 400;
   color: var(--color-texto-secundario);
   line-height: 1;
   margin-top: 2px;
@@ -1426,14 +1442,17 @@ button.fila-excel-monto:focus-visible {
    ============================================================ */
 
 .popover-overlay {
-  position: absolute;
+  /* Feedback del dueño: si el usuario está scrolleado (ej. viendo la lista de
+     movimientos), un overlay position:absolute anclado al calendario queda
+     fuera de vista. Fijo al VIEWPORT visible, sin importar el scroll. */
+  position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.35);
-  border-radius: var(--radio-borde);
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
+  z-index: 100;
   padding: var(--espaciado-md);
 }
 
@@ -1444,7 +1463,7 @@ button.fila-excel-monto:focus-visible {
   padding: var(--espaciado-md);
   width: 100%;
   max-width: 320px;
-  max-height: 100%;
+  max-height: 85vh;
   overflow-y: auto;
 }
 

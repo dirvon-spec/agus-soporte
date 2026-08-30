@@ -174,12 +174,16 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
           <div id="desglose-dia">
             ${!infoDiaSel || infoDiaSel.movimientos.length === 0
               ? estadoVacio('Sin movimientos ese día.')
-              : `<ul class="lista lista-desglose-dia">${infoDiaSel.movimientos.map((m) => `
+              : `<ul class="lista lista-desglose-dia">${infoDiaSel.movimientos.map((m) => {
+                  const signo = m.tipo === 'CARGO' ? '+' : m.tipo === 'ABONO' ? '−' : (m.montoCentavos >= 0 ? '+' : '−');
+                  const clase = m.tipo === 'CARGO' ? 'monto-negativo' : m.tipo === 'ABONO' ? 'monto-positivo' : '';
+                  return `
                   <li class="lista-item fila-desglose-dia" data-cliente-id="${escapeHtml(m.cliente_id)}">
                     <span class="fila-desglose-cliente">${escapeHtml(m.cliente_nombre)}</span>
                     <span class="fila-desglose-detalle">${m.tipo === 'CARGO' ? escapeHtml(m.concepto || 'Cargo') : m.tipo === 'AJUSTE' ? 'Ajuste' : 'Abono'}</span>
-                    <span class="${m.tipo === 'CARGO' ? 'monto-negativo' : m.tipo === 'AJUSTE' ? '' : 'monto-positivo'}">${montoOGuion(m.montoCentavos)}</span>
-                  </li>`).join('')}</ul>`
+                    <span class="${clase}">${signo} ${montoOGuion(Math.abs(m.montoCentavos))}</span>
+                  </li>`;
+                }).join('')}</ul>`
             }
           </div>` : ''}
 
