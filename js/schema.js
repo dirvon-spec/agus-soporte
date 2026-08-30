@@ -13,8 +13,15 @@
 // editable que reemplaza el enum fijo de `servicio`), y `clientes` gana
 // `categoria_id` + `orden` (orden manual dentro de su grupo). Migración
 // v2->v3 en MIGRACION_V2_A_V3 más abajo, aplicada por db.js.
+//
+// v4 (§2.11, ROUND 4, gate del dueño 30-ago-2026): nueva tabla
+// `visitas_sin_abono` para el semáforo de 3 estados por cliente-día
+// (abonó / dijo "hoy no" / sin visitar). NO es un movimiento de dinero — el
+// ledger no admite ABONO de $0, así que es una tabla aparte, sin impacto en
+// saldos/calendarios. Migración v3->v4 en MIGRACION_V3_A_V4 más abajo (solo
+// CREATE TABLE + índice, sin lógica de datos: la tabla nace vacía).
 
-export const SCHEMA_VERSION = '3';
+export const SCHEMA_VERSION = '4';
 
 export const DDL = `
 -- ============================================================
@@ -109,12 +116,27 @@ CREATE TABLE IF NOT EXISTS movimientos (
 );
 
 -- ============================================================
+-- visitas_sin_abono (§2.11): marca ligera de "visité y dijo hoy no" — NO es
+-- dinero, no toca movimientos ni saldos. Vive aparte porque el ledger no
+-- admite un ABONO de $0 (CHECK monto_centavos > 0 en movimientos).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS visitas_sin_abono (
+  id            TEXT PRIMARY KEY,
+  cliente_id    TEXT NOT NULL REFERENCES clientes(id),
+  fecha         TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+
+-- ============================================================
 -- Índices compuestos (firmes por especificación)
 -- ============================================================
 CREATE INDEX IF NOT EXISTS idx_movimientos_cliente_fecha ON movimientos (cliente_id, fecha);
 CREATE INDEX IF NOT EXISTS idx_movimientos_cliente_tipo  ON movimientos (cliente_id, tipo);
 CREATE INDEX IF NOT EXISTS idx_acuerdos_cliente_vigencia ON acuerdos (cliente_id, vigente_desde);
 CREATE INDEX IF NOT EXISTS idx_clientes_categoria_orden  ON clientes (categoria_id, orden);
+CREATE INDEX IF NOT EXISTS idx_visitas_sin_abono_cliente_fecha ON visitas_sin_abono (cliente_id, fecha);
 
 -- ============================================================
 -- Tabla de metadatos del propio archivo (versión de esquema, para el import de respaldos)
@@ -177,4 +199,22 @@ export const MIGRACION_V2_A_V3 = [
   'ALTER TABLE clientes ADD COLUMN categoria_id TEXT REFERENCES categorias(id)',
   'ALTER TABLE clientes ADD COLUMN orden INTEGER',
   'CREATE INDEX IF NOT EXISTS idx_clientes_categoria_orden ON clientes (categoria_id, orden)',
+];
+
+/**
+ * Migración v3 -> v4 (§2.11): crea `visitas_sin_abono` (tabla nueva, nace
+ * vacía) + su índice. Sin lógica de datos — a diferencia de v2->v3, acá no
+ * hace falta backfill ni siembra, así que es un array plano de SQL puro,
+ * mismo patrón que v1->v2.
+ */
+export const MIGRACION_V3_A_V4 = [
+  `CREATE TABLE IF NOT EXISTS visitas_sin_abono (
+    id            TEXT PRIMARY KEY,
+    cliente_id    TEXT NOT NULL REFERENCES clientes(id),
+    fecha         TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    deleted_at    TEXT
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_visitas_sin_abono_cliente_fecha ON visitas_sin_abono (cliente_id, fecha)',
 ];

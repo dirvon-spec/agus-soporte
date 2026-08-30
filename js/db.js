@@ -3,7 +3,7 @@
 // aislar la capa y facilitar el reemplazo futuro por un driver nativo de Capacitor.
 // Ningún error se traga: todo se relanza con {code, message} vía crearError().
 
-import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2, MIGRACION_V2_A_V3 } from './schema.js';
+import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2, MIGRACION_V2_A_V3, MIGRACION_V3_A_V4 } from './schema.js';
 import { generarSeed } from './seed.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { crearError } from './utils/errors.js';
@@ -514,6 +514,15 @@ async function insertarSeedEnTransaccion() {
         ]
       );
     }
+    for (const v of datos.visitasSinAbono ?? []) {
+      db.run('INSERT INTO visitas_sin_abono (id, cliente_id, fecha, created_at, updated_at, deleted_at) VALUES (?,?,?,?,?,NULL)', [
+        v.id,
+        v.cliente_id,
+        v.fecha,
+        v.created_at,
+        v.updated_at,
+      ]);
+    }
     setMetaInterno('modo_demo', '1');
     db.run('COMMIT;');
   } catch (e) {
@@ -566,13 +575,13 @@ function aplicarMigracionV2AV3(dbObjetivo) {
 
 /**
  * Si la base local existente quedó en una schema_version vieja, encadena las
- * migraciones necesarias (v1->v2 de §2.8, v2->v3 de §2.9) SIN TOCAR DATOS y
- * actualiza meta a la versión vigente. No-op si ya está al día.
+ * migraciones necesarias (v1->v2 de §2.8, v2->v3 de §2.9, v3->v4 de §2.11)
+ * SIN TOCAR DATOS y actualiza meta a la versión vigente. No-op si ya está al día.
  */
 async function migrarEsquemaSiHaceFalta() {
   const versionInicial = obtenerMetaInterno('schema_version');
   if (versionInicial === SCHEMA_VERSION) return;
-  if (versionInicial !== '1' && versionInicial !== '2') {
+  if (!['1', '2', '3'].includes(versionInicial)) {
     throw crearError(
       'DB_ERROR',
       `La base local tiene un schema_version desconocido ("${versionInicial}") y no se puede migrar automáticamente.`
@@ -584,7 +593,10 @@ async function migrarEsquemaSiHaceFalta() {
     if (versionInicial === '1') {
       for (const sql of MIGRACION_V1_A_V2) db.run(sql);
     }
-    aplicarMigracionV2AV3(db);
+    if (versionInicial === '1' || versionInicial === '2') {
+      aplicarMigracionV2AV3(db);
+    }
+    for (const sql of MIGRACION_V3_A_V4) db.run(sql);
     setMetaInterno('schema_version', SCHEMA_VERSION);
     db.run('COMMIT;');
   } catch (e) {
@@ -743,9 +755,9 @@ export async function obtenerUltimoRespaldo() {
 }
 
 /**
- * Valida ANTES de reemplazar nada: schema_version soportada (v1, v2 o v3;
- * v1/v2 se migran en memoria encadenando MIGRACION_V1_A_V2 y
- * aplicarMigracionV2AV3 antes de aceptar — §2.8/§2.9) + cero huérfanos.
+ * Valida ANTES de reemplazar nada: schema_version soportada (v1..v4; v1/v2/v3
+ * se migran en memoria encadenando MIGRACION_V1_A_V2, aplicarMigracionV2AV3 y
+ * MIGRACION_V3_A_V4 antes de aceptar — §2.8/§2.9/§2.11) + cero huérfanos.
  * @param {ArrayBuffer} arrayBuffer
  * @returns {Promise<void>}
  */
@@ -764,17 +776,20 @@ export async function importarRespaldo(arrayBuffer) {
     if (!filaVersion) {
       throw new Error('sin schema_version');
     }
-    if (!['1', '2', '3'].includes(filaVersion.valor)) {
+    if (!['1', '2', '3', '4'].includes(filaVersion.valor)) {
       throw new Error(`schema_version "${filaVersion.valor}" no soportada`);
     }
     if (filaVersion.valor !== SCHEMA_VERSION) {
-      // Un respaldo v1 o v2 es válido, pero se migra en memoria (mismas
+      // Un respaldo v1, v2 o v3 es válido, pero se migra en memoria (mismas
       // sentencias que initDb()) ANTES de correr la validación de huérfanos.
       dbCandidata.run('BEGIN;');
       if (filaVersion.valor === '1') {
         for (const sql of MIGRACION_V1_A_V2) dbCandidata.run(sql);
       }
-      aplicarMigracionV2AV3(dbCandidata);
+      if (filaVersion.valor === '1' || filaVersion.valor === '2') {
+        aplicarMigracionV2AV3(dbCandidata);
+      }
+      for (const sql of MIGRACION_V3_A_V4) dbCandidata.run(sql);
       dbCandidata.run("UPDATE meta SET valor = ? WHERE clave = 'schema_version'", [SCHEMA_VERSION]);
       dbCandidata.run('COMMIT;');
     }
@@ -1163,31 +1178,52 @@ export async function listarClientes({ busqueda = '', pagina = 1, tamanioPagina 
 }
 
 /**
- * §2.9, Pantalla 1 (Clientes): lista AGRUPADA por categoría, en el orden
- * manual de cada grupo, con los agregados que necesita la fila de cliente
- * (abonos/cargos del mes, saldo histórico) y la fila Σ de cada grupo. Todo
- * en 2 queries (categorías + clientes con subconsultas correlacionadas para
- * los agregados) — sin N+1; el agrupado y las sumas de grupo se hacen en
- * memoria sobre esas 2 queries, no contra la DB.
+ * §2.9/§2.11, Pantalla 1 (Clientes): lista AGRUPADA por categoría, en el
+ * orden manual de cada grupo, con los agregados que necesita la fila de
+ * cliente y la fila Σ de cada grupo. Todo en 2 queries (categorías +
+ * clientes con subconsultas correlacionadas) — sin N+1; el agrupado y las
+ * sumas se hacen en memoria sobre esas 2 queries, no contra la DB.
+ *
+ * §2.11 — modo POR DÍA: si se pasa `fecha` ('YYYY-MM-DD'), `abonos_mes_centavos`/
+ * `cargos_mes_centavos` (mismo nombre de campo, para no romper a Global ni a
+ * otros consumidores del modo mensual) pasan a ser del DÍA visto, no del mes,
+ * y cada cliente trae además `estado_dia`: 'ABONO' (abonó ese día) |
+ * 'CERO' (visita_sin_abono viva ese día, sin abono) | 'SIN_VISITA' (ninguna
+ * de las dos). La raíz agrega `resumenDia: {cobradoCentavos, abonaron,
+ * dijeronNo, sinVisitar}` sobre la MISMA población devuelta (con busqueda
+ * aplicada, si la hay). `saldo_centavos` SIEMPRE es histórico total, en
+ * ambos modos. Sin `fecha`: comportamiento mensual idéntico al de antes.
  *
  * El grupo "Sin categoría" siempre va al final, sin importar el orden
  * alfabético de las categorías reales.
  *
- * @param {{anioMes?:string, busqueda?:string}} opciones anioMes 'YYYY-MM' (default: mes actual)
- * @returns {Promise<{grupos: Array<{
- *   categoria_id: string|null,
- *   categoria_nombre: string,
- *   categoria_color: string|null,
- *   clientes: Array<{id:string, nombre:string, telefono:?string, categoria_id:?string, orden:?number, abonos_mes_centavos:number, cargos_mes_centavos:number, saldo_centavos:number, tiene_movimientos:boolean}>,
- *   totales: {abonos_mes_centavos:number, cargos_mes_centavos:number, saldo_centavos:number}
- * }>}>}
+ * @param {{anioMes?:string, fecha?:string, busqueda?:string}} opciones anioMes 'YYYY-MM' (default: mes actual, ignorado si se pasa fecha)
+ * @returns {Promise<{
+ *   grupos: Array<{
+ *     categoria_id: string|null,
+ *     categoria_nombre: string,
+ *     categoria_color: string|null,
+ *     clientes: Array<{id:string, nombre:string, telefono:?string, categoria_id:?string, orden:?number, abonos_mes_centavos:number, cargos_mes_centavos:number, saldo_centavos:number, tiene_movimientos:boolean, estado_dia?:string}>,
+ *     totales: {abonos_mes_centavos:number, cargos_mes_centavos:number, saldo_centavos:number}
+ *   }>,
+ *   resumenDia?: {cobradoCentavos:number, abonaron:number, dijeronNo:number, sinVisitar:number}
+ * }>}
  */
-export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
+export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } = {}) {
   const hoyStr = hoy();
-  const mesObjetivo = anioMes || hoyStr.slice(0, 7);
-  const [anioStr, mesStr] = mesObjetivo.split('-');
-  const primerDiaMes = `${anioStr}-${mesStr}-01`;
-  const ultimoDiaMes = `${anioStr}-${mesStr}-${pad2(new Date(Number(anioStr), Number(mesStr), 0).getDate())}`;
+  const modoDia = !!fecha;
+
+  let fechaInicioPeriodo;
+  let fechaFinPeriodo;
+  if (modoDia) {
+    fechaInicioPeriodo = fecha;
+    fechaFinPeriodo = fecha;
+  } else {
+    const mesObjetivo = anioMes || hoyStr.slice(0, 7);
+    const [anioStr, mesStr] = mesObjetivo.split('-');
+    fechaInicioPeriodo = `${anioStr}-${mesStr}-01`;
+    fechaFinPeriodo = `${anioStr}-${mesStr}-${pad2(new Date(Number(anioStr), Number(mesStr), 0).getDate())}`;
+  }
 
   const textoBusqueda = (busqueda || '').trim();
   const filtroBusqueda = textoBusqueda
@@ -1197,6 +1233,13 @@ export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
   const paramsBusqueda = textoBusqueda ? [like, like] : [];
 
   const categorias = todasLasFilas('SELECT * FROM categorias WHERE deleted_at IS NULL ORDER BY nombre ASC');
+
+  const columnasEstadoDia = modoDia
+    ? `,
+        EXISTS(SELECT 1 FROM movimientos m3 WHERE m3.cliente_id = c.id AND m3.tipo='ABONO' AND m3.deleted_at IS NULL AND m3.fecha = ?) AS tiene_abono_dia,
+        EXISTS(SELECT 1 FROM visitas_sin_abono v WHERE v.cliente_id = c.id AND v.deleted_at IS NULL AND v.fecha = ?) AS tiene_visita_cero_dia`
+    : '';
+  const paramsEstadoDia = modoDia ? [fecha, fecha] : [];
 
   const filas = todasLasFilas(
     `SELECT c.*,
@@ -1211,10 +1254,11 @@ export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
         COALESCE((SELECT SUM(m.monto_centavos) FROM movimientos m
           WHERE m.cliente_id = c.id AND m.tipo='CARGO' AND m.deleted_at IS NULL AND m.fecha BETWEEN ? AND ?), 0) AS cargos_mes_centavos,
         EXISTS(SELECT 1 FROM movimientos m2 WHERE m2.cliente_id = c.id AND m2.deleted_at IS NULL) AS tiene_movimientos
+        ${columnasEstadoDia}
      FROM clientes c
      WHERE c.deleted_at IS NULL ${filtroBusqueda}
      ORDER BY c.orden ASC`,
-    [hoyStr, primerDiaMes, ultimoDiaMes, primerDiaMes, ultimoDiaMes, ...paramsBusqueda]
+    [hoyStr, fechaInicioPeriodo, fechaFinPeriodo, fechaInicioPeriodo, fechaFinPeriodo, ...paramsEstadoDia, ...paramsBusqueda]
   );
 
   const SIN_CATEGORIA = '__sin_categoria__';
@@ -1223,6 +1267,11 @@ export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
   for (const cat of categorias) {
     balde.set(cat.id, { categoria_id: cat.id, categoria_nombre: cat.nombre, categoria_color: cat.color, clientes: [] });
   }
+
+  let cobradoCentavos = 0;
+  let abonaron = 0;
+  let dijeronNo = 0;
+  let sinVisitar = 0;
 
   for (const fila of filas) {
     const clienteAgregado = {
@@ -1236,6 +1285,21 @@ export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
       saldo_centavos: fila.saldo_centavos,
       tiene_movimientos: !!fila.tiene_movimientos,
     };
+
+    if (modoDia) {
+      if (fila.tiene_abono_dia) {
+        clienteAgregado.estado_dia = 'ABONO';
+        abonaron += 1;
+        cobradoCentavos += fila.abonos_mes_centavos;
+      } else if (fila.tiene_visita_cero_dia) {
+        clienteAgregado.estado_dia = 'CERO';
+        dijeronNo += 1;
+      } else {
+        clienteAgregado.estado_dia = 'SIN_VISITA';
+        sinVisitar += 1;
+      }
+    }
+
     const clave = fila.categoria_id && balde.has(fila.categoria_id) ? fila.categoria_id : SIN_CATEGORIA;
     balde.get(clave).clientes.push(clienteAgregado);
   }
@@ -1261,7 +1325,7 @@ export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
     return a.categoria_nombre < b.categoria_nombre ? -1 : a.categoria_nombre > b.categoria_nombre ? 1 : 0;
   });
 
-  return { grupos };
+  return modoDia ? { grupos, resumenDia: { cobradoCentavos, abonaron, dijeronNo, sinVisitar } } : { grupos };
 }
 
 /**
@@ -1746,6 +1810,213 @@ export async function registrarAjuste({ movimiento_original_id, delta_centavos, 
 
   await persistirEnIndexedDB();
   return unaFila('SELECT * FROM movimientos WHERE id = ?', [id]);
+}
+
+/**
+ * §2.11: borrado lógico de un CARGO/ABONO (el mecanismo AJUSTE queda
+ * deprecated en la UI; el ledger sigue append-only, esto es deleted_at, NUNCA
+ * DELETE). NO se usa para borrar un AJUSTE directamente — un AJUSTE solo se
+ * borra/restaura EN CASCADA junto con su movimiento original.
+ *
+ * Cascada manual documentada: si el movimiento tiene AJUSTEs vivos vinculados
+ * (movimiento_original_id = id), se borran lógicamente CON EL MISMO
+ * timestamp que el original — restaurarMovimiento() usa ese match exacto de
+ * deleted_at para saber cuáles reactivar junto con él (y no, por ejemplo,
+ * un AJUSTE que ya estaba borrado por otra razón en otro momento).
+ * @param {string} id
+ * @returns {Promise<void>}
+ */
+export async function borrarMovimientoLogico(id) {
+  verificarEscritura();
+
+  const movimiento = unaFila('SELECT * FROM movimientos WHERE id = ? AND deleted_at IS NULL', [id]);
+  if (!movimiento) throw crearError('NOT_FOUND', 'Movimiento no encontrado.', { id });
+  if (movimiento.tipo === 'AJUSTE') {
+    throw crearError(
+      'VALIDATION_ERROR',
+      'No se puede borrar un AJUSTE directamente; borrá/restaurá el movimiento original.',
+      { campo: 'tipo' }
+    );
+  }
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE movimientos SET deleted_at=?, updated_at=? WHERE id=?', [ts, ts, id]);
+    db.run('UPDATE movimientos SET deleted_at=?, updated_at=? WHERE movimiento_original_id=? AND deleted_at IS NULL', [ts, ts, id]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
+}
+
+/**
+ * §2.11: para "Deshacer" de borrarMovimientoLogico/corregirMontoMovimiento.
+ * NOT_FOUND si el id no existe o no está borrado. Restaura también, en
+ * cascada, los AJUSTEs que se borraron JUNTO con él (mismo deleted_at exacto
+ * — ver borrarMovimientoLogico), no cualquier AJUSTE vinculado borrado en
+ * otro momento por otra razón.
+ * @param {string} id
+ * @returns {Promise<object>}
+ */
+export async function restaurarMovimiento(id) {
+  verificarEscritura();
+
+  const movimiento = unaFila('SELECT * FROM movimientos WHERE id = ? AND deleted_at IS NOT NULL', [id]);
+  if (!movimiento) throw crearError('NOT_FOUND', 'Movimiento borrado no encontrado.', { id });
+
+  const deletedAtOriginal = movimiento.deleted_at;
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE movimientos SET deleted_at=NULL, updated_at=? WHERE id=?', [ts, id]);
+    db.run('UPDATE movimientos SET deleted_at=NULL, updated_at=? WHERE movimiento_original_id=? AND deleted_at=?', [ts, id, deletedAtOriginal]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM movimientos WHERE id = ?', [id]);
+}
+
+/**
+ * §2.11: "✎ Corregir monto" — reemplaza la regla firme de "nunca UPDATE"
+ * por borrado lógico del original + alta de un movimiento nuevo con la
+ * MISMA fecha/tipo/concepto/referencia/nota y el monto corregido. El
+ * ledger físico sigue append-only y auditable (deleted_at, nunca UPDATE de
+ * monto_centavos ni DELETE) — la UI solo muestra el resultado limpio.
+ *
+ * Si el original tenía AJUSTEs vivos vinculados, se cascada-borran con él
+ * (misma regla que borrarMovimientoLogico) — un AJUSTE que corrige un
+ * movimiento que ya no existe (fue reemplazado) no tiene sentido dejarlo vivo.
+ *
+ * No aplica a AJUSTE (su "monto" es un delta firmado, no un monto positivo
+ * de negocio) — para eso ya existe registrarAjuste.
+ *
+ * Deshacer: `corregirMontoMovimiento` devuelve {nuevo, original_id}; para
+ * revertir, el caller borra `nuevo.id` (borrarMovimientoLogico) y restaura
+ * `original_id` (restaurarMovimiento) — ambos ya reactivan cualquier cascada
+ * de AJUSTEs correspondiente.
+ * @param {string} id
+ * @param {number} nuevoMontoCentavos
+ * @returns {Promise<{nuevo:object, original_id:string}>}
+ */
+export async function corregirMontoMovimiento(id, nuevoMontoCentavos) {
+  verificarEscritura();
+
+  const original = unaFila('SELECT * FROM movimientos WHERE id = ? AND deleted_at IS NULL', [id]);
+  if (!original) throw crearError('NOT_FOUND', 'Movimiento no encontrado.', { id });
+  if (original.tipo === 'AJUSTE') {
+    throw crearError('VALIDATION_ERROR', 'No se puede corregir el monto de un AJUSTE directamente.', { campo: 'tipo' });
+  }
+  if (!Number.isInteger(nuevoMontoCentavos) || nuevoMontoCentavos <= 0) {
+    throw crearError('VALIDATION_ERROR', 'El nuevo monto debe ser un entero positivo, en centavos.', { campo: 'nuevoMontoCentavos' });
+  }
+
+  const idNuevo = uuidV7();
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE movimientos SET deleted_at=?, updated_at=? WHERE id=?', [ts, ts, id]);
+    db.run('UPDATE movimientos SET deleted_at=?, updated_at=? WHERE movimiento_original_id=? AND deleted_at IS NULL', [ts, ts, id]);
+    db.run(
+      `INSERT INTO movimientos (id, cliente_id, tipo, monto_centavos, fecha, servicio, referencia, nota, movimiento_original_id, created_at, updated_at, deleted_at)
+       VALUES (?,?,?,?,?,?,?,?,NULL,?,?,NULL)`,
+      [idNuevo, original.cliente_id, original.tipo, nuevoMontoCentavos, original.fecha, original.servicio, original.referencia, original.nota, ts, ts]
+    );
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
+  return { nuevo: unaFila('SELECT * FROM movimientos WHERE id = ?', [idNuevo]), original_id: id };
+}
+
+// ============================================================
+// Visitas sin abono (§2.11) — semáforo de 3 estados por cliente-día. NO son
+// movimientos de dinero: no tocan saldos ni calendarios de movimientos.
+// ============================================================
+
+/**
+ * Idempotente: si ya hay una visita viva ese día para ese cliente, devuelve
+ * la existente en vez de duplicar. Bloqueada si ese día ya tiene un ABONO
+ * vivo (no tiene sentido marcar "dijo que no" si sí abonó).
+ * @param {{cliente_id:string, fecha:string}} datos
+ * @returns {Promise<object>}
+ */
+export async function registrarVisitaSinAbono({ cliente_id, fecha }) {
+  verificarEscritura();
+  await verificarClienteActivo(cliente_id);
+
+  if (!esFechaIsoValida(fecha)) {
+    throw crearError('VALIDATION_ERROR', 'La fecha no es una fecha válida.', { campo: 'fecha' });
+  }
+  if (esFutura(fecha)) {
+    throw crearError('VALIDATION_ERROR', 'No se puede registrar una visita a futuro.', { campo: 'fecha' });
+  }
+
+  const abonoVivo = unaFila(
+    "SELECT id FROM movimientos WHERE cliente_id=? AND tipo='ABONO' AND deleted_at IS NULL AND fecha=?",
+    [cliente_id, fecha]
+  );
+  if (abonoVivo) {
+    throw crearError('VALIDATION_ERROR', 'Ya abonó ese día.', { campo: 'fecha' });
+  }
+
+  const existente = unaFila('SELECT * FROM visitas_sin_abono WHERE cliente_id=? AND fecha=? AND deleted_at IS NULL', [cliente_id, fecha]);
+  if (existente) return existente;
+
+  const id = uuidV7();
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('INSERT INTO visitas_sin_abono (id, cliente_id, fecha, created_at, updated_at, deleted_at) VALUES (?,?,?,?,?,NULL)', [
+      id,
+      cliente_id,
+      fecha,
+      ts,
+      ts,
+    ]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM visitas_sin_abono WHERE id = ?', [id]);
+}
+
+/**
+ * Borrado lógico — para "Deshacer" justo después de registrar una visita
+ * sin abono por error.
+ * @param {string} id
+ * @returns {Promise<void>}
+ */
+export async function eliminarVisitaSinAbono(id) {
+  verificarEscritura();
+
+  const visita = unaFila('SELECT * FROM visitas_sin_abono WHERE id = ? AND deleted_at IS NULL', [id]);
+  if (!visita) throw crearError('NOT_FOUND', 'Visita sin abono no encontrada.', { id });
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE visitas_sin_abono SET deleted_at=?, updated_at=? WHERE id=?', [ts, ts, id]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
 }
 
 /**

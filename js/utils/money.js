@@ -8,11 +8,25 @@ import { crearError } from './errors.js';
 const LOCALE = 'es-MX';
 const MONEDA = 'MXN';
 
-const formateador = new Intl.NumberFormat(LOCALE, {
+const formateadorConCentavos = new Intl.NumberFormat(LOCALE, {
   style: 'currency',
   currency: MONEDA,
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
+});
+
+// §2.11 (ROUND 4, gate del dueño 30-ago-2026): "sin .00 en TODO el programa"
+// — los centavos se muestran SOLO cuando son distintos de cero ($1,250 en vez
+// de $1,250.00; $1,250.50 se conserva tal cual). No se puede lograr con un
+// solo Intl.NumberFormat (minimumFractionDigits:0 + maximumFractionDigits:2
+// trunca colas como "50" -> "5" en vez de mantener "50"); por eso son DOS
+// formateadores fijos y formatearCentavos elige entre ambos según si el
+// monto es un peso exacto.
+const formateadorSinCentavos = new Intl.NumberFormat(LOCALE, {
+  style: 'currency',
+  currency: MONEDA,
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
 });
 
 // §2.10 A-201: notación compacta es-MX (ej. "$150 k", "$1.2 M") para espacios
@@ -32,7 +46,9 @@ const formateadorCompacto = new Intl.NumberFormat(LOCALE, {
 const PATRON_MONTO = /^\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?$/;
 
 /**
- * Formatea un monto en centavos (entero) a texto con formato es-MX, ej. "$1,234.50".
+ * Formatea un monto en centavos (entero) a texto con formato es-MX. §2.11:
+ * los centavos se muestran SOLO cuando son ≠ 0 — ej. formatearCentavos(125000)
+ * da "$1,250" (no "$1,250.00"), formatearCentavos(125050) da "$1,250.50".
  * @param {number} centavos
  * @returns {string}
  */
@@ -40,7 +56,9 @@ export function formatearCentavos(centavos) {
   if (!Number.isInteger(centavos)) {
     throw crearError('VALIDATION_ERROR', 'El monto debe ser un entero de centavos.', { centavos });
   }
-  return formateador.format(centavos / 100);
+  const pesos = centavos / 100;
+  const tieneCentavos = centavos % 100 !== 0;
+  return (tieneCentavos ? formateadorConCentavos : formateadorSinCentavos).format(pesos);
 }
 
 /**

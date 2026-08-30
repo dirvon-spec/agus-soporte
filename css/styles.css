@@ -180,6 +180,38 @@ button {
   font-weight: 600;
 }
 
+/* §2.11: botón central "+ Nuevo cliente" de la barra inferior — reemplaza al
+   botón azul superior de Clientes. Mismo layout que un .nav-item pero con
+   fondo/color propios para que se lea como acción, no como pestaña. */
+.nav-item-central {
+  background: none;
+  border: none;
+  font-family: inherit;
+}
+
+.nav-item-central:not(:disabled) {
+  color: var(--color-primario);
+}
+
+.nav-item-central:disabled {
+  opacity: 0.5;
+}
+
+.nav-icono-central {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--color-primario);
+  color: var(--color-primario-texto);
+}
+
+.nav-item-central:disabled .nav-icono-central {
+  background: var(--color-texto-secundario);
+}
+
 /* ============================================================
    Avisos globales (solo lectura, persistencia)
    ============================================================ */
@@ -321,8 +353,35 @@ button {
   transform: translateY(8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
   box-shadow: var(--sombra-elevada);
-  text-align: center;
   font-size: 0.88rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--espaciado-sm);
+}
+
+.toast-mensaje {
+  flex: 1;
+}
+
+/* §2.11: botón "Deshacer" compartido (captura, visita-$0, corrección,
+   eliminación) — fondo semi-transparente para leerse bien sobre cualquiera
+   de los 3 colores de toast (neutro/éxito/error). */
+.toast-accion {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  color: inherit;
+  border-radius: var(--radio-borde-chico);
+  padding: 4px 10px;
+  font-weight: 700;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.toast-accion:hover,
+.toast-accion:focus-visible {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .toast-visible {
@@ -1588,6 +1647,130 @@ button.fila-excel-monto:focus-visible {
 .aviso-persistencia-denegada {
   color: var(--color-advertencia);
   font-weight: 600;
+}
+
+/* ============================================================
+   §2.11 (ROUND 4) — navegador de fecha + franja resumen del día en Clientes
+   ============================================================ */
+
+.nav-fecha-clientes {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-sm);
+}
+
+.nav-fecha-titulo-btn {
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--color-texto);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radio-borde-chico);
+}
+
+.nav-fecha-titulo-btn:hover,
+.nav-fecha-titulo-btn:focus-visible {
+  background: var(--color-fondo-secundario);
+}
+
+/* Input nativo real (para el date picker del sistema vía showPicker()) pero
+   invisible — el botón ▾ es la superficie de toque real. No usar
+   display:none: algunos navegadores no abren el picker de un input fuera
+   del flujo de renderizado. */
+.input-fecha-oculto {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.franja-resumen-dia {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--espaciado-sm);
+  font-size: 0.8rem;
+  background: var(--color-fondo);
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde);
+  padding: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-md);
+}
+
+.franja-dato-cobrado {
+  font-weight: 600;
+  color: var(--color-texto);
+  flex-basis: 100%;
+}
+
+.franja-dato-abonaron {
+  color: var(--color-exito);
+  font-weight: 600;
+}
+
+/* M/K con estilos discretos pero diferenciados entre sí (feedback del dueño):
+   "dijeron hoy no" en tono de advertencia atenuado, "sin visitar" en gris
+   neutro — ninguno de los dos debe competir visualmente con "abonaron". */
+.franja-dato-no {
+  color: var(--color-advertencia);
+}
+
+.franja-dato-sin-visitar {
+  color: var(--color-texto-secundario);
+}
+
+/* ============================================================
+   §2.11 — Columna CARGOS colapsable (tap en el encabezado la oculta; tap en
+   la pestañita "‹C" la reabre). El grid pasa de 6 a 5 columnas para que el
+   resto reacomode sin dejar un hueco — nunca solo display:none manteniendo
+   6 columnas.
+   ============================================================ */
+
+.cargos-ocultos.cabecera-columnas-excel,
+#lista-clientes-agrupados.cargos-ocultos .fila-excel {
+  grid-template-columns: 20px 12px minmax(90px, 1fr) minmax(50px, 86px) minmax(50px, 86px);
+}
+
+.cargos-ocultos .col-cargo {
+  display: none;
+}
+
+.btn-ocultar-cargos,
+.btn-pestania-cargos {
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--color-texto-secundario);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.btn-pestania-cargos {
+  font-weight: 700;
+  color: var(--color-primario);
+}
+
+/* ============================================================
+   §2.11 — Acciones ✎/🗑 por movimiento (Persona y desglose de Global)
+   ============================================================ */
+
+.fila-movimiento-acciones {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.btn-icono-chico {
+  width: 28px;
+  height: 28px;
 }
 
 /* ============================================================

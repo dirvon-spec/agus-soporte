@@ -11,6 +11,11 @@ import {
   registrarCargo,
   registrarAbono,
   registrarAjuste,
+  borrarMovimientoLogico,
+  restaurarMovimiento,
+  corregirMontoMovimiento,
+  registrarVisitaSinAbono,
+  eliminarVisitaSinAbono,
   listarMovimientos,
   calcularSaldo,
   crearAcuerdo,
@@ -45,7 +50,7 @@ import { generarSeed } from './seed.js';
 import { SCHEMA_VERSION, MIGRACION_V1_A_V2 } from './schema.js';
 import { hoy, sumarDias, rango, diaDeSemana } from './utils/date.js';
 import { uuidV7 } from './utils/uuid.js';
-import { parsearAPesos, formatearCentavos } from './utils/money.js';
+import { parsearAPesos, formatearCentavos, formatearCompacto } from './utils/money.js';
 
 function assert(cond, mensaje) {
   if (!cond) throw new Error(mensaje || 'Aserción falló');
@@ -220,6 +225,103 @@ function crearDbV2VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuer
   );
   dbV2.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', '2')");
   return dbV2;
+}
+
+// v3: forma real de una base recién migrada por MIGRACION_V2_A_V3 — ya tiene
+// categorias/conceptos/clientes.categoria_id/orden, pero TODAVÍA no existe
+// `visitas_sin_abono` (§2.11/v4). Punto de partida exacto para probar
+// MIGRACION_V3_A_V4.
+const DDL_V3_LITERAL = `
+CREATE TABLE IF NOT EXISTS categorias (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 1),
+  color         TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS conceptos (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 1),
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS clientes (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 2),
+  telefono      TEXT,
+  categoria_id  TEXT REFERENCES categorias(id),
+  orden         INTEGER,
+  notas         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS acuerdos (
+  id                      TEXT PRIMARY KEY,
+  cliente_id              TEXT NOT NULL REFERENCES clientes(id),
+  monto_cuota_centavos    INTEGER NOT NULL CHECK (monto_cuota_centavos > 0),
+  frecuencia              TEXT NOT NULL DEFAULT 'DIARIA' CHECK (frecuencia IN ('DIARIA','SEMANAL','MENSUAL')),
+  dia_semana              INTEGER,
+  dia_mes                 INTEGER,
+  vigente_desde           TEXT NOT NULL,
+  vigente_hasta           TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL,
+  deleted_at              TEXT,
+  CHECK (vigente_hasta IS NULL OR vigente_hasta >= vigente_desde)
+);
+CREATE TABLE IF NOT EXISTS movimientos (
+  id                        TEXT PRIMARY KEY,
+  cliente_id                TEXT NOT NULL REFERENCES clientes(id),
+  tipo                       TEXT NOT NULL CHECK (tipo IN ('CARGO', 'ABONO', 'AJUSTE')),
+  monto_centavos             INTEGER NOT NULL,
+  fecha                      TEXT NOT NULL,
+  servicio                   TEXT,
+  referencia                 TEXT,
+  nota                       TEXT,
+  movimiento_original_id     TEXT REFERENCES movimientos(id),
+  created_at                 TEXT NOT NULL,
+  updated_at                 TEXT NOT NULL,
+  deleted_at                 TEXT,
+  CHECK (
+    (tipo IN ('CARGO','ABONO') AND monto_centavos > 0 AND movimiento_original_id IS NULL)
+    OR
+    (tipo = 'AJUSTE' AND monto_centavos != 0 AND movimiento_original_id IS NOT NULL)
+  )
+);
+CREATE TABLE IF NOT EXISTS meta (
+  clave  TEXT PRIMARY KEY,
+  valor  TEXT NOT NULL
+);
+`;
+
+/** Cliente v3 con categoría/orden ya asignados + un CARGO — para probar que
+ * MIGRACION_V3_A_V4 (solo agrega `visitas_sin_abono`) preserva todo intacto. */
+function crearDbV3VaciaConDatos({ clienteId, categoriaId, movimientoId, fecha }) {
+  const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+  const dbV3 = new DatabaseCtor();
+  dbV3.run(DDL_V3_LITERAL);
+  const ts = '2026-03-01T00:00:00.000Z';
+  dbV3.run('INSERT INTO categorias (id,nombre,color,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,NULL)', [
+    categoriaId,
+    'CategoriaMigracionV3 Verify',
+    'turquesa',
+    ts,
+    ts,
+  ]);
+  dbV3.run(
+    'INSERT INTO clientes (id,nombre,telefono,categoria_id,orden,notas,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,NULL)',
+    [clienteId, 'Cliente Migracion V3 Verify', '5215500000099', categoriaId, 1, null, ts, ts]
+  );
+  dbV3.run(
+    `INSERT INTO movimientos (id,cliente_id,tipo,monto_centavos,fecha,servicio,referencia,nota,movimiento_original_id,created_at,updated_at,deleted_at)
+     VALUES (?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL)`,
+    [movimientoId, clienteId, 'CARGO', 8000, fecha, 'Agua', ts, ts]
+  );
+  dbV3.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', '3')");
+  return dbV3;
 }
 
 export async function ejecutarVerificacion() {
@@ -1165,6 +1267,335 @@ export async function ejecutarVerificacion() {
   });
 
   // ============================================================
+  // Sección 15 — §2.11 (ROUND 4, gate del dueño 30-ago-2026): retro de
+  // Agustín vía WhatsApp. Vista por día (listarClientesAgrupados({fecha})),
+  // visitas_sin_abono (semáforo de 3 estados), borrado/restauración lógica de
+  // movimientos con cascada de AJUSTEs, corregirMontoMovimiento y el nuevo
+  // formato de dinero sin ".00".
+  // ============================================================
+
+  await verificar('money.js: formatearCentavos NUEVO — sin .00 en pesos exactos, conserva centavos si los hay', async () => {
+    assert(formatearCentavos(125000) === '$1,250', `esperado "$1,250", obtenido "${formatearCentavos(125000)}"`);
+    assert(formatearCentavos(125050) === '$1,250.50', `esperado "$1,250.50", obtenido "${formatearCentavos(125050)}"`);
+    assert(formatearCentavos(0) === '$0', `esperado "$0", obtenido "${formatearCentavos(0)}"`);
+    assert(formatearCentavos(100) === '$1', `esperado "$1", obtenido "${formatearCentavos(100)}"`);
+    assert(formatearCentavos(150) === '$1.50', `esperado "$1.50", obtenido "${formatearCentavos(150)}"`);
+  });
+
+  await verificar('money.js: formatearCompacto ya cumplía "sin .00" antes de §2.11 (sin cambios de código)', async () => {
+    const texto = formatearCompacto(150000000); // $1,500,000 -> "$1.5 M"
+    assert(!/\.0\b/.test(texto) || /\.\d[1-9]/.test(texto), `no debería mostrar un ".0" espurio: "${texto}"`);
+    const textoRedondo = formatearCompacto(100000000); // $1,000,000 exacto
+    assert(!textoRedondo.includes('.0'), `formatearCompacto de un monto redondo no debería mostrar ".0": "${textoRedondo}"`);
+  });
+
+  const clienteDia = await crearCliente({ nombre: 'Cliente VistaPorDia Verify', telefono: '5215500000200' });
+  const clienteDiaSinVisita = await crearCliente({ nombre: 'Cliente VistaPorDia SinVisita Verify', telefono: '5215500000201' });
+  const clienteDiaCero = await crearCliente({ nombre: 'Cliente VistaPorDia DijoNo Verify', telefono: '5215500000202' });
+  const fechaVista = hoy();
+
+  await verificar('registrarVisitaSinAbono: caso feliz crea la visita', async () => {
+    const visita = await registrarVisitaSinAbono({ cliente_id: clienteDiaCero.id, fecha: fechaVista });
+    assert(visita && visita.id, 'debería devolver la visita creada');
+    assert(visita.cliente_id === clienteDiaCero.id && visita.fecha === fechaVista, 'cliente_id/fecha deberían coincidir');
+  });
+
+  await verificar('registrarVisitaSinAbono: idempotente — misma cliente+fecha devuelve la existente, no duplica', async () => {
+    const primera = await registrarVisitaSinAbono({ cliente_id: clienteDiaCero.id, fecha: fechaVista });
+    const segunda = await registrarVisitaSinAbono({ cliente_id: clienteDiaCero.id, fecha: fechaVista });
+    assert(primera.id === segunda.id, `debería devolver la MISMA visita (idempotente), obtuvo ids distintos: ${primera.id} / ${segunda.id}`);
+
+    const dbInterna = _dbInternaParaVerificacion();
+    const stmt = dbInterna.prepare(
+      "SELECT COUNT(*) AS c FROM visitas_sin_abono WHERE cliente_id=? AND fecha=? AND deleted_at IS NULL"
+    );
+    stmt.bind([clienteDiaCero.id, fechaVista]);
+    stmt.step();
+    const cuenta = stmt.getAsObject().c;
+    stmt.free();
+    assert(cuenta === 1, `debería haber exactamente 1 visita viva para ese cliente+fecha, hay ${cuenta}`);
+  });
+
+  await verificar('registrarVisitaSinAbono: bloqueada con VALIDATION_ERROR si ese día ya tiene un ABONO vivo', async () => {
+    await registrarAbono({ cliente_id: clienteDia.id, monto_centavos: 3000, fecha: fechaVista });
+    let lanzo = false;
+    try {
+      await registrarVisitaSinAbono({ cliente_id: clienteDia.id, fecha: fechaVista });
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar registrar visita sin abono si ya abonó ese día');
+  });
+
+  await verificar('registrarVisitaSinAbono: fecha futura o inválida lanza VALIDATION_ERROR', async () => {
+    for (const fechaMala of [sumarDias(hoy(), 1), 'no-es-fecha', '2026-13-40']) {
+      let lanzo = false;
+      try {
+        await registrarVisitaSinAbono({ cliente_id: clienteDiaSinVisita.id, fecha: fechaMala });
+      } catch (e) {
+        lanzo = true;
+        assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR para "${fechaMala}", recibido ${e.code}`);
+      }
+      assert(lanzo, `debería rechazar fecha "${fechaMala}"`);
+    }
+  });
+
+  await verificar('eliminarVisitaSinAbono: borrado lógico (Deshacer) — deja de contar como visita viva', async () => {
+    const clienteTemporal = await crearCliente({ nombre: 'Cliente VisitaDeshacer Verify' });
+    const visita = await registrarVisitaSinAbono({ cliente_id: clienteTemporal.id, fecha: fechaVista });
+    await eliminarVisitaSinAbono(visita.id);
+
+    const dbInterna = _dbInternaParaVerificacion();
+    const stmt = dbInterna.prepare('SELECT deleted_at FROM visitas_sin_abono WHERE id=?');
+    stmt.bind([visita.id]);
+    stmt.step();
+    const deletedAt = stmt.getAsObject().deleted_at;
+    stmt.free();
+    assert(deletedAt !== null && deletedAt !== undefined, 'deleted_at debería quedar seteado tras eliminar');
+
+    // Deshacer real: volver a registrar la misma visita después de "eliminar" NO debe chocar con la borrada
+    const nuevaVisita = await registrarVisitaSinAbono({ cliente_id: clienteTemporal.id, fecha: fechaVista });
+    assert(nuevaVisita.id !== visita.id, 'tras eliminar lógicamente, registrar de nuevo debería crear una fila nueva (la vieja sigue borrada)');
+  });
+
+  await verificar('listarClientesAgrupados({fecha}): estado_dia ABONO/CERO/SIN_VISITA + resumenDia cuadrado a mano', async () => {
+    const { grupos, resumenDia: resumen } = await listarClientesAgrupados({ fecha: fechaVista, busqueda: 'Cliente VistaPorDia' });
+    const todos = grupos.flatMap((g) => g.clientes);
+
+    const filaAbono = todos.find((c) => c.id === clienteDia.id);
+    const filaSinVisita = todos.find((c) => c.id === clienteDiaSinVisita.id);
+    const filaCero = todos.find((c) => c.id === clienteDiaCero.id);
+
+    assert(filaAbono, 'debería encontrar al cliente que abonó');
+    assert(filaSinVisita, 'debería encontrar al cliente sin visitar');
+    assert(filaCero, 'debería encontrar al cliente que dijo hoy no');
+
+    assert(filaAbono.estado_dia === 'ABONO', `esperado ABONO, obtenido ${filaAbono.estado_dia}`);
+    assert(filaSinVisita.estado_dia === 'SIN_VISITA', `esperado SIN_VISITA, obtenido ${filaSinVisita.estado_dia}`);
+    assert(filaCero.estado_dia === 'CERO', `esperado CERO, obtenido ${filaCero.estado_dia}`);
+
+    assert(filaAbono.abonos_mes_centavos === 3000, `abonos del día del cliente ABONO debería ser 3000, es ${filaAbono.abonos_mes_centavos}`);
+    assert(filaCero.abonos_mes_centavos === 0, `abonos del día del cliente CERO debería ser 0, es ${filaCero.abonos_mes_centavos}`);
+    assert(filaSinVisita.abonos_mes_centavos === 0, `abonos del día del cliente SIN_VISITA debería ser 0, es ${filaSinVisita.abonos_mes_centavos}`);
+
+    // resumenDia cuadrado a mano SOLO sobre estos 3 clientes de prueba (busqueda los aísla del resto del seed)
+    assert(resumen.cobradoCentavos === 3000, `resumenDia.cobradoCentavos debería ser 3000, es ${resumen.cobradoCentavos}`);
+    assert(resumen.abonaron === 1, `resumenDia.abonaron debería ser 1, es ${resumen.abonaron}`);
+    assert(resumen.dijeronNo === 1, `resumenDia.dijeronNo debería ser 1, es ${resumen.dijeronNo}`);
+    assert(resumen.sinVisitar === 1, `resumenDia.sinVisitar debería ser 1, es ${resumen.sinVisitar}`);
+  });
+
+  await verificar('listarClientesAgrupados SIN fecha (modo mensual) no incluye estado_dia ni resumenDia — no rompe consumidores existentes', async () => {
+    const resultado = await listarClientesAgrupados({});
+    assert(resultado.resumenDia === undefined, 'modo mensual no debería traer resumenDia');
+    const algunCliente = resultado.grupos.flatMap((g) => g.clientes)[0];
+    assert(algunCliente && algunCliente.estado_dia === undefined, 'modo mensual no debería traer estado_dia por cliente');
+  });
+
+  await verificar('visitas_sin_abono NO afecta calcularSaldo, obtenerCalendarioMovimientos ni obtenerCalendarioGlobalMovimientos', async () => {
+    const clienteAislado = await crearCliente({ nombre: 'Cliente VisitaNoAfectaSaldo Verify' });
+    await registrarCargo({ cliente_id: clienteAislado.id, monto_centavos: 5000, fecha: fechaVista, concepto: 'Agua' });
+
+    const saldoAntes = await calcularSaldo(clienteAislado.id, fechaVista);
+    const anioMes = fechaVista.slice(0, 7);
+    const calBefore = await obtenerCalendarioMovimientos(clienteAislado.id, anioMes);
+    const globalAntes = await obtenerCalendarioGlobalMovimientos(anioMes);
+    const diaGlobalAntes = globalAntes.dias.get(fechaVista);
+    const abonosGlobalAntes = diaGlobalAntes ? diaGlobalAntes.abonosCentavos : 0;
+    const cargosGlobalAntes = diaGlobalAntes ? diaGlobalAntes.cargosCentavos : 0;
+
+    // el cliente ya tiene un CARGO hoy pero NINGÚN abono hoy -> la visita sin abono es válida
+    await registrarVisitaSinAbono({ cliente_id: clienteAislado.id, fecha: fechaVista });
+
+    const saldoDespues = await calcularSaldo(clienteAislado.id, fechaVista);
+    const calDespues = await obtenerCalendarioMovimientos(clienteAislado.id, anioMes);
+    const globalDespues = await obtenerCalendarioGlobalMovimientos(anioMes);
+    const diaGlobalDespues = globalDespues.dias.get(fechaVista);
+    const abonosGlobalDespues = diaGlobalDespues ? diaGlobalDespues.abonosCentavos : 0;
+    const cargosGlobalDespues = diaGlobalDespues ? diaGlobalDespues.cargosCentavos : 0;
+
+    assert(saldoAntes === saldoDespues, `calcularSaldo no debería cambiar por una visita_sin_abono: antes ${saldoAntes}, después ${saldoDespues}`);
+    assert(
+      JSON.stringify(calBefore.saldoAcumuladoCentavos) === JSON.stringify(calDespues.saldoAcumuladoCentavos),
+      'obtenerCalendarioMovimientos no debería cambiar por una visita_sin_abono'
+    );
+    assert(abonosGlobalAntes === abonosGlobalDespues, 'obtenerCalendarioGlobalMovimientos.abonosCentavos no debería cambiar por una visita_sin_abono');
+    assert(cargosGlobalAntes === cargosGlobalDespues, 'obtenerCalendarioGlobalMovimientos.cargosCentavos no debería cambiar por una visita_sin_abono');
+  });
+
+  const clienteMovLogico = await crearCliente({ nombre: 'Cliente BorrarRestaurarMovimiento Verify' });
+
+  await verificar('borrarMovimientoLogico: rechaza borrar un AJUSTE directamente (VALIDATION_ERROR)', async () => {
+    const cargo = await registrarCargo({ cliente_id: clienteMovLogico.id, monto_centavos: 10000, fecha: hoy(), concepto: 'Agua' });
+    const ajuste = await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: -500, nota: 'ajuste test' });
+    let lanzo = false;
+    try {
+      await borrarMovimientoLogico(ajuste.id);
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar borrar un AJUSTE directamente');
+  });
+
+  await verificar('borrarMovimientoLogico: cascada — borra en cascada los AJUSTEs vivos vinculados, mismo deleted_at', async () => {
+    const cargo = await registrarCargo({ cliente_id: clienteMovLogico.id, monto_centavos: 20000, fecha: hoy(), concepto: 'Luz' });
+    const ajuste1 = await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: -1000, nota: 'a1' });
+    const ajuste2 = await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: 500, nota: 'a2' });
+
+    const saldoAntes = await calcularSaldo(clienteMovLogico.id, hoy());
+    await borrarMovimientoLogico(cargo.id);
+    const saldoDespues = await calcularSaldo(clienteMovLogico.id, hoy());
+    assert(
+      saldoDespues === saldoAntes - (20000 - 1000 + 500),
+      `saldo debería bajar exactamente el neto (19500): antes ${saldoAntes}, después ${saldoDespues}`
+    );
+
+    const dbInterna = _dbInternaParaVerificacion();
+    for (const idRevisar of [cargo.id, ajuste1.id, ajuste2.id]) {
+      const stmt = dbInterna.prepare('SELECT deleted_at FROM movimientos WHERE id=?');
+      stmt.bind([idRevisar]);
+      stmt.step();
+      const d = stmt.getAsObject().deleted_at;
+      stmt.free();
+      assert(d !== null && d !== undefined, `${idRevisar} debería tener deleted_at seteado tras la cascada`);
+    }
+
+    const stmtA = dbInterna.prepare('SELECT deleted_at FROM movimientos WHERE id=?');
+    stmtA.bind([cargo.id]);
+    stmtA.step();
+    const deletedAtCargo = stmtA.getAsObject().deleted_at;
+    stmtA.free();
+    for (const idAjuste of [ajuste1.id, ajuste2.id]) {
+      const stmt = dbInterna.prepare('SELECT deleted_at FROM movimientos WHERE id=?');
+      stmt.bind([idAjuste]);
+      stmt.step();
+      const d = stmt.getAsObject().deleted_at;
+      stmt.free();
+      assert(d === deletedAtCargo, `el AJUSTE ${idAjuste} debería tener EXACTAMENTE el mismo deleted_at que el cargo cascadeado`);
+    }
+
+    // guardar para el siguiente test (restaurar)
+    clienteMovLogico._ultimoCargoBorradoId = cargo.id;
+    clienteMovLogico._ajustesCascadeados = [ajuste1.id, ajuste2.id];
+    clienteMovLogico._saldoAntesDeBorrar = saldoAntes;
+  });
+
+  await verificar('restaurarMovimiento: revierte exactamente — movimiento + sus AJUSTEs cascadeados, saldo vuelve al original', async () => {
+    const cargoId = clienteMovLogico._ultimoCargoBorradoId;
+    assert(cargoId, 'depende del test anterior (cascada de borrado)');
+
+    const restaurado = await restaurarMovimiento(cargoId);
+    assert(restaurado.deleted_at === null, 'el movimiento restaurado debería tener deleted_at NULL');
+
+    const dbInterna = _dbInternaParaVerificacion();
+    for (const idAjuste of clienteMovLogico._ajustesCascadeados) {
+      const stmt = dbInterna.prepare('SELECT deleted_at FROM movimientos WHERE id=?');
+      stmt.bind([idAjuste]);
+      stmt.step();
+      const d = stmt.getAsObject().deleted_at;
+      stmt.free();
+      assert(d === null, `el AJUSTE ${idAjuste} debería restaurarse (deleted_at NULL) en cascada`);
+    }
+
+    const saldoRestaurado = await calcularSaldo(clienteMovLogico.id, hoy());
+    assert(
+      saldoRestaurado === clienteMovLogico._saldoAntesDeBorrar,
+      `el saldo debería volver exactamente al valor previo al borrado: esperado ${clienteMovLogico._saldoAntesDeBorrar}, obtenido ${saldoRestaurado}`
+    );
+  });
+
+  await verificar('restaurarMovimiento: NOT_FOUND si el id no existe o no está borrado', async () => {
+    let lanzoInexistente = false;
+    try {
+      await restaurarMovimiento('no-existe');
+    } catch (e) {
+      lanzoInexistente = true;
+      assert(e.code === 'NOT_FOUND');
+    }
+    assert(lanzoInexistente, 'debería lanzar NOT_FOUND para un id inexistente');
+
+    const cargoVivo = await registrarCargo({ cliente_id: clienteMovLogico.id, monto_centavos: 1000, fecha: hoy(), concepto: 'Agua' });
+    let lanzoVivo = false;
+    try {
+      await restaurarMovimiento(cargoVivo.id);
+    } catch (e) {
+      lanzoVivo = true;
+      assert(e.code === 'NOT_FOUND', `code esperado NOT_FOUND, recibido ${e.code}`);
+    }
+    assert(lanzoVivo, 'debería lanzar NOT_FOUND si el movimiento existe pero NO está borrado');
+  });
+
+  await verificar('corregirMontoMovimiento: reemplaza el monto preservando fecha/concepto/referencia/nota; saldo cambia exacto', async () => {
+    const original = await registrarCargo({
+      cliente_id: clienteMovLogico.id,
+      monto_centavos: 7000,
+      fecha: hoy(),
+      concepto: 'Internet',
+      referencia: 'REF-CORREGIR',
+      nota: 'nota original',
+    });
+
+    const saldoAntes = await calcularSaldo(clienteMovLogico.id, hoy());
+    const { nuevo, original_id } = await corregirMontoMovimiento(original.id, 9500);
+    const saldoDespues = await calcularSaldo(clienteMovLogico.id, hoy());
+
+    assert(original_id === original.id, 'original_id devuelto debería ser el id del movimiento original');
+    assert(nuevo.monto_centavos === 9500, `el nuevo movimiento debería tener el monto corregido, tiene ${nuevo.monto_centavos}`);
+    assert(nuevo.fecha === original.fecha, 'la fecha debería preservarse');
+    assert(nuevo.tipo === original.tipo, 'el tipo debería preservarse');
+    assert(nuevo.servicio === original.servicio, 'el concepto (servicio) debería preservarse');
+    assert(nuevo.referencia === original.referencia, 'la referencia debería preservarse');
+    assert(nuevo.nota === original.nota, 'la nota debería preservarse');
+    assert(nuevo.id !== original.id, 'debería ser un movimiento NUEVO (id distinto), no un UPDATE del original');
+
+    assert(
+      saldoDespues === saldoAntes + (9500 - 7000),
+      `el saldo debería cambiar exactamente por el delta (2500): antes ${saldoAntes}, después ${saldoDespues}`
+    );
+
+    const dbInterna = _dbInternaParaVerificacion();
+    const stmt = dbInterna.prepare('SELECT deleted_at FROM movimientos WHERE id=?');
+    stmt.bind([original.id]);
+    stmt.step();
+    const deletedAtOriginal = stmt.getAsObject().deleted_at;
+    stmt.free();
+    assert(deletedAtOriginal !== null && deletedAtOriginal !== undefined, 'el movimiento original debería quedar con deleted_at seteado (borrado lógico)');
+
+    // Deshacer de corregirMontoMovimiento: borrar el nuevo + restaurar el original
+    await borrarMovimientoLogico(nuevo.id);
+    const restaurado = await restaurarMovimiento(original_id);
+    assert(restaurado.monto_centavos === 7000, 'tras el Deshacer, el original restaurado debería volver a tener el monto viejo (7000)');
+    const saldoTrasDeshacer = await calcularSaldo(clienteMovLogico.id, hoy());
+    assert(saldoTrasDeshacer === saldoAntes, `el Deshacer debería devolver el saldo exacto al valor previo: esperado ${saldoAntes}, obtenido ${saldoTrasDeshacer}`);
+  });
+
+  await verificar('corregirMontoMovimiento: rechaza monto <= 0 o no entero, y rechaza operar sobre un AJUSTE', async () => {
+    const cargo = await registrarCargo({ cliente_id: clienteMovLogico.id, monto_centavos: 3000, fecha: hoy(), concepto: 'Agua' });
+    for (const montoMalo of [0, -100, 12.5]) {
+      let lanzo = false;
+      try {
+        await corregirMontoMovimiento(cargo.id, montoMalo);
+      } catch (e) {
+        lanzo = true;
+        assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR para monto ${montoMalo}, recibido ${e.code}`);
+      }
+      assert(lanzo, `debería rechazar corregir a un monto inválido: ${montoMalo}`);
+    }
+
+    const ajuste = await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: -200, nota: 'a' });
+    let lanzoAjuste = false;
+    try {
+      await corregirMontoMovimiento(ajuste.id, 500);
+    } catch (e) {
+      lanzoAjuste = true;
+      assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR, recibido ${e.code}`);
+    }
+    assert(lanzoAjuste, 'debería rechazar corregir el monto de un AJUSTE directamente');
+  });
+
+  // ============================================================
   // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 9: 6+ casos borde del
   // calendario (calendar.js puro, sección 4.2). calendar.js se mantiene SIN
   // CAMBIOS (decisión documentada en el reporte de este builder) porque
@@ -1537,6 +1968,46 @@ export async function ejecutarVerificacion() {
       filaVersion.length && filaVersion[0].values[0][0] === SCHEMA_VERSION,
       `schema_version tras importar debería ser ${SCHEMA_VERSION}`
     );
+  });
+
+  await verificar('Migración v3->v4 (§2.11): importarRespaldo() crea visitas_sin_abono vacía y preserva todo lo demás', async () => {
+    const clienteId = uuidV7();
+    const categoriaId = uuidV7();
+    const movimientoId = uuidV7();
+    const dbV3 = crearDbV3VaciaConDatos({ clienteId, categoriaId, movimientoId, fecha: '2026-03-05' });
+    const bytes = dbV3.export();
+    dbV3.close();
+    const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+
+    await importarRespaldo(arrayBuffer);
+
+    const dbInterna = _dbInternaParaVerificacion();
+    const filas = dbInterna.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
+    const nombres = filas.length ? filas[0].values.map((v) => v[0]) : [];
+    assert(nombres.includes('visitas_sin_abono'), 'tras migrar v3->v4 debería existir la tabla visitas_sin_abono');
+
+    const stmtCount = dbInterna.prepare('SELECT COUNT(*) AS c FROM visitas_sin_abono');
+    stmtCount.step();
+    assert(stmtCount.getAsObject().c === 0, 'visitas_sin_abono debería nacer vacía tras la migración');
+    stmtCount.free();
+
+    const filaVersion = dbInterna.exec("SELECT valor FROM meta WHERE clave='schema_version'");
+    assert(filaVersion.length && filaVersion[0].values[0][0] === SCHEMA_VERSION, `schema_version tras importar debería ser ${SCHEMA_VERSION}`);
+
+    const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V3 Verify', tamanioPagina: 5 });
+    assert(clientes.length === 1, 'el cliente del respaldo v3 debería existir tras importar');
+    assert(clientes[0].id === clienteId, 'el id del cliente importado debería coincidir con el del archivo v3');
+    assert(clientes[0].categoria_id === categoriaId, 'la categoría del cliente v3 debería preservarse (v3->v4 no la toca)');
+
+    const stmtMov = dbInterna.prepare('SELECT COUNT(*) AS c FROM movimientos WHERE id = ?');
+    stmtMov.bind([movimientoId]);
+    stmtMov.step();
+    assert(stmtMov.getAsObject().c === 1, 'el movimiento original debería seguir intacto tras migrar v3->v4');
+    stmtMov.free();
+
+    // la tabla nueva ya es funcional de punta a punta tras la migración
+    const visita = await registrarVisitaSinAbono({ cliente_id: clienteId, fecha: hoy() });
+    assert(visita && visita.id, 'registrarVisitaSinAbono debería funcionar sobre una DB recién migrada v3->v4');
   });
 
   // ============================================================

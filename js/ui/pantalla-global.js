@@ -9,12 +9,13 @@
 
 import {
   obtenerCalendarioGlobalMovimientos, obtenerUltimoRespaldo, listarClientesArchivados,
-  exportarRespaldo, importarRespaldo, estaSoloLectura,
+  exportarRespaldo, importarRespaldo, estaSoloLectura, listarMovimientos,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
 import {
-  microcopy, estadoVacio, montoOGuion, claseSaldo, formatearMesAnio, formatearFechaLegible,
+  microcopy, estadoVacio, montoOGuion, claseSaldo, formatearMesAnio, formatearFechaLegible, formatearFechaCorta,
   escapeHtml, mostrarToast, errorGeneral, bolitaHtml, Iconos,
+  abrirSheetCorregirMonto, eliminarMovimientoConDeshacer,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -56,6 +57,40 @@ function diasEntre(fechaIsoDesde, fechaIsoHasta) {
   const [a2, m2, d2] = fechaIsoHasta.split('-').map(Number);
   const ms = new Date(a2, m2 - 1, d2).getTime() - new Date(a1, m1 - 1, d1).getTime();
   return Math.round(ms / 86400000);
+}
+
+/**
+ * §2.11: `obtenerCalendarioGlobalMovimientos` (agregado entre TODOS los
+ * clientes) no trae el `id` de cada movimiento — hace falta para ✎/🗑. Se
+ * completa acá, del lado de la UI, cruzando contra `listarMovimientos` (que
+ * sí trae `id`) UNA vez por cada cliente distinto que aparece en el desglose
+ * del día (nunca más de un puñado de clientes por día) — no es un N+1 sobre
+ * toda la base, solo sobre la población ya angosta de ese día puntual.
+ */
+async function enriquecerMovimientosConId(fecha, movimientos) {
+  const porCliente = new Map();
+  movimientos.forEach((m) => {
+    if (!porCliente.has(m.cliente_id)) porCliente.set(m.cliente_id, []);
+    porCliente.get(m.cliente_id).push(m);
+  });
+  const resultado = [];
+  for (const [clienteId, lista] of porCliente.entries()) {
+    const { movimientos: filasReales } = await listarMovimientos({ cliente_id: clienteId, desde: fecha, hasta: fecha, tamanioPagina: 50 });
+    const disponibles = [...filasReales];
+    for (const m of lista) {
+      const idx = disponibles.findIndex((fila) =>
+        fila.tipo === m.tipo && fila.monto_centavos === m.montoCentavos &&
+        (fila.servicio || null) === (m.concepto || null) && (fila.referencia || null) === (m.referencia || null)
+      );
+      if (idx >= 0) {
+        resultado.push({ ...m, id: disponibles[idx].id });
+        disponibles.splice(idx, 1);
+      } else {
+        resultado.push({ ...m, id: null });
+      }
+    }
+  }
+  return resultado;
 }
 
 /**
@@ -107,7 +142,10 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
     const totalCeldas = primerDiaSemana + ultimoDiaNum;
     const celdasFinales = Math.ceil(totalCeldas / 7) * 7;
 
-    const infoDiaSel = diaSeleccionado ? dias.get(diaSeleccionado) : null;
+    let infoDiaSel = diaSeleccionado ? dias.get(diaSeleccionado) : null;
+    if (infoDiaSel && infoDiaSel.movimientos.length > 0) {
+      infoDiaSel = { ...infoDiaSel, movimientos: await enriquecerMovimientosConId(diaSeleccionado, infoDiaSel.movimientos) };
+    }
 
     contenedor.innerHTML = `
       <section class="pantalla pantalla-global" data-pantalla="global">
@@ -177,11 +215,17 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
               : `<ul class="lista lista-desglose-dia">${infoDiaSel.movimientos.map((m) => {
                   const signo = m.tipo === 'CARGO' ? '+' : m.tipo === 'ABONO' ? '−' : (m.montoCentavos >= 0 ? '+' : '−');
                   const clase = m.tipo === 'CARGO' ? 'monto-negativo' : m.tipo === 'ABONO' ? 'monto-positivo' : '';
+                  const esAjuste = m.tipo === 'AJUSTE';
                   return `
-                  <li class="lista-item fila-desglose-dia" data-cliente-id="${escapeHtml(m.cliente_id)}">
+                  <li class="lista-item fila-desglose-dia" data-cliente-id="${escapeHtml(m.cliente_id)}" ${m.id ? `data-movimiento-id="${escapeHtml(m.id)}" data-tipo="${escapeHtml(m.tipo)}" data-monto-centavos="${Math.abs(m.montoCentavos)}"` : ''}>
                     <span class="fila-desglose-cliente">${escapeHtml(m.cliente_nombre)}</span>
                     <span class="fila-desglose-detalle">${m.tipo === 'CARGO' ? escapeHtml(m.concepto || 'Cargo') : m.tipo === 'AJUSTE' ? 'Ajuste' : 'Abono'}</span>
                     <span class="${clase}">${signo} ${montoOGuion(Math.abs(m.montoCentavos))}</span>
+                    ${!esAjuste && m.id ? `
+                      <span class="fila-movimiento-acciones">
+                        <button type="button" class="btn-icono btn-icono-chico" data-accion="corregir-movimiento" aria-label="Corregir monto">${Iconos.lapiz()}</button>
+                        <button type="button" class="btn-icono btn-icono-chico" data-accion="eliminar-movimiento" aria-label="Eliminar movimiento">${Iconos.papelera()}</button>
+                      </span>` : ''}
                   </li>`;
                 }).join('')}</ul>`
             }
@@ -266,9 +310,36 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
     });
 
     contenedor.querySelectorAll('.fila-desglose-dia[data-cliente-id]').forEach((li) => {
-      li.addEventListener('click', () => {
+      li.addEventListener('click', (e) => {
+        if (e.target.closest('[data-accion]')) return; // ✎/🗑 no navegan al cliente
         window.location.hash = `#/clientes/${encodeURIComponent(li.dataset.clienteId)}`;
       });
+      const idMovimiento = li.dataset.movimientoId;
+      if (!idMovimiento) return;
+      const btnCorregir = li.querySelector('[data-accion="corregir-movimiento"]');
+      if (btnCorregir) {
+        btnCorregir.addEventListener('click', (e) => {
+          e.stopPropagation();
+          abrirSheetCorregirMonto({
+            movimiento: { id: idMovimiento, tipo: li.dataset.tipo, monto_centavos: Number(li.dataset.montoCentavos) },
+            onGuardado: renderTodo,
+          });
+        });
+      }
+      const btnEliminar = li.querySelector('[data-accion="eliminar-movimiento"]');
+      if (btnEliminar) {
+        btnEliminar.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const tipoTexto = li.dataset.tipo === 'CARGO' ? 'cargo' : 'abono';
+          const montoTexto = montoOGuion(Number(li.dataset.montoCentavos));
+          const fechaTexto = formatearFechaCorta(diaSeleccionado);
+          await eliminarMovimientoConDeshacer({
+            id: idMovimiento,
+            mensajeConfirmacion: `¿Eliminar el ${tipoTexto} de ${montoTexto} del ${fechaTexto}?`,
+            onGuardado: renderTodo,
+          });
+        });
+      }
     });
 
     contenedor.querySelector('#btn-exportar-respaldo').addEventListener('click', realizarExportar);

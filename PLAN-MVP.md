@@ -432,6 +432,24 @@ Solicitado por el dueño tras probar la demo publicada. Decisión de negocio con
 
 **Verificación mínima (ejecutando):** montos-botón abren el panel correcto con el cliente correcto; keypad captura montos con decimales y "00" y jamás dispara el teclado del sistema (verificable: el input no recibe foco de sistema); archivar con saldo pide confirmación extra y el cliente desaparece de lista/buscador/Σ pero no de meses pasados de Global; restaurar lo regresa al final de su grupo; editar categoría (color) se refleja en bolitas/chips/Σ al instante; eliminar concepto lo saca del picker sin tocar cargos históricos; totales por día de Global == suma manual del desglose para 3 días; desglose navega al cliente; recordatorio de respaldo aparece con última fecha >7 días y desaparece tras exportar; filas de una línea sin desborde a 375px con nombres largos; Σ con colores correctos.
 
+### 2.11 ROUND 4 — retro de Agustín (cliente final) vía WhatsApp, gate del dueño 30-ago-2026 (mockup aprobado)
+
+**1. Clientes = trabajo del DÍA.** Navegador de fecha arriba (‹ Hoy · sáb 30 ago ▾ ›; ▾ abre date picker; adelante deshabilitado más allá de hoy). Columnas ABONOS y CARGOS muestran lo del DÍA visto; SALDO sigue siendo total histórico; Σ suma el día (saldo Σ = total). La captura (montos-botón y panel) registra EN EL DÍA VISTO.
+
+**2. Semáforo de 3 estados por cliente-día (decisión de Agustín):** monto verde = abonó; **$0 gris = visitado y dijo "hoy no"** (dato real capturado); **"—" = sin visitar aún**. Para el $0 existe el registro ligero "visita sin abono": nueva tabla `visitas_sin_abono(id, cliente_id, fecha, created_at, updated_at, deleted_at)` (migración v3→v4, solo CREATE TABLE — el ledger no admite ABONO de 0 y esto NO es un movimiento de dinero). Se captura con botón "Hoy no abona ($0)" en el panel rápido de abono. Franja resumen del día sobre la lista: "Cobrado hoy: $X · N abonaron · M dijeron hoy no · K sin visitar".
+
+**3. Corregir/eliminar movimientos (aprobado por el dueño — ajuste a la regla firme):** cada movimiento (en Persona y en el desglose de Global) tiene ✎ Corregir monto (teclado precargado) y 🗑 Eliminar (confirmación con datos). Implementación: BORRADO LÓGICO del original (+ nuevo movimiento en corrección, misma fecha/concepto/referencia). El ledger físico sigue append-only y auditable (deleted_at, nunca DELETE); la UI muestra el resultado limpio. El mecanismo AJUSTE queda deprecated en UI (el dato histórico con AJUSTEs se sigue mostrando bien).
+
+**4. Deshacer:** toast tras cada acción (captura, visita-$0, corrección, eliminación) con "Deshacer" ~6s → revierte por borrado lógico/restauración. 
+
+**5. Columna CARGOS colapsable al tap:** tap en el encabezado "CARGOS" la oculta dejando pestañita `‹C`; tap en la pestañita la reabre. Preferencia persistente (localStorage con try/catch).
+
+**6. "+ Nuevo cliente" a la barra inferior:** barra queda Clientes · ＋Nuevo cliente (botón central) · Global. Se retira el botón azul superior.
+
+**7. Sin `.00` en TODO el programa:** `formatearMoneda` muestra centavos solo cuando ≠ 0 ($1,250 / $1,250.50). Aplica a listas, Σ, calendarios, paneles, toasts, franja, Global.
+
+**Verificación mínima:** captura en día pasado cae en ese día; los 3 estados se muestran y cuentan bien en la franja; visita-$0 se registra/deshace y NO afecta saldo; corrección cambia el monto visible y el saldo, y el original queda con deleted_at (verificable en DB); eliminar+deshacer restaura exacto; Σ del día cuadra a mano; columna cargos oculta/reaparece y persiste; sin ".00" en barrido de todas las pantallas (y "$1,250.50" conserva centavos); migración v3→v4 preserva todo; suite completa verde con tests actualizados al nuevo formato de dinero.
+
 ---
 
 ## 3. Análisis de riesgo

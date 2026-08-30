@@ -14,7 +14,8 @@ import { hoy, esFechaIsoValida, esFutura } from '../utils/date.js';
 import {
   crearCategoria, actualizarCategoria, borrarCategoriaLogica, listarCategorias,
   listarConceptos, crearConcepto, borrarConceptoLogico, registrarCargo, registrarAbono,
-  listarClientesAgrupados,
+  listarClientesAgrupados, registrarVisitaSinAbono, eliminarVisitaSinAbono,
+  corregirMontoMovimiento, borrarMovimientoLogico, restaurarMovimiento,
 } from '../db.js';
 
 // ============================================================
@@ -179,7 +180,25 @@ export function estadoVacio(mensaje, subtexto = '') {
 // Toast (confirmación visual / error), con aria-live para accesibilidad
 // ============================================================
 
-export function mostrarToast(mensaje, tipo = 'info') {
+// §2.11 fix-pass round 4 (A-301/A-302): un solo toast de "Deshacer" vigente a
+// la vez en toda la app. Abrir uno nuevo invalida DE VERDAD al anterior (no
+// solo lo oculta) — así ni siquiera un click ya en curso sobre el toast viejo
+// puede disparar su onAccion contra un estado que un Deshacer/acción más
+// reciente ya dejó atrás (repro del auditor: corregir dos veces seguidas
+// dentro de la ventana de 6s y tocar el toast viejo).
+let deshacerVigente = null;
+
+/**
+ * @param {string} mensaje
+ * @param {'info'|'exito'|'error'} [tipo]
+ * @param {{accionTexto?:string, onAccion?:()=>void|Promise<void>, duracionMs?:number}} [opciones]
+ *   §2.11: mecanismo compartido de "Deshacer" — un botón de acción opcional
+ *   dentro del propio toast, con su propia duración (más larga que el toast
+ *   normal, ~6s en vez de ~3.2s). Tocar la acción cancela el auto-cierre y
+ *   ejecuta `onAccion` (blindado: guarda one-shot + try/catch — ver A-301/A-302).
+ */
+export function mostrarToast(mensaje, tipo = 'info', opciones = {}) {
+  const { accionTexto, onAccion, duracionMs = 3200 } = opciones;
   let contenedor = document.getElementById('toast-contenedor');
   if (!contenedor) {
     contenedor = document.createElement('div');
@@ -191,13 +210,71 @@ export function mostrarToast(mensaje, tipo = 'info') {
   }
   const toast = document.createElement('div');
   toast.className = `toast toast-${tipo}`;
-  toast.textContent = mensaje;
-  contenedor.appendChild(toast);
-  requestAnimationFrame(() => toast.classList.add('toast-visible'));
-  setTimeout(() => {
+  const spanMensaje = document.createElement('span');
+  spanMensaje.className = 'toast-mensaje';
+  spanMensaje.textContent = mensaje;
+  toast.appendChild(spanMensaje);
+
+  let cerrado = false;
+  let temporizador = null;
+  function cerrar() {
+    if (cerrado) return;
+    cerrado = true;
+    clearTimeout(temporizador);
     toast.classList.remove('toast-visible');
     setTimeout(() => toast.remove(), 300);
-  }, 3200);
+  }
+
+  if (accionTexto && onAccion) {
+    // Regla "un solo Deshacer vigente": el anterior queda inerte de una — su
+    // guarda one-shot pasa a true, así que ni un click que ya estaba en
+    // vuelo sobre él puede disparar su onAccion.
+    if (deshacerVigente) deshacerVigente.marcarDisparado();
+
+    let disparado = false; // guarda one-shot (A-302): un solo disparo posible, sea por doble-tap o por invalidación
+    const btnAccion = document.createElement('button');
+    btnAccion.type = 'button';
+    btnAccion.className = 'toast-accion';
+    btnAccion.textContent = accionTexto;
+    btnAccion.addEventListener('click', async () => {
+      if (disparado) return;
+      disparado = true;
+      btnAccion.disabled = true;
+      cerrar();
+      try {
+        await onAccion();
+      } catch (err) {
+        // A-301: antes onAccion() corría sin await/try-catch — si fallaba (ej.
+        // Deshacer sobre un movimiento que una corrección posterior ya había
+        // reemplazado) moría como unhandled rejection y el usuario creía que
+        // había deshecho cuando en realidad no pasó nada.
+        mostrarToast('No se pudo deshacer — la acción ya fue modificada por un cambio posterior.', 'error');
+      }
+    });
+    toast.appendChild(btnAccion);
+
+    deshacerVigente = {
+      marcarDisparado() {
+        disparado = true;
+        cerrar();
+      },
+    };
+  }
+
+  contenedor.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+  temporizador = setTimeout(cerrar, duracionMs);
+}
+
+/**
+ * §2.11: atajo para el toast-con-Deshacer que sigue a capturar un abono/
+ * cargo, una visita-$0, una corrección o una eliminación. ~6s (más que el
+ * toast normal, para dar tiempo real a arrepentirse).
+ * @param {string} mensaje
+ * @param {() => void|Promise<void>} onDeshacer
+ */
+export function mostrarToastDeshacer(mensaje, onDeshacer) {
+  mostrarToast(mensaje, 'exito', { accionTexto: 'Deshacer', onAccion: onDeshacer, duracionMs: 6000 });
 }
 
 // ============================================================
@@ -549,11 +626,14 @@ export function abrirSheetCategoria({ categoria = null, onGuardado, onEliminada 
 // ============================================================
 
 /**
- * @param {{tipo:'ABONO'|'CARGO', clienteId:string, clienteNombre:string, onGuardado?: ()=>void}} cfg
+ * @param {{tipo:'ABONO'|'CARGO', clienteId:string, clienteNombre:string, onGuardado?: ()=>void, fechaInicial?: string}} cfg
+ *   §2.11: `fechaInicial` — la pantalla Clientes en vista-día lo pasa para
+ *   precargar el DÍA VISTO (no necesariamente hoy); Persona/Global lo omiten
+ *   y cae al default de siempre (hoy()).
  */
-export function abrirPanelRapido({ tipo, clienteId, clienteNombre, onGuardado }) {
+export function abrirPanelRapido({ tipo, clienteId, clienteNombre, onGuardado, fechaInicial }) {
   abrirSheet((host) => {
-    renderPanelRapidoInterno(host, tipo, clienteId, onGuardado);
+    renderPanelRapidoInterno(host, tipo, clienteId, onGuardado, fechaInicial);
   }, { titulo: `${tipo === 'ABONO' ? 'Abono' : 'Cargo'} — ${clienteNombre}` });
 }
 
@@ -565,14 +645,43 @@ export function abrirPanelRapido({ tipo, clienteId, clienteNombre, onGuardado })
  * @param {string} buffer
  */
 function formatearBufferMonto(buffer) {
-  if (!buffer) return '$0.00';
+  if (!buffer) return '$0';
   const [enteroCrudo, decimal] = buffer.split('.');
   const entero = enteroCrudo === '' ? '0' : enteroCrudo;
   const enteroConComas = entero.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return buffer.includes('.') ? `$${enteroConComas}.${decimal ?? ''}` : `$${enteroConComas}`;
 }
 
-async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
+/** Markup del teclado numérico de 14 teclas — compartido entre el panel
+ * rápido y el sheet de "Corregir monto" (§2.11). */
+function keypadGridHtml() {
+  return `
+    <div class="keypad-grid">
+      <button type="button" class="keypad-tecla" data-tecla="7" style="grid-column:1;grid-row:1;">7</button>
+      <button type="button" class="keypad-tecla" data-tecla="8" style="grid-column:2;grid-row:1;">8</button>
+      <button type="button" class="keypad-tecla" data-tecla="9" style="grid-column:3;grid-row:1;">9</button>
+      <button type="button" class="keypad-tecla keypad-borrar" data-tecla="borrar" aria-label="Borrar" style="grid-column:4;grid-row:1;">⌫</button>
+      <button type="button" class="keypad-tecla" data-tecla="4" style="grid-column:1;grid-row:2;">4</button>
+      <button type="button" class="keypad-tecla" data-tecla="5" style="grid-column:2;grid-row:2;">5</button>
+      <button type="button" class="keypad-tecla" data-tecla="6" style="grid-column:3;grid-row:2;">6</button>
+      <button type="submit" class="keypad-tecla keypad-guardar" style="grid-column:4;grid-row:2 / span 2;">✓<br>Guardar</button>
+      <button type="button" class="keypad-tecla" data-tecla="1" style="grid-column:1;grid-row:3;">1</button>
+      <button type="button" class="keypad-tecla" data-tecla="2" style="grid-column:2;grid-row:3;">2</button>
+      <button type="button" class="keypad-tecla" data-tecla="3" style="grid-column:3;grid-row:3;">3</button>
+      <button type="button" class="keypad-tecla" data-tecla="0" style="grid-column:1;grid-row:4;">0</button>
+      <button type="button" class="keypad-tecla" data-tecla="00" style="grid-column:2;grid-row:4;">00</button>
+      <button type="button" class="keypad-tecla" data-tecla="." style="grid-column:3;grid-row:4;">.</button>
+    </div>`;
+}
+
+/** Wire genérico de las 14 teclas del keypad — llama `onTecla(valor)` por cada click. */
+function wireKeypadTeclas(host, onTecla) {
+  host.querySelectorAll('.keypad-tecla[data-tecla]').forEach((btn) => {
+    btn.addEventListener('click', () => onTecla(btn.dataset.tecla));
+  });
+}
+
+async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado, fechaInicial) {
   let conceptos = tipo === 'CARGO' ? await listarConceptos() : [];
   let conceptoElegido = null;
   let mostrarNuevoConcepto = false;
@@ -584,7 +693,7 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
   let valorMonto = '';
   // Lo ya tipeado en fecha/referencia sobrevive a los re-render que disparan
   // elegir un concepto o crear uno al vuelo (mismo patrón que antes).
-  let valorFecha = hoy();
+  let valorFecha = fechaInicial || hoy();
   let valorReferencia = '';
   let valorNuevoConcepto = '';
 
@@ -639,22 +748,7 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
             <input id="pr-referencia" name="referencia" type="text" value="${escapeHtml(valorReferencia)}" />
           </div>` : ''}
 
-        <div class="keypad-grid">
-          <button type="button" class="keypad-tecla" data-tecla="7" style="grid-column:1;grid-row:1;">7</button>
-          <button type="button" class="keypad-tecla" data-tecla="8" style="grid-column:2;grid-row:1;">8</button>
-          <button type="button" class="keypad-tecla" data-tecla="9" style="grid-column:3;grid-row:1;">9</button>
-          <button type="button" class="keypad-tecla keypad-borrar" data-tecla="borrar" aria-label="Borrar" style="grid-column:4;grid-row:1;">⌫</button>
-          <button type="button" class="keypad-tecla" data-tecla="4" style="grid-column:1;grid-row:2;">4</button>
-          <button type="button" class="keypad-tecla" data-tecla="5" style="grid-column:2;grid-row:2;">5</button>
-          <button type="button" class="keypad-tecla" data-tecla="6" style="grid-column:3;grid-row:2;">6</button>
-          <button type="submit" class="keypad-tecla keypad-guardar" style="grid-column:4;grid-row:2 / span 2;">✓<br>Guardar</button>
-          <button type="button" class="keypad-tecla" data-tecla="1" style="grid-column:1;grid-row:3;">1</button>
-          <button type="button" class="keypad-tecla" data-tecla="2" style="grid-column:2;grid-row:3;">2</button>
-          <button type="button" class="keypad-tecla" data-tecla="3" style="grid-column:3;grid-row:3;">3</button>
-          <button type="button" class="keypad-tecla" data-tecla="0" style="grid-column:1;grid-row:4;">0</button>
-          <button type="button" class="keypad-tecla" data-tecla="00" style="grid-column:2;grid-row:4;">00</button>
-          <button type="button" class="keypad-tecla" data-tecla="." style="grid-column:3;grid-row:4;">.</button>
-        </div>
+        ${keypadGridHtml()}
 
         <div class="campo">
           <label for="pr-fecha">Fecha</label>
@@ -662,11 +756,34 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
           ${errorCampo(error.fecha)}
         </div>
         ${errorGeneral(error.general)}
+        ${tipo === 'ABONO' ? `
+          <button type="button" class="btn btn-secundario btn-ancho" id="pr-btn-hoy-no-abona">Hoy no abona ($0)</button>
+        ` : ''}
       </form>`;
 
-    host.querySelectorAll('.keypad-tecla[data-tecla]').forEach((btn) => {
-      btn.addEventListener('click', () => manejarTeclaKeypad(btn.dataset.tecla));
-    });
+    wireKeypadTeclas(host, manejarTeclaKeypad);
+
+    const btnHoyNoAbona = host.querySelector('#pr-btn-hoy-no-abona');
+    if (btnHoyNoAbona) {
+      btnHoyNoAbona.addEventListener('click', async () => {
+        const fechaTexto = host.querySelector('#pr-fecha').value;
+        if (!fechaTexto) { error.fecha = 'La fecha es obligatoria.'; render(); return; }
+        try {
+          const visita = await registrarVisitaSinAbono({ cliente_id: clienteId, fecha: fechaTexto });
+          cerrarSheet();
+          mostrarToastDeshacer('Visita registrada: hoy no abonó.', async () => {
+            await eliminarVisitaSinAbono(visita.id);
+            if (onGuardado) onGuardado();
+          });
+          if (onGuardado) onGuardado();
+        } catch (err) {
+          // §2.11: "Ya abonó ese día." se muestra como toast claro, no como
+          // error inline — no es un problema del formulario, es un hecho ya
+          // registrado que el gestor puede no saber.
+          mostrarToast(err.message || 'No se pudo registrar la visita.', 'error');
+        }
+      });
+    }
 
     if (tipo === 'CARGO') {
       host.querySelectorAll('.chip-concepto').forEach((chip) => {
@@ -718,7 +835,7 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
       } else {
         try {
           montoCentavos = parsearAPesos(valorMonto);
-          if (montoCentavos <= 0) error.monto_centavos = 'El monto debe ser mayor a $0.00.';
+          if (montoCentavos <= 0) error.monto_centavos = 'El monto debe ser mayor a $0.';
         } catch (err) {
           error.monto_centavos = err.message;
         }
@@ -734,17 +851,21 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
       if (Object.keys(error).length > 0) { render(); return; }
 
       try {
+        let movimientoCreado;
         if (tipo === 'ABONO') {
-          await registrarAbono({ cliente_id: clienteId, monto_centavos: montoCentavos, fecha: fechaTexto });
+          movimientoCreado = await registrarAbono({ cliente_id: clienteId, monto_centavos: montoCentavos, fecha: fechaTexto });
         } else {
           const referencia = (host.querySelector('#pr-referencia').value || '').trim();
-          await registrarCargo({
+          movimientoCreado = await registrarCargo({
             cliente_id: clienteId, monto_centavos: montoCentavos, fecha: fechaTexto,
             concepto: conceptoElegido, referencia: referencia || undefined,
           });
         }
         cerrarSheet();
-        mostrarToast(tipo === 'ABONO' ? 'Abono registrado.' : 'Cargo registrado.', 'exito');
+        mostrarToastDeshacer(tipo === 'ABONO' ? 'Abono registrado.' : 'Cargo registrado.', async () => {
+          await borrarMovimientoLogico(movimientoCreado.id);
+          if (onGuardado) onGuardado();
+        });
         if (onGuardado) onGuardado();
       } catch (err) {
         if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) {
@@ -758,6 +879,105 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
   }
 
   render();
+}
+
+// ============================================================
+// §2.11 — "✎ Corregir monto" (keypad precargado) y "🗑 Eliminar" de un
+// movimiento vivo (CARGO/ABONO — los AJUSTE históricos no tienen acciones,
+// el mecanismo AJUSTE queda deprecated en UI). Ambos con Deshacer.
+// ============================================================
+
+/**
+ * @param {{movimiento: object, onGuardado?: () => void}} cfg
+ */
+export function abrirSheetCorregirMonto({ movimiento, onGuardado }) {
+  abrirSheet((host) => {
+    let valorMonto = (movimiento.monto_centavos / 100).toFixed(2);
+    let error = {};
+
+    function agregarDigito(d) {
+      const [, decimal] = valorMonto.split('.');
+      if (decimal !== undefined && decimal.length >= 2) return;
+      valorMonto += d;
+    }
+
+    function manejarTecla(tecla) {
+      if (tecla === 'borrar') valorMonto = valorMonto.slice(0, -1);
+      else if (tecla === '.') { if (!valorMonto.includes('.')) valorMonto = (valorMonto || '0') + '.'; }
+      else if (tecla === '00') { agregarDigito('0'); agregarDigito('0'); }
+      else agregarDigito(tecla);
+      if (error.monto_centavos) error.monto_centavos = null;
+      render();
+    }
+
+    function render() {
+      host.innerHTML = `
+        <form id="form-corregir-monto" class="formulario formulario-panel-rapido" novalidate>
+          <div class="keypad-monto">
+            <div class="keypad-display ${error.monto_centavos ? 'keypad-display-error' : ''}" role="text" aria-label="Monto">${escapeHtml(formatearBufferMonto(valorMonto))}</div>
+            ${errorCampo(error.monto_centavos)}
+          </div>
+          ${keypadGridHtml()}
+          ${errorGeneral(error.general)}
+        </form>`;
+
+      wireKeypadTeclas(host, manejarTecla);
+
+      host.querySelector('#form-corregir-monto').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        error = {};
+        let nuevoMontoCentavos = null;
+        if (!valorMonto || valorMonto === '.') {
+          error.monto_centavos = 'El monto es obligatorio.';
+        } else {
+          try {
+            nuevoMontoCentavos = parsearAPesos(valorMonto);
+            if (nuevoMontoCentavos <= 0) error.monto_centavos = 'El monto debe ser mayor a $0.';
+          } catch (err) {
+            error.monto_centavos = err.message;
+          }
+        }
+        if (Object.keys(error).length > 0) { render(); return; }
+
+        try {
+          const { nuevo, original_id } = await corregirMontoMovimiento(movimiento.id, nuevoMontoCentavos);
+          cerrarSheet();
+          mostrarToastDeshacer('Monto corregido.', async () => {
+            await borrarMovimientoLogico(nuevo.id);
+            await restaurarMovimiento(original_id);
+            if (onGuardado) onGuardado();
+          });
+          if (onGuardado) onGuardado();
+        } catch (err) {
+          error.general = err.message || 'No se pudo corregir el monto.';
+          render();
+        }
+      });
+    }
+    render();
+  }, { titulo: `Corregir monto — ${movimiento.tipo === 'CARGO' ? 'Cargo' : 'Abono'}` });
+}
+
+/**
+ * Confirmación + borrado lógico + Deshacer de un movimiento vivo (CARGO/
+ * ABONO). Compartida entre Persona (lista de movimientos del mes) y Global
+ * (desglose del día) — ambas arman el texto de confirmación con sus propios
+ * datos ya formateados y solo llaman acá con el id y el callback de refresco.
+ * @param {{id:string, mensajeConfirmacion:string, onGuardado?: () => void}} cfg
+ */
+export async function eliminarMovimientoConDeshacer({ id, mensajeConfirmacion, onGuardado }) {
+  const ok = window.confirm(mensajeConfirmacion);
+  if (!ok) return;
+  try {
+    await borrarMovimientoLogico(id);
+    mostrarToastDeshacer('Movimiento eliminado.', async () => {
+      await restaurarMovimiento(id);
+      if (onGuardado) onGuardado();
+    });
+    if (onGuardado) onGuardado();
+  } catch (err) {
+    mostrarToast(err.message || 'No se pudo eliminar el movimiento.', 'error');
+  }
 }
 
 // ============================================================

@@ -1,14 +1,17 @@
-// Pantalla "Clientes" (inicio) — contrato vigente §2.10 (PLAN-MVP.md, itera-
-// ción v3 "Excel"): filas de una sola línea (monto-es-botón), chips de filtro
-// por categoría, buscador, orden manual por arrastre, fila Σ por grupo,
-// engrane de Configuración (categorías/conceptos), y sección colapsable de
-// clientes archivados con restauración.
+// Pantalla "Clientes" (inicio) — contrato vigente §2.11 (PLAN-MVP.md, ROUND
+// 4): Clientes es el trabajo del DÍA — navegador de fecha arriba, columnas
+// ABONOS/CARGOS del día visto, semáforo de 3 estados por cliente-día, franja
+// resumen del día. SALDO sigue siendo histórico total. Filas de una sola
+// línea (monto-es-botón), chips de filtro por categoría, buscador, orden
+// manual por arrastre, fila Σ por grupo, engrane de Configuración, columna
+// CARGOS colapsable, y sección colapsable de clientes archivados.
 
 import {
   listarClientesAgrupados, listarClientesArchivados, restaurarCliente,
   listarCategorias, crearCliente, crearCategoria, actualizarOrdenClientes, estaSoloLectura,
 } from '../db.js';
-import { formatearCompacto } from '../utils/money.js';
+import { formatearCompacto, formatearCentavos } from '../utils/money.js';
+import { hoy, sumarDias, esFutura, esFechaIsoValida } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, escapeHtml, debounce,
   mostrarToast, errorCampo, errorGeneral, Iconos, bolitaHtml,
@@ -17,22 +20,21 @@ import {
 } from './componentes.js';
 
 const MICROCOPY = `
-  <p>Acá están todos tus clientes activos, agrupados como vos quieras
-  (categorías con color, o sin categoría). Los cobros son como tú los
-  acuerdes con cada quien: no hay cuotas fijas — vos registrás cada abono y
-  cada cargo cuando pasa.</p>
+  <p>Acá ves el trabajo de HOY (o del día que elijas con ▾): quién abonó, quién
+  te dijo que hoy no, y a quién todavía no visitaste. Los cobros son como tú
+  los acuerdes con cada quien — no hay cuotas fijas.</p>
   <p><strong>El monto ES el botón:</strong> tocá el verde para registrar un
-  abono, el rojo para un cargo, o el nombre para ver el calendario completo
-  de ese cliente. Mantené presionado el agarre ⋮⋮ para reordenar dentro de un
-  grupo, o un chip de categoría para editarla o eliminarla. El engrane
-  abre la Configuración de categorías y conceptos.</p>
+  abono, el rojo para un cargo (ambos quedan en el día que estás viendo), o el
+  nombre para ver el calendario completo de ese cliente. Mantené presionado el
+  agarre ⋮⋮ para reordenar dentro de un grupo, o un chip de categoría para
+  editarla o eliminarla. Tocá el encabezado "Cargos" para ocultar esa columna
+  si no la necesitás.</p>
 `;
 
-// §2.10 A-201: a partir de $100,000.00 el monto se muestra en notación
+// §2.10 A-201: a partir de $100,000 el monto se muestra en notación
 // compacta ("$150 k", "$1.2 M") SOLO en esta vista de lista — el monto
-// completo con centavos sigue disponible siempre en Persona y en el panel
-// rápido. Evita que columnas angostas fuercen el nombre a colapsar.
-const UMBRAL_COMPACTO_CENTAVOS = 100000 * 100; // $100,000.00
+// completo sigue disponible siempre en Persona y en el panel rápido.
+const UMBRAL_COMPACTO_CENTAVOS = 100000 * 100; // $100,000
 
 function montoListaOGuion(centavos) {
   if (centavos === null || centavos === undefined) return '—';
@@ -50,6 +52,52 @@ function montoSpan(texto) {
 const FILTRO_TODOS = Symbol('todos');
 const FILTRO_SIN_CATEGORIA = null;
 
+const CLAVE_PREF_CARGOS_OCULTOS = 'agus-cargos-ocultos';
+
+function leerPreferenciaCargosOcultos() {
+  try {
+    return localStorage.getItem(CLAVE_PREF_CARGOS_OCULTOS) === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+function guardarPreferenciaCargosOcultos(valor) {
+  try {
+    localStorage.setItem(CLAVE_PREF_CARGOS_OCULTOS, valor ? '1' : '0');
+  } catch (e) {
+    // localStorage puede fallar (modo privado, cuota llena) — es solo una
+    // preferencia de dispositivo, no rompe la pantalla si no se guarda.
+  }
+}
+
+/** "sáb 30 ago" (sin punto final, sin mayúscula inicial forzada). */
+function formatearFechaNav(fechaIso) {
+  const [anio, mes, dia] = fechaIso.split('-').map(Number);
+  const d = new Date(anio, mes - 1, dia, 12, 0, 0);
+  return new Intl.DateTimeFormat('es-MX', { weekday: 'short', day: 'numeric', month: 'short' })
+    .format(d)
+    .replace(/\./g, '')
+    .replace(/,/g, '')
+    .replace(/\s+de\s+/g, ' ');
+}
+
+function tituloNav(fechaVista) {
+  const fechaFormateada = formatearFechaNav(fechaVista);
+  return fechaVista === hoy() ? `Hoy · ${fechaFormateada}` : fechaFormateada;
+}
+
+/** Celda de la columna ABONOS en modo-día: semáforo de 3 estados (§2.11). */
+function celdaAbonoDiaHtml(c) {
+  if (c.estado_dia === 'ABONO') {
+    return `<button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" title="${escapeHtml(montoOGuion(c.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(c.abonos_mes_centavos))}</button>`;
+  }
+  if (c.estado_dia === 'CERO') {
+    return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Dijo que hoy no abona">${montoSpan('$0')}</button>`;
+  }
+  return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Todavía sin visitar">${montoSpan('—')}</button>`;
+}
+
 function filaClienteHtml(c, categoriaColor) {
   const sinMovimientos = !c.tiene_movimientos;
   const saldoParaMostrar = sinMovimientos ? null : c.saldo_centavos;
@@ -58,8 +106,8 @@ function filaClienteHtml(c, categoriaColor) {
       <span class="asa-arrastre" aria-hidden="true" title="Mantené presionado para reordenar">${Iconos.arrastre()}</span>
       ${bolitaHtml(categoriaColor)}
       <button type="button" class="fila-excel-nombre" data-accion="ver-persona" title="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</button>
-      <button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" title="${escapeHtml(montoOGuion(c.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(c.abonos_mes_centavos))}</button>
-      <button type="button" class="fila-excel-monto monto-negativo" data-accion="cargo" title="${escapeHtml(montoOGuion(c.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(c.cargos_mes_centavos))}</button>
+      ${celdaAbonoDiaHtml(c)}
+      <button type="button" class="fila-excel-monto monto-negativo col-cargo" data-accion="cargo" title="${escapeHtml(montoOGuion(c.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(c.cargos_mes_centavos))}</button>
       <span class="fila-excel-monto ${claseSaldo(saldoParaMostrar)}" title="${escapeHtml(montoOGuion(saldoParaMostrar))}">${montoSpan(montoListaOGuion(saldoParaMostrar))}</span>
     </li>`;
 }
@@ -71,7 +119,7 @@ function filaSumaHtml(grupo) {
       <span class="asa-arrastre-vacia" aria-hidden="true"></span>
       <span class="fila-suma-etiqueta">Σ ${escapeHtml(grupo.categoria_nombre)}</span>
       <span class="fila-excel-monto monto-positivo" title="${escapeHtml(montoOGuion(grupo.totales.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.abonos_mes_centavos))}</span>
-      <span class="fila-excel-monto monto-negativo" title="${escapeHtml(montoOGuion(grupo.totales.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.cargos_mes_centavos))}</span>
+      <span class="fila-excel-monto monto-negativo col-cargo" title="${escapeHtml(montoOGuion(grupo.totales.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.cargos_mes_centavos))}</span>
       <span class="fila-excel-monto ${claseSaldo(grupo.totales.saldo_centavos)}" title="${escapeHtml(montoOGuion(grupo.totales.saldo_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.saldo_centavos))}</span>
     </li>`;
 }
@@ -93,12 +141,160 @@ function chipCategoriaHtml(id, nombre, color, activo) {
 }
 
 /**
+ * Sheet de alta de cliente — independiente (fetch propio de categorías) para
+ * poder abrirse tanto desde esta pantalla como desde el botón central de la
+ * barra inferior (§2.11), sin depender del estado de `renderPantallaClientes`.
+ * @param {{onCreado?: () => void}} [cfg]
+ */
+export function abrirSheetNuevoCliente({ onCreado } = {}) {
+  abrirSheet((host) => {
+    let categorias = [];
+    let categoriaSeleccionada = null;
+    let mostrarNuevaCategoria = false;
+    let colorNuevaCategoria = PALETA_COLORES_CATEGORIA[0];
+    let error = {};
+    let cargando = true;
+    // Lo ya tipeado sobrevive a los re-render que disparan elegir/crear una
+    // categoría (si no se capturara acá, cada render() reconstruye el <form>
+    // desde cero y nombre/teléfono/notas ya tipeados se perderían — A-102).
+    let valorNombre = '';
+    let valorTelefono = '';
+    let valorNotas = '';
+    let valorNuevaCategoriaNombre = '';
+
+    function capturarValoresActuales() {
+      const nombreEl = host.querySelector('#nc-nombre');
+      if (nombreEl) valorNombre = nombreEl.value;
+      const telefonoEl = host.querySelector('#nc-telefono');
+      if (telefonoEl) valorTelefono = telefonoEl.value;
+      const notasEl = host.querySelector('#nc-notas');
+      if (notasEl) valorNotas = notasEl.value;
+      const nuevaCatEl = host.querySelector('#nc-nueva-categoria-nombre');
+      if (nuevaCatEl) valorNuevaCategoriaNombre = nuevaCatEl.value;
+    }
+
+    async function refrescarCategorias() {
+      categorias = await listarCategorias();
+    }
+
+    function render() {
+      if (cargando) { host.innerHTML = '<p class="cargando">Cargando…</p>'; return; }
+      capturarValoresActuales();
+      host.innerHTML = `
+        <form id="form-nuevo-cliente" class="formulario" novalidate>
+          <div class="campo">
+            <label for="nc-nombre">Nombre</label>
+            <input id="nc-nombre" name="nombre" type="text" value="${escapeHtml(valorNombre)}" required autofocus />
+            ${errorCampo(error.nombre)}
+          </div>
+          <div class="campo">
+            <label for="nc-telefono">Teléfono (opcional)</label>
+            <input id="nc-telefono" name="telefono" type="text" value="${escapeHtml(valorTelefono)}" placeholder="Ej. 5215512340000" />
+            ${errorCampo(error.telefono)}
+          </div>
+          <div class="campo">
+            <label>Categoría (opcional)</label>
+            <div class="chips-fila">
+              <button type="button" class="chip ${categoriaSeleccionada === null ? 'chip-activo' : ''}" data-cat="">Sin categoría</button>
+              ${categorias.map((c) => `<button type="button" class="chip ${categoriaSeleccionada === c.id ? 'chip-activo' : ''}" data-cat="${escapeHtml(c.id)}">${bolitaHtml(c.color, 'bolita-chip')}${escapeHtml(c.nombre)}</button>`).join('')}
+              <button type="button" class="chip chip-nuevo" id="nc-btn-nueva-categoria">${Iconos.mas()} Nueva</button>
+            </div>
+            ${mostrarNuevaCategoria ? `
+              <div class="fila-nuevo-inline fila-nueva-categoria-inline">
+                <input id="nc-nueva-categoria-nombre" type="text" value="${escapeHtml(valorNuevaCategoriaNombre)}" placeholder="Nombre de la categoría" />
+                <div class="paleta-colores paleta-colores-chica">
+                  ${PALETA_COLORES_CATEGORIA.map((col) => `<button type="button" class="bolita-color ${col === colorNuevaCategoria ? 'bolita-color-activa' : ''}" data-color="${col}" style="background:${col}">${col === colorNuevaCategoria ? Iconos.check() : ''}</button>`).join('')}
+                </div>
+                <button type="button" class="btn btn-primario btn-pequeno" id="nc-confirmar-nueva-categoria">Agregar categoría</button>
+              </div>` : ''}
+          </div>
+          <div class="campo">
+            <label for="nc-notas">Notas (opcional)</label>
+            <textarea id="nc-notas" name="notas" rows="2">${escapeHtml(valorNotas)}</textarea>
+          </div>
+          ${errorGeneral(error.general)}
+          <div class="acciones-formulario">
+            <button type="submit" class="btn btn-primario btn-ancho">Crear cliente</button>
+          </div>
+        </form>`;
+
+      host.querySelectorAll('.chip[data-cat]').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          categoriaSeleccionada = chip.dataset.cat || null;
+          mostrarNuevaCategoria = false;
+          render();
+        });
+      });
+      host.querySelector('#nc-btn-nueva-categoria').addEventListener('click', () => {
+        mostrarNuevaCategoria = !mostrarNuevaCategoria;
+        render();
+        const campo = host.querySelector('#nc-nueva-categoria-nombre');
+        if (campo) campo.focus();
+      });
+      if (mostrarNuevaCategoria) {
+        host.querySelectorAll('.paleta-colores-chica .bolita-color').forEach((b) => {
+          b.addEventListener('click', () => { colorNuevaCategoria = b.dataset.color; render(); });
+        });
+        host.querySelector('#nc-confirmar-nueva-categoria').addEventListener('click', async () => {
+          const nombre = host.querySelector('#nc-nueva-categoria-nombre').value.trim();
+          if (nombre.length < 1) { host.querySelector('#nc-nueva-categoria-nombre').focus(); return; }
+          try {
+            const cat = await crearCategoria({ nombre, color: colorNuevaCategoria });
+            await refrescarCategorias();
+            categoriaSeleccionada = cat.id;
+            mostrarNuevaCategoria = false;
+            render();
+          } catch (err) {
+            error.general = err.message || 'No se pudo crear la categoría.';
+            render();
+          }
+        });
+      }
+
+      host.querySelector('#form-nuevo-cliente').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const nombreLimpio = form.nombre.value.trim();
+        const telefonoLimpio = form.telefono.value.trim();
+        error = {};
+        if (nombreLimpio.length < 2) error.nombre = 'El nombre debe tener al menos 2 caracteres.';
+        if (telefonoLimpio && !/^[\d\s+\-]{7,20}$/.test(telefonoLimpio)) {
+          error.telefono = 'Ingresá solo dígitos, espacios, "+" y "-", entre 7 y 20 caracteres.';
+        }
+        if (Object.keys(error).length > 0) { render(); return; }
+        try {
+          await crearCliente({
+            nombre: nombreLimpio,
+            telefono: telefonoLimpio || undefined,
+            categoria_id: categoriaSeleccionada || undefined,
+            notas: form.notas.value.trim() || undefined,
+          });
+          cerrarSheet();
+          mostrarToast('Cliente creado.', 'exito');
+          if (onCreado) onCreado();
+        } catch (err) {
+          if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) error[err.detalle.campo] = err.message;
+          else if (err.code === 'CONFLICT') error.nombre = err.message;
+          else error.general = err.message || 'No se pudo crear el cliente.';
+          render();
+        }
+      });
+    }
+
+    render();
+    refrescarCategorias().then(() => { cargando = false; render(); });
+  }, { titulo: 'Nuevo cliente' });
+}
+
+/**
  * @param {HTMLElement} contenedor
  */
 export async function renderPantallaClientes(contenedor) {
   let busqueda = '';
   let categoriaFiltro = FILTRO_TODOS; // FILTRO_TODOS | FILTRO_SIN_CATEGORIA (null) | id de categoría
   let categorias = [];
+  let fechaVista = hoy();
+  let cargosOcultos = leerPreferenciaCargosOcultos();
 
   async function refrescarCategorias() {
     categorias = await listarCategorias();
@@ -133,6 +329,53 @@ export async function renderPantallaClientes(contenedor) {
     });
   }
 
+  function renderNav() {
+    const elTitulo = contenedor.querySelector('#nav-fecha-titulo');
+    const elSiguiente = contenedor.querySelector('#btn-dia-siguiente');
+    if (elTitulo) elTitulo.textContent = tituloNav(fechaVista);
+    if (elSiguiente) elSiguiente.disabled = fechaVista === hoy();
+    const inputFecha = contenedor.querySelector('#input-fecha-vista');
+    if (inputFecha) inputFecha.value = fechaVista;
+  }
+
+  function renderFranja(resumenDia) {
+    const el = contenedor.querySelector('#franja-resumen-dia');
+    if (!el || !resumenDia) return;
+    const etiquetaDia = fechaVista === hoy() ? 'hoy' : formatearFechaNav(fechaVista);
+    el.innerHTML = `
+      <span class="franja-dato-cobrado">Cobrado ${escapeHtml(etiquetaDia)}: <strong>${formatearCentavos(resumenDia.cobradoCentavos)}</strong></span>
+      <span class="franja-dato-abonaron">${resumenDia.abonaron} abonaron</span>
+      <span class="franja-dato-no">${resumenDia.dijeronNo} dijeron hoy no</span>
+      <span class="franja-dato-sin-visitar">${resumenDia.sinVisitar} sin visitar</span>
+    `;
+  }
+
+  function renderCabeceraColumnas() {
+    const el = contenedor.querySelector('#cabecera-columnas-clientes');
+    if (!el) return;
+    el.className = `cabecera-columnas cabecera-columnas-excel ${cargosOcultos ? 'cargos-ocultos' : ''}`;
+    el.innerHTML = `
+      <span></span><span></span><span class="cabecera-columnas-nombre">Cliente</span>
+      <span class="cabecera-columnas-monto">Abonos</span>
+      ${cargosOcultos
+        ? `<button type="button" class="cabecera-columnas-monto btn-pestania-cargos" id="btn-mostrar-cargos" aria-label="Mostrar columna Cargos">‹C</button>`
+        : `<button type="button" class="cabecera-columnas-monto btn-ocultar-cargos col-cargo" id="btn-ocultar-cargos">Cargos</button>`}
+      <span class="cabecera-columnas-monto">Saldo</span>
+    `;
+    const btnOcultar = el.querySelector('#btn-ocultar-cargos');
+    if (btnOcultar) btnOcultar.addEventListener('click', () => alternarCargosOcultos(true));
+    const btnMostrar = el.querySelector('#btn-mostrar-cargos');
+    if (btnMostrar) btnMostrar.addEventListener('click', () => alternarCargosOcultos(false));
+  }
+
+  function alternarCargosOcultos(ocultar) {
+    cargosOcultos = ocultar;
+    guardarPreferenciaCargosOcultos(cargosOcultos);
+    renderCabeceraColumnas();
+    const elLista = contenedor.querySelector('#lista-clientes-agrupados');
+    if (elLista) elLista.classList.toggle('cargos-ocultos', cargosOcultos);
+  }
+
   async function refrescarTodo() {
     await refrescarCategorias();
     renderChipsCategoria();
@@ -141,19 +384,24 @@ export async function renderPantallaClientes(contenedor) {
   }
 
   async function refrescarLista() {
-    const { grupos } = await listarClientesAgrupados({ busqueda });
+    const { grupos, resumenDia } = await listarClientesAgrupados({ fecha: fechaVista, busqueda });
     const elLista = contenedor.querySelector('#lista-clientes-agrupados');
     if (!elLista) return;
+
+    renderNav();
+    renderFranja(resumenDia);
 
     const gruposFiltrados = categoriaFiltro === FILTRO_TODOS
       ? grupos
       : grupos.filter((g) => g.categoria_id === categoriaFiltro);
 
+    elLista.className = `${cargosOcultos ? 'cargos-ocultos' : ''}`;
+
     if (gruposFiltrados.length === 0) {
       elLista.innerHTML = busqueda
         ? estadoVacio(`No se encontraron clientes para "${busqueda}".`)
         : categoriaFiltro === FILTRO_TODOS
-          ? estadoVacio('Todavía no hay clientes.', 'Creá el primero con el botón "+ Nuevo cliente".')
+          ? estadoVacio('Todavía no hay clientes.', 'Creá el primero con el botón "+ Nuevo cliente" de abajo.')
           : estadoVacio('No hay clientes en esta categoría.');
       return;
     }
@@ -183,6 +431,7 @@ export async function renderPantallaClientes(contenedor) {
             tipo: btn.dataset.accion === 'abono' ? 'ABONO' : 'CARGO',
             clienteId: li.dataset.clienteId,
             clienteNombre: nombre,
+            fechaInicial: fechaVista,
             onGuardado: refrescarLista,
           });
         });
@@ -226,137 +475,6 @@ export async function renderPantallaClientes(contenedor) {
     });
   }
 
-  function abrirSheetNuevoCliente() {
-    abrirSheet((host) => {
-      let categoriaSeleccionada = null;
-      let mostrarNuevaCategoria = false;
-      let colorNuevaCategoria = PALETA_COLORES_CATEGORIA[0];
-      let error = {};
-      // Lo ya tipeado sobrevive a los re-render que disparan elegir/crear una
-      // categoría (si no se capturara acá, cada render() reconstruye el <form>
-      // desde cero y nombre/teléfono/notas ya tipeados se perderían — A-102).
-      let valorNombre = '';
-      let valorTelefono = '';
-      let valorNotas = '';
-      let valorNuevaCategoriaNombre = '';
-
-      function capturarValoresActuales() {
-        const nombreEl = host.querySelector('#nc-nombre');
-        if (nombreEl) valorNombre = nombreEl.value;
-        const telefonoEl = host.querySelector('#nc-telefono');
-        if (telefonoEl) valorTelefono = telefonoEl.value;
-        const notasEl = host.querySelector('#nc-notas');
-        if (notasEl) valorNotas = notasEl.value;
-        const nuevaCatEl = host.querySelector('#nc-nueva-categoria-nombre');
-        if (nuevaCatEl) valorNuevaCategoriaNombre = nuevaCatEl.value;
-      }
-
-      function render() {
-        capturarValoresActuales();
-        host.innerHTML = `
-          <form id="form-nuevo-cliente" class="formulario" novalidate>
-            <div class="campo">
-              <label for="nc-nombre">Nombre</label>
-              <input id="nc-nombre" name="nombre" type="text" value="${escapeHtml(valorNombre)}" required autofocus />
-              ${errorCampo(error.nombre)}
-            </div>
-            <div class="campo">
-              <label for="nc-telefono">Teléfono (opcional)</label>
-              <input id="nc-telefono" name="telefono" type="text" value="${escapeHtml(valorTelefono)}" placeholder="Ej. 5215512340000" />
-              ${errorCampo(error.telefono)}
-            </div>
-            <div class="campo">
-              <label>Categoría (opcional)</label>
-              <div class="chips-fila">
-                <button type="button" class="chip ${categoriaSeleccionada === null ? 'chip-activo' : ''}" data-cat="">Sin categoría</button>
-                ${categorias.map((c) => `<button type="button" class="chip ${categoriaSeleccionada === c.id ? 'chip-activo' : ''}" data-cat="${escapeHtml(c.id)}">${bolitaHtml(c.color, 'bolita-chip')}${escapeHtml(c.nombre)}</button>`).join('')}
-                <button type="button" class="chip chip-nuevo" id="nc-btn-nueva-categoria">${Iconos.mas()} Nueva</button>
-              </div>
-              ${mostrarNuevaCategoria ? `
-                <div class="fila-nuevo-inline fila-nueva-categoria-inline">
-                  <input id="nc-nueva-categoria-nombre" type="text" value="${escapeHtml(valorNuevaCategoriaNombre)}" placeholder="Nombre de la categoría" />
-                  <div class="paleta-colores paleta-colores-chica">
-                    ${PALETA_COLORES_CATEGORIA.map((col) => `<button type="button" class="bolita-color ${col === colorNuevaCategoria ? 'bolita-color-activa' : ''}" data-color="${col}" style="background:${col}">${col === colorNuevaCategoria ? Iconos.check() : ''}</button>`).join('')}
-                  </div>
-                  <button type="button" class="btn btn-primario btn-pequeno" id="nc-confirmar-nueva-categoria">Agregar categoría</button>
-                </div>` : ''}
-            </div>
-            <div class="campo">
-              <label for="nc-notas">Notas (opcional)</label>
-              <textarea id="nc-notas" name="notas" rows="2">${escapeHtml(valorNotas)}</textarea>
-            </div>
-            ${errorGeneral(error.general)}
-            <div class="acciones-formulario">
-              <button type="submit" class="btn btn-primario btn-ancho">Crear cliente</button>
-            </div>
-          </form>`;
-
-        host.querySelectorAll('.chip[data-cat]').forEach((chip) => {
-          chip.addEventListener('click', () => {
-            categoriaSeleccionada = chip.dataset.cat || null;
-            mostrarNuevaCategoria = false;
-            render();
-          });
-        });
-        host.querySelector('#nc-btn-nueva-categoria').addEventListener('click', () => {
-          mostrarNuevaCategoria = !mostrarNuevaCategoria;
-          render();
-          const campo = host.querySelector('#nc-nueva-categoria-nombre');
-          if (campo) campo.focus();
-        });
-        if (mostrarNuevaCategoria) {
-          host.querySelectorAll('.paleta-colores-chica .bolita-color').forEach((b) => {
-            b.addEventListener('click', () => { colorNuevaCategoria = b.dataset.color; render(); });
-          });
-          host.querySelector('#nc-confirmar-nueva-categoria').addEventListener('click', async () => {
-            const nombre = host.querySelector('#nc-nueva-categoria-nombre').value.trim();
-            if (nombre.length < 1) { host.querySelector('#nc-nueva-categoria-nombre').focus(); return; }
-            try {
-              const cat = await crearCategoria({ nombre, color: colorNuevaCategoria });
-              await refrescarCategorias();
-              categoriaSeleccionada = cat.id;
-              mostrarNuevaCategoria = false;
-              render();
-            } catch (err) {
-              error.general = err.message || 'No se pudo crear la categoría.';
-              render();
-            }
-          });
-        }
-
-        host.querySelector('#form-nuevo-cliente').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const form = e.target;
-          const nombreLimpio = form.nombre.value.trim();
-          const telefonoLimpio = form.telefono.value.trim();
-          error = {};
-          if (nombreLimpio.length < 2) error.nombre = 'El nombre debe tener al menos 2 caracteres.';
-          if (telefonoLimpio && !/^[\d\s+\-]{7,20}$/.test(telefonoLimpio)) {
-            error.telefono = 'Ingresá solo dígitos, espacios, "+" y "-", entre 7 y 20 caracteres.';
-          }
-          if (Object.keys(error).length > 0) { render(); return; }
-          try {
-            await crearCliente({
-              nombre: nombreLimpio,
-              telefono: telefonoLimpio || undefined,
-              categoria_id: categoriaSeleccionada || undefined,
-              notas: form.notas.value.trim() || undefined,
-            });
-            cerrarSheet();
-            mostrarToast('Cliente creado.', 'exito');
-            await refrescarLista();
-          } catch (err) {
-            if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) error[err.detalle.campo] = err.message;
-            else if (err.code === 'CONFLICT') error.nombre = err.message;
-            else error.general = err.message || 'No se pudo crear el cliente.';
-            render();
-          }
-        });
-      }
-      render();
-    }, { titulo: 'Nuevo cliente' });
-  }
-
   contenedor.innerHTML = `
     <section class="pantalla" data-pantalla="clientes">
       ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
@@ -364,6 +482,18 @@ export async function renderPantallaClientes(contenedor) {
         <h1>Clientes</h1>
         <button type="button" class="btn-icono" id="btn-config" aria-label="Configuración de categorías y conceptos">${Iconos.engrane()}</button>
       </div>
+
+      <div class="nav-fecha-clientes">
+        <button type="button" class="btn-icono" id="btn-dia-anterior" aria-label="Día anterior">${Iconos.chevronIzquierda()}</button>
+        <button type="button" class="nav-fecha-titulo-btn" id="btn-elegir-fecha" aria-label="Elegir fecha">
+          <span id="nav-fecha-titulo"></span> ▾
+        </button>
+        <input type="date" id="input-fecha-vista" class="input-fecha-oculto" max="${hoy()}" aria-hidden="true" tabindex="-1" />
+        <button type="button" class="btn-icono" id="btn-dia-siguiente" aria-label="Día siguiente">${Iconos.chevronDerecha()}</button>
+      </div>
+
+      <div id="franja-resumen-dia" class="franja-resumen-dia" aria-live="polite"></div>
+
       <div class="campo">
         <label id="etiqueta-filtro-categoria">Filtrar por categoría</label>
         <div class="chips-fila" id="wrap-chips-categoria" aria-labelledby="etiqueta-filtro-categoria"></div>
@@ -372,11 +502,7 @@ export async function renderPantallaClientes(contenedor) {
         <label for="buscador-clientes">Buscar por nombre o teléfono</label>
         <input id="buscador-clientes" type="search" placeholder="Ej. Rosa, 5215..." />
       </div>
-      <button type="button" class="btn btn-primario" id="btn-nuevo-cliente" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>${Iconos.mas()} Nuevo cliente</button>
-      <div class="cabecera-columnas cabecera-columnas-excel">
-        <span></span><span></span><span class="cabecera-columnas-nombre">Cliente</span>
-        <span class="cabecera-columnas-monto">Abonos</span><span class="cabecera-columnas-monto">Cargos</span><span class="cabecera-columnas-monto">Saldo</span>
-      </div>
+      <div class="cabecera-columnas cabecera-columnas-excel" id="cabecera-columnas-clientes"></div>
       <div id="lista-clientes-agrupados" aria-live="polite"></div>
 
       <details class="panel-colapsable panel-archivados" id="seccion-archivados">
@@ -386,11 +512,32 @@ export async function renderPantallaClientes(contenedor) {
     </section>
   `;
 
+  renderCabeceraColumnas();
   await refrescarTodo();
 
-  contenedor.querySelector('#btn-nuevo-cliente').addEventListener('click', abrirSheetNuevoCliente);
   contenedor.querySelector('#btn-config').addEventListener('click', () => {
     abrirSheetConfiguracion({ onCambios: refrescarTodo });
+  });
+
+  contenedor.querySelector('#btn-dia-anterior').addEventListener('click', () => {
+    fechaVista = sumarDias(fechaVista, -1);
+    refrescarLista();
+  });
+  contenedor.querySelector('#btn-dia-siguiente').addEventListener('click', () => {
+    if (fechaVista === hoy()) return;
+    fechaVista = sumarDias(fechaVista, 1);
+    refrescarLista();
+  });
+  const inputFecha = contenedor.querySelector('#input-fecha-vista');
+  contenedor.querySelector('#btn-elegir-fecha').addEventListener('click', () => {
+    if (inputFecha.showPicker) inputFecha.showPicker();
+    else inputFecha.focus();
+  });
+  inputFecha.addEventListener('change', () => {
+    const valor = inputFecha.value;
+    if (!valor || !esFechaIsoValida(valor) || esFutura(valor)) return;
+    fechaVista = valor;
+    refrescarLista();
   });
 
   const buscador = contenedor.querySelector('#buscador-clientes');

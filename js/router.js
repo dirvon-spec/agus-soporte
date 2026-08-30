@@ -14,7 +14,7 @@
 
 import { estaSoloLectura } from './db.js';
 import { escapeHtml, cerrarSheet, Iconos } from './ui/componentes.js';
-import { renderPantallaClientes } from './ui/pantalla-clientes.js';
+import { renderPantallaClientes, abrirSheetNuevoCliente } from './ui/pantalla-clientes.js';
 import { renderPantallaClienteDetalle, renderEstadoCuentaImprimible } from './ui/pantalla-cliente-detalle.js';
 import { renderPantallaGlobal } from './ui/pantalla-global.js';
 
@@ -58,12 +58,31 @@ function armarShell() {
       <a href="#/clientes" data-tab="clientes" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('clientes')}</span><span class="nav-texto">Clientes</span>
       </a>
+      <button type="button" class="nav-item nav-item-central" id="btn-nav-nuevo-cliente" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
+        <span class="nav-icono-central" aria-hidden="true">${Iconos.mas()}</span><span class="nav-texto">Nuevo cliente</span>
+      </button>
       <a href="#/global" data-tab="global" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('global')}</span><span class="nav-texto">Global</span>
       </a>
     </nav>
   `;
   elContenido = document.getElementById('pantalla-contenido');
+
+  const btnNuevoCliente = document.getElementById('btn-nav-nuevo-cliente');
+  if (btnNuevoCliente) {
+    // §2.11: botón central de la barra inferior — abre la sheet de alta desde
+    // CUALQUIER pantalla (es un overlay, no depende de la ruta actual). Si el
+    // alta se confirma, refresca la lista si ya estamos en Clientes, o
+    // navega ahí para que el gestor vea al cliente recién creado.
+    btnNuevoCliente.addEventListener('click', () => {
+      abrirSheetNuevoCliente({
+        onCreado: () => {
+          if (window.location.hash === RUTA_POR_DEFECTO) manejarCambioDeRuta();
+          else window.location.hash = RUTA_POR_DEFECTO;
+        },
+      });
+    });
+  }
 
   if (estaSoloLectura()) {
     const aviso = document.getElementById('aviso-solo-lectura');

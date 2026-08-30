@@ -17,6 +17,7 @@ import {
   microcopy, estadoVacio, montoOGuion, montoCortoOGuion, claseSaldo,
   formatearFechaCorta, formatearMesAnio, escapeHtml, bolitaHtml, abrirPanelRapido, Iconos,
   abrirSheet, cerrarSheet, mostrarToast, errorCampo, errorGeneral,
+  abrirSheetCorregirMonto, eliminarMovimientoConDeshacer,
 } from './componentes.js';
 
 const MICROCOPY_PERSONA = `
@@ -101,23 +102,34 @@ function lineasCelda(diaInfo) {
 
 /**
  * Lista completa de movimientos del mes visible, para debajo del calendario
- * (§2.10): fecha corta, tipo/concepto, monto a color. Se arma a partir del
- * mismo Map de `obtenerCalendarioMovimientos` ya cargado — sin queries extra.
+ * (§2.10/§2.11): fecha corta, tipo/concepto, monto a color, y — para
+ * CARGO/ABONO vivos — ✎ Corregir / 🗑 Eliminar. Se arma a partir de
+ * `listarMovimientos` (filas crudas CON id, a diferencia del Map de
+ * `obtenerCalendarioMovimientos` que usa el calendario, que no trae id). Los
+ * AJUSTE históricos se muestran sin acciones (§2.11: el mecanismo AJUSTE
+ * queda deprecated en la UI, pero el dato histórico se sigue mostrando bien).
+ * Ya vienen ordenados DESC por fecha/created_at desde la propia query.
  */
-function listaMovimientosMesHtml(dias) {
-  const filas = [];
-  for (const [fecha, diaInfo] of dias.entries()) {
-    for (const m of diaInfo.movimientos) filas.push({ fecha, ...m });
-  }
-  if (filas.length === 0) return estadoVacio('Sin movimientos este mes.');
-  filas.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0)); // más reciente primero
+function listaMovimientosMesHtml(movimientos) {
+  if (movimientos.length === 0) return estadoVacio('Sin movimientos este mes.');
   return `<ul class="lista lista-movimientos-mes">
-    ${filas.map((m) => `
-      <li class="lista-item fila-movimiento-mes">
+    ${movimientos.map((m) => {
+      const esAjuste = m.tipo === 'AJUSTE';
+      const signo = m.tipo === 'CARGO' ? '+' : m.tipo === 'ABONO' ? '−' : (m.monto_centavos >= 0 ? '+' : '−');
+      const clase = m.tipo === 'CARGO' ? 'monto-negativo' : m.tipo === 'ABONO' ? 'monto-positivo' : '';
+      const detalle = m.tipo === 'CARGO' ? (m.servicio || 'Cargo') : m.tipo === 'ABONO' ? 'Abono' : 'Ajuste';
+      return `
+      <li class="lista-item fila-movimiento-mes" data-movimiento-id="${escapeHtml(m.id)}" data-tipo="${escapeHtml(m.tipo)}" data-fecha="${escapeHtml(m.fecha)}" data-monto-centavos="${Math.abs(m.monto_centavos)}">
         <span class="fila-movimiento-fecha">${escapeHtml(formatearFechaCorta(m.fecha))}</span>
-        <span class="fila-movimiento-detalle">${m.tipo === 'CARGO' ? escapeHtml(m.concepto || 'Cargo') : 'Abono'}${m.referencia ? ` · ${escapeHtml(m.referencia)}` : ''}</span>
-        <span class="${m.tipo === 'CARGO' ? 'monto-negativo' : 'monto-positivo'}">${m.tipo === 'CARGO' ? '+' : '−'} ${montoOGuion(m.montoCentavos)}</span>
-      </li>`).join('')}
+        <span class="fila-movimiento-detalle">${escapeHtml(detalle)}${m.referencia ? ` · ${escapeHtml(m.referencia)}` : ''}</span>
+        <span class="${clase}">${signo} ${montoOGuion(Math.abs(m.monto_centavos))}</span>
+        ${esAjuste ? '' : `
+          <span class="fila-movimiento-acciones">
+            <button type="button" class="btn-icono btn-icono-chico" data-accion="corregir-movimiento" aria-label="Corregir monto">${Iconos.lapiz()}</button>
+            <button type="button" class="btn-icono btn-icono-chico" data-accion="eliminar-movimiento" aria-label="Eliminar movimiento">${Iconos.papelera()}</button>
+          </span>`}
+      </li>`;
+    }).join('')}
   </ul>`;
 }
 
@@ -148,8 +160,12 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     const { total: totalMovimientos } = await listarMovimientos({ cliente_id: id, pagina: 1, tamanioPagina: 1 });
     const sinMovimientos = totalMovimientos === 0;
 
-    const { primerDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesVisible);
+    const { primerDia, ultimoDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesVisible);
     const { dias } = await obtenerCalendarioMovimientos(id, mesVisible);
+    // §2.11: la lista de movimientos (con ✎/🗑) necesita el `id` de cada fila,
+    // que el Map de obtenerCalendarioMovimientos no trae — se arma aparte con
+    // listarMovimientos (mismo rango de fechas, sin queries redundantes de más).
+    const { movimientos: movimientosDelMes } = await listarMovimientos({ cliente_id: id, desde: primerDia, hasta: ultimoDia, tamanioPagina: 5000 });
 
     let abonosMesCentavos = 0;
     let cargosMesCentavos = 0;
@@ -227,7 +243,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
         </div>
 
         <h2 class="titulo-seccion">Movimientos de ${escapeHtml(formatearMesAnio(mesVisible))}</h2>
-        <div id="lista-movimientos-mes">${listaMovimientosMesHtml(dias)}</div>
+        <div id="lista-movimientos-mes">${listaMovimientosMesHtml(movimientosDelMes)}</div>
 
         ${fechaSeleccionada ? `
           <div class="popover-overlay" id="popover-dia-overlay">
@@ -250,7 +266,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
       </section>
     `;
 
-    wireEvents(cliente, categorias);
+    wireEvents(cliente, categorias, movimientosDelMes);
   }
 
   function abrirSheetEditarCliente(cliente, categorias) {
@@ -364,7 +380,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     }, { titulo: 'Editar cliente' });
   }
 
-  function wireEvents(cliente, categorias) {
+  function wireEvents(cliente, categorias, movimientosDelMes) {
     contenedor.querySelector('#btn-editar-persona').addEventListener('click', () => {
       abrirSheetEditarCliente(cliente, categorias);
     });
@@ -403,6 +419,32 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
       mostrarSaldoDiario = e.target.checked;
       guardarPreferenciaSaldoDiario(mostrarSaldoDiario);
       renderTodo();
+    });
+
+    // §2.11: ✎ Corregir / 🗑 Eliminar de un movimiento vivo (CARGO/ABONO).
+    contenedor.querySelectorAll('[data-movimiento-id]').forEach((li) => {
+      const idMovimiento = li.dataset.movimientoId;
+      const btnCorregir = li.querySelector('[data-accion="corregir-movimiento"]');
+      if (btnCorregir) {
+        btnCorregir.addEventListener('click', () => {
+          const movimiento = movimientosDelMes.find((m) => m.id === idMovimiento);
+          if (!movimiento) return;
+          abrirSheetCorregirMonto({ movimiento, onGuardado: renderTodo });
+        });
+      }
+      const btnEliminar = li.querySelector('[data-accion="eliminar-movimiento"]');
+      if (btnEliminar) {
+        btnEliminar.addEventListener('click', async () => {
+          const tipoTexto = li.dataset.tipo === 'CARGO' ? 'cargo' : 'abono';
+          const fechaTexto = formatearFechaCorta(li.dataset.fecha);
+          const montoTexto = montoOGuion(Number(li.dataset.montoCentavos));
+          await eliminarMovimientoConDeshacer({
+            id: idMovimiento,
+            mensajeConfirmacion: `¿Eliminar el ${tipoTexto} de ${montoTexto} del ${fechaTexto}?`,
+            onGuardado: renderTodo,
+          });
+        });
+      }
     });
   }
 

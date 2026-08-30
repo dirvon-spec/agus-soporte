@@ -109,6 +109,17 @@ function nuevoMovimiento({ clienteId, tipo, montoCentavos, fecha, servicio = nul
   };
 }
 
+/** §2.11: "visita sin abono" — semáforo de 3 estados por cliente-día. */
+function nuevaVisitaSinAbono({ clienteId, fecha }) {
+  return {
+    id: uuidV7(),
+    cliente_id: clienteId,
+    fecha,
+    created_at: ts(fecha, '18:00:00'),
+    updated_at: ts(fecha, '18:00:00'),
+  };
+}
+
 /**
  * Genera el set completo de datos de ejemplo, cubriendo los 9 casos
  * obligatorios de 2.6 entre 10 clientes con ~2 meses de movimientos, más 2
@@ -118,12 +129,16 @@ function nuevoMovimiento({ clienteId, tipo, montoCentavos, fecha, servicio = nul
  * genuinamente manual) y un catálogo de 4 conceptos (Luz/Agua/Internet/
  * Préstamo). NO crea acuerdos nuevos — los 12 clientes conservan los mismos
  * acuerdos de siempre (histórico, append-only, ya no se usa para altas).
- * @returns {{clientes: object[], acuerdos: object[], movimientos: object[], categorias: object[], conceptos: object[]}}
+ * §2.11: además siembra 1 `visita_sin_abono` de ejemplo (Manuel Torres, hoy)
+ * para demostrar el semáforo $0 gris ("visitado, dijo hoy no") sin tocar
+ * saldos ni movimientos.
+ * @returns {{clientes: object[], acuerdos: object[], movimientos: object[], categorias: object[], conceptos: object[], visitasSinAbono: object[]}}
  */
 export function generarSeed() {
   const clientes = [];
   const acuerdos = [];
   const movimientos = [];
+  const visitasSinAbono = [];
 
   const hoyStr = hoy();
   const inicioRango = sumarDias(hoyStr, -60);
@@ -215,6 +230,8 @@ export function generarSeed() {
     movimientos.push(nuevoMovimiento({ clienteId: cliente4.id, tipo: 'ABONO', montoCentavos: cuota4, fecha, nota: 'Cuota diaria' }));
   }
   // sin abonos desde finAbonos4 hasta hoy.
+  // §2.11: hoy lo visitaron y dijo "hoy no" — demuestra el semáforo $0 gris.
+  visitasSinAbono.push(nuevaVisitaSinAbono({ clienteId: cliente4.id, fecha: hoyStr }));
 
   // ---- Caso 5: cliente nuevo a mitad del rango (SIN_OBLIGACION antes de vigente_desde) ----
   const inicio5 = sumarDias(hoyStr, -10);
@@ -377,5 +394,5 @@ export function generarSeed() {
     movimientos.push(nuevoMovimiento({ clienteId: cliente12.id, tipo: 'ABONO', montoCentavos: cuotaMensual, fecha, nota: 'Cuota mensual' }));
   }
 
-  return { clientes, acuerdos, movimientos, categorias, conceptos };
+  return { clientes, acuerdos, movimientos, categorias, conceptos, visitasSinAbono };
 }

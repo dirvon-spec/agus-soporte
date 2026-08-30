@@ -91,6 +91,13 @@ verificar('money.js: parsearAPesos rechaza formatos inválidos con VALIDATION_ER
 verificar('money.js: formatearCentavos(123450) da formato es-MX con signo $', () => {
   assert(/\$1,234\.50/.test(formatearCentavos(123450)));
 });
+verificar('§2.11: formatearCentavos NUEVO — sin .00 en pesos exactos, conserva centavos si los hay', () => {
+  assert(formatearCentavos(125000) === '$1,250', `esperado "$1,250", obtenido "${formatearCentavos(125000)}"`);
+  assert(formatearCentavos(125050) === '$1,250.50', `esperado "$1,250.50", obtenido "${formatearCentavos(125050)}"`);
+  assert(formatearCentavos(0) === '$0', `esperado "$0", obtenido "${formatearCentavos(0)}"`);
+  assert(formatearCentavos(100) === '$1', `esperado "$1", obtenido "${formatearCentavos(100)}"`);
+  assert(formatearCentavos(150) === '$1.50', `esperado "$1.50", obtenido "${formatearCentavos(150)}"`);
+});
 
 // ============================================================
 // uuid.js
@@ -212,6 +219,23 @@ verificar('§2.9: generarSeed() siembra 3-4 categorías, catálogo de 4 concepto
   assert(datos.clientes.some((c) => c.categoria_id === null), 'debería haber al menos un cliente SIN categoría en el seed');
   const conCategoria = datos.clientes.filter((c) => c.categoria_id !== null);
   assert(conCategoria.every((c) => Number.isInteger(c.orden)), 'todo cliente con categoría debería tener un orden entero asignado');
+});
+
+verificar('§2.11: generarSeed() siembra visitasSinAbono con al menos 1 ejemplo válido (cliente_id + fecha ISO)', () => {
+  const datos = generarSeed();
+  assert(Array.isArray(datos.visitasSinAbono), 'generarSeed() debería devolver visitasSinAbono como array');
+  assert(datos.visitasSinAbono.length >= 1, 'debería haber al menos 1 visita_sin_abono de ejemplo en el seed');
+  for (const v of datos.visitasSinAbono) {
+    assert(typeof v.id === 'string' && v.id.length > 0, 'cada visita debería tener id');
+    assert(
+      datos.clientes.some((c) => c.id === v.cliente_id),
+      `visita.cliente_id (${v.cliente_id}) debería corresponder a un cliente real del seed`
+    );
+    assert(/^\d{4}-\d{2}-\d{2}$/.test(v.fecha), `fecha inválida en visita sembrada: ${v.fecha}`);
+    // NO debería haber, para el mismo cliente+fecha, un ABONO vivo en el seed (regla firme de registrarVisitaSinAbono)
+    const chocaConAbono = datos.movimientos.some((m) => m.tipo === 'ABONO' && m.cliente_id === v.cliente_id && m.fecha === v.fecha);
+    assert(!chocaConAbono, `la visita sembrada de ${v.cliente_id} en ${v.fecha} no debería coincidir con un ABONO ese mismo día`);
+  }
 });
 
 // ============================================================
