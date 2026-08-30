@@ -25,10 +25,11 @@ const MICROCOPY = `
   los acuerdes con cada quien — no hay cuotas fijas.</p>
   <p><strong>El monto ES el botón:</strong> tocá el verde para registrar un
   abono, el rojo para un cargo (ambos quedan en el día que estás viendo), o el
-  nombre para ver el calendario completo de ese cliente. Mantené presionado el
-  agarre ⋮⋮ para reordenar dentro de un grupo, o un chip de categoría para
-  editarla o eliminarla. Tocá el encabezado "Cargos" para ocultar esa columna
-  si no la necesitás.</p>
+  nombre para ver el calendario completo de ese cliente. Los chips de arriba
+  (deslizables si no entran todos) filtran por categoría; mantené presionado
+  uno para editarla o eliminarla. Mantené presionado el agarre ⋮⋮ para
+  reordenar dentro de un grupo. Tocá el encabezado "Cargos" para ocultar esa
+  columna si no la necesitás.</p>
 `;
 
 // §2.10 A-201: a partir de $100,000 el monto se muestra en notación
@@ -354,12 +355,19 @@ export async function renderPantallaClientes(contenedor) {
     const el = contenedor.querySelector('#cabecera-columnas-clientes');
     if (!el) return;
     el.className = `cabecera-columnas cabecera-columnas-excel ${cargosOcultos ? 'cargos-ocultos' : ''}`;
+    // Bug del dueño: la cabecera debe compartir EXACTAMENTE el mismo grid que
+    // .fila-excel en ambos estados. Antes, al ocultar, se SUSTITUÍA la celda
+    // "Cargos" por "‹C" (ambas ocupando el mismo slot de grid) — eso deja 6
+    // ítems visibles en la cabecera contra el grid de 5 columnas de las filas
+    // de datos, y el 6to (Saldo) se desborda a un renglón aparte. Ahora la
+    // celda "Cargos" SIEMPRE existe con la clase .col-cargo (se oculta con la
+    // misma regla CSS que las filas) y "‹C" vive ANIDADA dentro de la celda
+    // "Abonos" (hijo de un ítem de grid, no un ítem de grid en sí mismo) para
+    // no alterar el conteo de columnas.
     el.innerHTML = `
       <span></span><span></span><span class="cabecera-columnas-nombre">Cliente</span>
-      <span class="cabecera-columnas-monto">Abonos</span>
-      ${cargosOcultos
-        ? `<button type="button" class="cabecera-columnas-monto btn-pestania-cargos" id="btn-mostrar-cargos" aria-label="Mostrar columna Cargos">‹C</button>`
-        : `<button type="button" class="cabecera-columnas-monto btn-ocultar-cargos col-cargo" id="btn-ocultar-cargos">Cargos</button>`}
+      <span class="cabecera-columnas-monto">Abonos${cargosOcultos ? ` <button type="button" class="btn-pestania-cargos" id="btn-mostrar-cargos" aria-label="Mostrar columna Cargos">‹C</button>` : ''}</span>
+      <button type="button" class="cabecera-columnas-monto btn-ocultar-cargos col-cargo" id="btn-ocultar-cargos">Cargos</button>
       <span class="cabecera-columnas-monto">Saldo</span>
     `;
     const btnOcultar = el.querySelector('#btn-ocultar-cargos');
@@ -494,13 +502,11 @@ export async function renderPantallaClientes(contenedor) {
 
       <div id="franja-resumen-dia" class="franja-resumen-dia" aria-live="polite"></div>
 
-      <div class="campo">
-        <label id="etiqueta-filtro-categoria">Filtrar por categoría</label>
-        <div class="chips-fila" id="wrap-chips-categoria" aria-labelledby="etiqueta-filtro-categoria"></div>
+      <div class="campo campo-compacto">
+        <div class="chips-fila chips-scroll" id="wrap-chips-categoria" aria-label="Filtrar por categoría"></div>
       </div>
-      <div class="campo campo-buscador">
-        <label for="buscador-clientes">Buscar por nombre o teléfono</label>
-        <input id="buscador-clientes" type="search" placeholder="Ej. Rosa, 5215..." />
+      <div class="campo campo-compacto campo-buscador">
+        <input id="buscador-clientes" type="search" placeholder="Buscar por nombre o teléfono" aria-label="Buscar por nombre o teléfono" />
       </div>
       <div class="cabecera-columnas cabecera-columnas-excel" id="cabecera-columnas-clientes"></div>
       <div id="lista-clientes-agrupados" aria-live="polite"></div>

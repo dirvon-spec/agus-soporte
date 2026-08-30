@@ -980,6 +980,89 @@ export async function eliminarMovimientoConDeshacer({ id, mensajeConfirmacion, o
   }
 }
 
+/**
+ * §2.11 (Global): selector de cliente compartido para "+ Agregar movimiento
+ * en este día" — SIN opción "Todas" (siempre un cliente concreto). Filtra en
+ * memoria sobre una única carga inicial (población chica, sin necesidad de
+ * ida y vuelta por cada tecla). Elegido el cliente y el tipo (abono/cargo),
+ * abre el panel rápido de siempre, con `fecha` precargada.
+ * @param {{fecha: string, onGuardado?: () => void}} cfg
+ */
+export function abrirSheetSeleccionarCliente({ fecha, onGuardado }) {
+  abrirSheet((host) => {
+    let busqueda = '';
+    let cargando = true;
+    let gruposCompletos = [];
+
+    function capturarBusqueda() {
+      const input = host.querySelector('#sel-cliente-buscador');
+      if (input) busqueda = input.value;
+    }
+
+    function gruposFiltrados() {
+      const q = busqueda.trim().toLowerCase();
+      if (!q) return gruposCompletos;
+      return gruposCompletos
+        .map((g) => ({ ...g, clientes: g.clientes.filter((c) => c.nombre.toLowerCase().includes(q) || (c.telefono || '').toLowerCase().includes(q)) }))
+        .filter((g) => g.clientes.length > 0);
+    }
+
+    function render() {
+      capturarBusqueda();
+      const grupos = cargando ? [] : gruposFiltrados();
+      host.innerHTML = `
+        <div class="campo campo-compacto">
+          <input id="sel-cliente-buscador" type="search" placeholder="Buscar por nombre o teléfono" value="${escapeHtml(busqueda)}" />
+        </div>
+        <div id="sel-cliente-lista">
+          ${cargando ? '<p class="cargando">Cargando…</p>' : (grupos.length === 0
+            ? estadoVacio('No se encontraron clientes.')
+            : grupos.map((g) => `
+              <section class="grupo-clientes">
+                <h3 class="grupo-titulo">${bolitaHtml(g.categoria_color)} ${escapeHtml(g.categoria_nombre)}</h3>
+                <ul class="lista lista-selector-cliente">
+                  ${g.clientes.map((c) => `
+                    <li class="lista-item fila-selector-cliente" data-cliente-id="${escapeHtml(c.id)}">
+                      <span class="fila-selector-cliente-nombre">${escapeHtml(c.nombre)}</span>
+                      <button type="button" class="btn btn-secundario btn-pequeno" data-tipo="ABONO">+Abono</button>
+                      <button type="button" class="btn btn-secundario btn-pequeno" data-tipo="CARGO">+Cargo</button>
+                    </li>`).join('')}
+                </ul>
+              </section>`).join(''))}
+        </div>
+      `;
+
+      const inputBuscador = host.querySelector('#sel-cliente-buscador');
+      inputBuscador.addEventListener('input', () => render());
+      inputBuscador.focus();
+      const largo = inputBuscador.value.length;
+      inputBuscador.setSelectionRange(largo, largo);
+
+      host.querySelectorAll('.fila-selector-cliente button[data-tipo]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const li = btn.closest('[data-cliente-id]');
+          const nombre = li.querySelector('.fila-selector-cliente-nombre').textContent;
+          cerrarSheet();
+          abrirPanelRapido({
+            tipo: btn.dataset.tipo,
+            clienteId: li.dataset.clienteId,
+            clienteNombre: nombre,
+            fechaInicial: fecha,
+            onGuardado,
+          });
+        });
+      });
+    }
+
+    render();
+    listarClientesAgrupados({}).then(({ grupos }) => {
+      gruposCompletos = grupos;
+      cargando = false;
+      render();
+    });
+  }, { titulo: 'Elegir cliente' });
+}
+
 // ============================================================
 // §2.10 — Sheet "Configuración" (engrane de la barra de Clientes):
 // administra el catálogo de categorías y de conceptos desde un solo lugar.

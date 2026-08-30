@@ -15,7 +15,7 @@ import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, formatearMesAnio, formatearFechaLegible, formatearFechaCorta,
   escapeHtml, mostrarToast, errorGeneral, bolitaHtml, Iconos,
-  abrirSheetCorregirMonto, eliminarMovimientoConDeshacer,
+  abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -229,6 +229,7 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
                   </li>`;
                 }).join('')}</ul>`
             }
+            <button type="button" class="btn btn-secundario btn-ancho" id="btn-agregar-movimiento-dia" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>${Iconos.mas()} Agregar movimiento en este día</button>
           </div>` : ''}
 
         <details class="panel-colapsable panel-ajustes" open>
@@ -286,6 +287,13 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
   function wireEvents() {
     const btnExportarAhora = contenedor.querySelector('#btn-exportar-ahora');
     if (btnExportarAhora) btnExportarAhora.addEventListener('click', realizarExportar);
+
+    const btnAgregarMovimiento = contenedor.querySelector('#btn-agregar-movimiento-dia');
+    if (btnAgregarMovimiento) {
+      btnAgregarMovimiento.addEventListener('click', () => {
+        abrirSheetSeleccionarCliente({ fecha: diaSeleccionado, onGuardado: renderTodo });
+      });
+    }
 
     contenedor.querySelector('#selector-mes-global').addEventListener('change', (e) => {
       if (e.target.value) window.location.hash = `#/global/${e.target.value}`;

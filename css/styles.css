@@ -582,6 +582,42 @@ button {
   gap: var(--espaciado-sm);
 }
 
+/* Feedback del dueño: el filtro de Clientes ocupaba demasiado alto envuelto
+   en varias filas — en un solo carril horizontal con scroll táctil, sin
+   barra de scroll fea (oculta mientras se ve igual de funcional). */
+.chips-scroll {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 2px; /* espacio para que el anillo de foco no se recorte */
+}
+
+.chips-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.chips-scroll > * {
+  flex-shrink: 0;
+}
+
+/* Chips más chicos SOLO en el carril de filtro de Clientes (el resto de los
+   usos de .chip — conceptos, categorías en sheets — no cambian) — siguen
+   táctiles (min-height 32px cumple el mínimo recomendado). */
+#wrap-chips-categoria .chip {
+  padding: 5px 10px;
+  min-height: 32px;
+  font-size: 0.78rem;
+  gap: 4px;
+}
+
+/* Bloques compactos (filtro + buscador de Clientes): sin label visible, así
+   que no necesitan el gap/margen pensado para "label + campo". */
+.campo-compacto {
+  margin-bottom: var(--espaciado-sm);
+  gap: 0;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;
@@ -1754,8 +1790,31 @@ button.fila-excel-monto:focus-visible {
 }
 
 .btn-pestania-cargos {
+  /* Anidada dentro de la celda "Abonos" a propósito (ver comentario en
+     pantalla-clientes.js#renderCabeceraColumnas): al ser hija de un ítem de
+     grid, no un ítem en sí misma, nunca altera el conteo de columnas. */
   font-weight: 700;
   color: var(--color-primario);
+  margin-left: 4px;
+}
+
+/* ============================================================
+   §2.11 — Sheet "Elegir cliente" (Global: "+ Agregar movimiento en este día")
+   ============================================================ */
+
+.fila-selector-cliente {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+}
+
+.fila-selector-cliente-nombre {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
 }
 
 /* ============================================================
