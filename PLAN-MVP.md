@@ -371,6 +371,49 @@ Solicitado por el dueño tras probar la demo publicada. Decisión de negocio con
 
 **Pase visual (independiente, sin riesgo):** números del calendario más grandes (número de día y monto legibles en teléfono — el dueño reportó que "casi no se ven"), e iconos SVG inline propios (barra de navegación, badges de estado, botones de acción) en lugar de emoji/texto, para identidad visual consistente entre dispositivos.
 
+### 2.9 REDISEÑO V2 "SENCILLO" — gate del dueño 28-ago-2026 (mockup de 5 pantallas aprobado)
+
+> **Este es el contrato VIGENTE de la app y SUPERSEDE parcialmente a §2.4, §2.5 y §2.8.** Nada de lo aquí especificado se "simplifica" ni se borra por parecer raro: cada decisión salió de la retroalimentación directa del cliente final probando la demo v1. Su negocio se basa en CERCANÍA: cobros personalizados y manuales, sin cuotas fijas ni mensajes automáticos, con el gestor decidiendo todo. Estilo de uso: Excel — mínimos clics, los datos a la vista.
+
+**SE RETIRA de la app (las specs anteriores quedan en este documento como historia, NO borrar):**
+- Pantalla "Hoy" y pestaña "Calendario" global (§2.4-1, §2.4-6).
+- Función de mensaje/recordatorio WhatsApp (`wa.me`) — generaba fricción con sus clientes.
+- TODO el sistema de cuotas y frecuencias (§2.8): sin cuota pactada, sin días exigibles, sin estados PAGADO/GRACIA/PARCIAL/DEUDA. La tabla `acuerdos` se CONSERVA con sus datos (append-only, historia) pero deja de usarse; el alta de cliente ya no crea acuerdos.
+- Navegación queda en 2 pestañas: **Clientes** (inicio) y **Resumen**.
+
+**Esquema v3 (migración v2→v3 transparente, mismo patrón que v1→v2):**
+- Nueva tabla `categorias(id, nombre UNIQUE-vivo, color TEXT, created_at, updated_at, deleted_at)`. Paleta FIJA de 12 colores (definida en componentes); los colores PUEDEN repetirse entre categorías.
+- `clientes` gana `categoria_id TEXT NULL REFERENCES categorias(id)` y `orden INTEGER` (orden manual del gestor; nuevos clientes al final).
+- Nueva tabla `conceptos(id, nombre, created_at, updated_at, deleted_at)` — catálogo EDITABLE de conceptos de cargo (reemplaza el enum fijo de `servicio`). Migración: sembrar conceptos desde los valores distintos ya usados en `movimientos.servicio`; los cargos siguen guardando el nombre del concepto en `movimientos.servicio` (texto) para no reescribir historia.
+- `importarRespaldo` acepta v1/v2/v3 (migra en memoria).
+
+**Pantalla 1 — Clientes (inicio):**
+- Chips de filtro por categoría arriba (bolita + nombre, "Todos" default, chip "+ Nueva" crea categoría). Etiqueta "Filtrar por categoría". Mantener presionado un chip → editar/eliminar categoría (eliminar = borrado lógico; sus clientes pasan a "Sin categoría").
+- Buscador (nombre/teléfono) como hoy.
+- Lista AGRUPADA por categoría; dentro de cada grupo, ORDEN MANUAL: agarre ⋮⋮ con arrastre (long-press en táctil), persiste en `clientes.orden`, reordena solo dentro del grupo. Grupo final "Sin categoría".
+- Fila de cliente: ⋮⋮ + bolita de categoría + nombre + botón **+Abono con el total de abonos del MES actual dentro** + botón **+Cargo con los cargos del MES** + saldo total (color semántico, "—" si sin movimientos). Cabecera fina "Abonos (mes) · Cargos (mes) · Saldo".
+- Al final de cada grupo, fila **Σ {categoría}** (fondo sutil, nombre en el color de la categoría): suma de abonos del mes, cargos del mes y saldo del grupo, alineada bajo las columnas.
+- Clic en el nombre → pantalla Persona. Clic en +Abono/+Cargo → panel rápido.
+
+**Panel rápido (bottom sheet, 1 clic desde fila o desde Persona):**
+- Abono: monto en grande (teclado numérico), fecha default hoy (editable, no futura), Guardar. 3 toques en total.
+- Cargo: igual + fila de chips de concepto del catálogo con "+ Nuevo" para crear concepto al vuelo sin salir del panel. Concepto obligatorio. Referencia opcional (campo chico). Sin nota.
+
+**Pantalla 2 — Persona (clic en el nombre):**
+- Encabezado COMPACTO: ‹ nombre + bolita. El calendario es el protagonista (esta pantalla ES el reporte que el gestor manda por pantallazo a sus clientes — debe caber completa: tarjeta + mes entero).
+- Tarjeta superior: botón **+Abonos $X (mes visible)** + botón **+Cargos $Y (mes visible)** (mismo patrón dato-es-botón; abren el panel rápido con el cliente preseleccionado) + **Saldo total histórico** como dato.
+- Calendario mensual completo, **semana inicia LUNES**. Celdas: verde = día con abono (monto visible), rojo = día con cargo (**concepto + monto visibles en la celda**), mixto (degradado) = ambos, neutro = sin movimientos. Cada celda muestra además **"= $saldo" acumulado hasta esa fecha** (línea inferior discreta) — con **switch "Saldo diario en el calendario"** para mostrar/ocultar (preferencia persistente; el dueño no está seguro de que a su cliente le guste, por eso es opcional y NO se elimina).
+- Clic en una fecha → **esa celda se agranda** (popover flotante sobre el calendario): fecha, movimientos del día con concepto y monto, saldo a ese día. Cierra con ✕ o tocando fuera. NO hay lista de movimientos permanente abajo.
+- El saldo diario por celda se deriva con la fórmula de saldo de §2.2 acumulada por fecha (una sola pasada, nunca N queries).
+
+**Pantalla 3 — Nueva categoría:** sheet con nombre + paleta de 12 colores (bolitas grandes, selección marcada). Si hay más de 12 categorías los colores se repiten — la bolita+nombre desambigua.
+
+**Pantalla 4 — Nuevo cliente:** nombre (único obligatorio), teléfono opcional, categoría por chips (con "+ Nueva" inline), notas opcional. SIN cuota ni frecuencia. Entra al final de la lista de su grupo.
+
+**Pantalla 5 — Resumen:** queda COMO ESTÁ hoy (totales del mes + tabla por cliente + Ajustes/Respaldo). La sumatoria por categoría vive en Clientes (decisión explícita del dueño), NO aquí.
+
+**Verificación mínima obligatoria del rediseño (ejecutando):** Σ de cada grupo coincide con la suma manual de sus filas; abonos/cargos del mes en los botones coinciden con resumenMensual del cliente; saldo diario de las celdas coincide con calcularSaldo(cliente, fecha) para 3 fechas verificadas a mano; el orden manual sobrevive a F5 y a filtrar; migración v2→v3 preserva todo y siembra conceptos desde los servicios usados; el switch de saldo diario persiste; semana arranca en lunes (verificar con un mes cuyo día 1 sea domingo); panel rápido guarda en la fecha elegida.
+
 ---
 
 ## 3. Análisis de riesgo
@@ -654,3 +697,4 @@ Ideas identificadas durante la planificación que quedan explícitamente fuera d
 | B-017 | Confirmación de lectura/apertura del recordatorio de WhatsApp (no posible con el enlace `wa.me` simple). |
 | B-018 | Mecanismo para corregir un `vigente_desde` mal ingresado en el primer acuerdo de un cliente (origen: R-008). |
 | B-019 | Índice `idx_movimientos_cliente_tipo_fecha` si la base se reutiliza en producción con años de historial (origen: R-009). |
+| B-020 | UI para renombrar/eliminar conceptos del catálogo (la capa de datos ya lo soporta; origen: A-103 de la auditoría v2). |

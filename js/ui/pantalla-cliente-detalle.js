@@ -1,45 +1,49 @@
-// Pantalla "Detalle de cliente" (2.4-3 del PLAN-MVP.md): saldo, calendario
-// mensual, historial paginado, ajuste con selector aumenta/reduce +
-// previsualización, renegociar cuota, WhatsApp, estado de cuenta imprimible.
+// Pantalla "Persona" (antes "Detalle de cliente") — contrato vigente §2.9
+// (PLAN-MVP.md): encabezado compacto, tarjeta +Abonos/+Cargos/Saldo, y un
+// calendario mensual completo (semana-lunes) como protagonista — esta
+// pantalla ES el reporte que el gestor manda por pantallazo. Debe caber
+// completa (tarjeta + mes entero) en un viewport de teléfono, sin scroll.
+//
+// SIN lista de movimientos permanente, SIN WhatsApp, SIN cuotas/frecuencia.
+// El estado de cuenta imprimible se conserva (es gratis mantenerlo) pero sin
+// botón visible en esta pantalla — se llega solo por URL directa.
 
+import { obtenerCliente, calcularSaldo, listarCategorias, listarMovimientos, obtenerCalendarioMovimientos } from '../db.js';
+import { hoy } from '../utils/date.js';
 import {
-  obtenerCliente, calcularSaldo, listarAcuerdos, crearAcuerdo,
-  listarMovimientos, registrarAjuste, obtenerEstadoCalendario,
-  generarEnlaceWhatsApp, estaSoloLectura,
-} from '../db.js';
-import { hoy, sumarDias } from '../utils/date.js';
-import { parsearAPesos, formatearCentavos } from '../utils/money.js';
-import {
-  microcopy, estadoVacio, badgeEstado, leyendaEstados, montoOGuion, claseSaldo,
-  formatearFechaCorta, formatearMesAnio, escapeHtml, paginadorHtml, textoFrecuencia,
-  campoFrecuenciaHtml, activarCampoFrecuencia, leerCampoFrecuencia,
-  activarPaginador, mostrarToast, errorCampo, errorGeneral, Iconos,
+  microcopy, estadoVacio, montoOGuion, montoCortoOGuion, claseSaldo,
+  formatearFechaCorta, formatearMesAnio, escapeHtml, bolitaHtml, abrirPanelRapido, Iconos,
 } from './componentes.js';
 
-const MICROCOPY_DETALLE = `
-  <p>Acá ves todo sobre este cliente: su saldo actual, su calendario de
-  cumplimiento de cuota, y el historial completo de cargos, abonos y ajustes.</p>
-  <p>La cuota puede ser diaria, semanal (un día fijo de la semana) o mensual
-  (un día fijo del mes); el calendario solo pinta los días en que corresponde
-  cobrar, el resto queda neutro. Tocá un día del calendario para ver qué pasó
-  ese día. Si un movimiento quedó mal cargado, no se edita ni se borra: se
-  corrige con un "ajuste" desde el historial, que queda registrado junto al
-  original.</p>
+const MICROCOPY_PERSONA = `
+  <p>Este calendario es el reporte que le podés mandar a tu cliente por
+  pantallazo: muestra, día por día, lo que abonó (verde) y lo que le
+  cargaste (rojo), con el concepto. Los cobros son como los acuerdes con
+  cada quien — no hay cuotas fijas.</p>
+  <p>Tocá <strong>+Abonos</strong> o <strong>+Cargos</strong> para registrar
+  un movimiento. Tocá cualquier día del calendario para ver el detalle
+  completo de ese día.</p>
 `;
 
-const AVISO_ALCANCE_CALENDARIO =
-  'El calendario mide el cumplimiento de la cuota diaria. El saldo de arriba ' +
-  'incluye además los servicios pagados (cargos).';
+const DIAS_SEMANA_LUNES = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+const CLAVE_PREF_SALDO_DIARIO = 'agus-mostrar-saldo-diario';
 
-const SERVICIO_LABEL = { AGUA: 'Agua', LUZ: 'Luz', INTERNET: 'Internet', GAS: 'Gas', CABLE: 'Cable', OTRO: 'Otro' };
-const DIAS_SEMANA = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-const TAMANIO_PAGINA_HISTORIAL = 20;
+function leerPreferenciaSaldoDiario() {
+  try {
+    const v = localStorage.getItem(CLAVE_PREF_SALDO_DIARIO);
+    return v === null ? true : v === '1';
+  } catch (e) {
+    return true;
+  }
+}
 
-function textoMontoMovimiento(m) {
-  if (m.tipo === 'CARGO') return { texto: `+ ${formatearCentavos(m.monto_centavos)}`, clase: 'monto-negativo' };
-  if (m.tipo === 'ABONO') return { texto: `− ${formatearCentavos(m.monto_centavos)}`, clase: 'monto-positivo' };
-  const signo = m.monto_centavos > 0 ? '+' : '−';
-  return { texto: `${signo} ${formatearCentavos(Math.abs(m.monto_centavos))}`, clase: m.monto_centavos > 0 ? 'monto-negativo' : 'monto-positivo' };
+function guardarPreferenciaSaldoDiario(valor) {
+  try {
+    localStorage.setItem(CLAVE_PREF_SALDO_DIARIO, valor ? '1' : '0');
+  } catch (e) {
+    // localStorage puede fallar (modo privado, cuota llena, etc.) — es solo
+    // una preferencia de dispositivo, no rompe la pantalla si no se guarda.
+  }
 }
 
 function primerYUltimoDiaDeMes(anioMes) {
@@ -47,7 +51,7 @@ function primerYUltimoDiaDeMes(anioMes) {
   const primerDia = `${anioMes}-01`;
   const ultimoDiaNum = new Date(anio, mes, 0).getDate();
   const ultimoDia = `${anioMes}-${String(ultimoDiaNum).padStart(2, '0')}`;
-  return { primerDia, ultimoDia, ultimoDiaNum, anio, mes };
+  return { primerDia, ultimoDia, ultimoDiaNum };
 }
 
 function mesAnterior(anioMes) {
@@ -61,25 +65,41 @@ function mesSiguiente(anioMes) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+/** 0=lunes..6=domingo, a partir de 'YYYY-MM-DD' (Date.getDay() es 0=domingo). */
+function diaSemanaLunes(fechaIso) {
+  const [anio, mes, dia] = fechaIso.split('-').map(Number);
+  const d = new Date(anio, mes - 1, dia, 12, 0, 0);
+  return (d.getDay() + 6) % 7;
+}
+
+function claseColorCelda(diaInfo) {
+  const hayAbono = diaInfo.abonosCentavos > 0;
+  const hayCargo = diaInfo.cargosCentavos > 0;
+  if (hayAbono && hayCargo) return 'mes-celda-mixto';
+  if (hayAbono) return 'mes-celda-verde';
+  if (hayCargo) return 'mes-celda-rojo';
+  return 'mes-celda-neutro';
+}
+
+function lineasCelda(diaInfo) {
+  const lineas = [];
+  if (diaInfo.abonosCentavos > 0) lineas.push(`<span class="mes-dato-abono">+${montoCortoOGuion(diaInfo.abonosCentavos)}</span>`);
+  if (diaInfo.cargosCentavos > 0) {
+    const cargos = diaInfo.movimientos.filter((m) => m.tipo === 'CARGO');
+    const etiqueta = cargos.length === 1 ? cargos[0].concepto : `${cargos.length} cargos`;
+    lineas.push(`<span class="mes-dato-cargo">${escapeHtml(etiqueta)} ${montoCortoOGuion(diaInfo.cargosCentavos)}</span>`);
+  }
+  return lineas.join('');
+}
+
 /**
  * @param {HTMLElement} contenedor
  * @param {{id: string}} opciones
  */
 export async function renderPantallaClienteDetalle(contenedor, { id }) {
-  let mesCalendario = hoy().slice(0, 7);
-  let diaSeleccionado = null;
-  let filtroTipo = '';
-  let paginaHistorial = 1;
-  let renegociarAbierto = false;
-  let erroresRenegociar = {};
-  let valoresRenegociar = {};
-  let ajusteMovimientoId = null;
-  let erroresAjuste = {};
-  // Compartido entre renderTodo() y wireEvents(): el acuerdo vigente hoy, para
-  // precargar su frecuencia al abrir "Renegociar cuota".
-  let acuerdoVigenteHoy = null;
-
-  const soloLectura = estaSoloLectura();
+  let mesVisible = hoy().slice(0, 7);
+  let fechaSeleccionada = null;
+  let mostrarSaldoDiario = leerPreferenciaSaldoDiario();
 
   async function renderTodo() {
     const cliente = await obtenerCliente(id);
@@ -92,378 +112,149 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
       return;
     }
 
-    const todosLosMovimientos = (await listarMovimientos({ cliente_id: id, tamanioPagina: 5000 })).movimientos;
-    const sinMovimientos = todosLosMovimientos.length === 0;
-    const saldoActual = await calcularSaldo(id);
-    const saldoParaMostrar = sinMovimientos ? null : saldoActual;
+    const categorias = await listarCategorias();
+    const categoria = cliente.categoria_id ? categorias.find((c) => c.id === cliente.categoria_id) : null;
 
-    const acuerdos = await listarAcuerdos(id); // asc, incluye cerrados
-    acuerdoVigenteHoy = acuerdos.find((a) => a.vigente_desde <= hoy() && (!a.vigente_hasta || a.vigente_hasta >= hoy())) || null;
+    const saldoTotal = await calcularSaldo(id);
+    const { total: totalMovimientos } = await listarMovimientos({ cliente_id: id, pagina: 1, tamanioPagina: 1 });
+    const sinMovimientos = totalMovimientos === 0;
 
-    let enlaceWhatsApp = null;
-    let motivoSinWhatsApp = null;
-    try {
-      enlaceWhatsApp = await generarEnlaceWhatsApp(id);
-    } catch (e) {
-      motivoSinWhatsApp = e.message;
+    const { primerDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesVisible);
+    const { dias } = await obtenerCalendarioMovimientos(id, mesVisible);
+
+    let abonosMesCentavos = 0;
+    let cargosMesCentavos = 0;
+    for (const diaInfo of dias.values()) {
+      abonosMesCentavos += diaInfo.abonosCentavos;
+      cargosMesCentavos += diaInfo.cargosCentavos;
     }
 
-    const { primerDia, ultimoDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesCalendario);
-    const estadosCalendario = await obtenerEstadoCalendario(id, primerDia, ultimoDia);
-    const cambiosDeCuotaEnMes = new Map(
-      acuerdos.filter((a) => a.vigente_desde >= primerDia && a.vigente_desde <= ultimoDia)
-        .map((a) => [a.vigente_desde, a.monto_cuota_centavos])
-    );
-    const primerDiaSemana = new Date(primerDia + 'T12:00:00').getDay();
-    const movimientosDelDia = diaSeleccionado ? todosLosMovimientos.filter((m) => m.fecha === diaSeleccionado) : [];
+    const primerDiaSemana = diaSemanaLunes(primerDia);
+    const totalCeldas = primerDiaSemana + ultimoDiaNum;
+    const celdasFinales = Math.ceil(totalCeldas / 7) * 7;
 
-    const { movimientos: movimientosPagina, total: totalHistorial } = await listarMovimientos({
-      cliente_id: id, tipo: filtroTipo || undefined, pagina: paginaHistorial, tamanioPagina: TAMANIO_PAGINA_HISTORIAL,
-    });
-    const fechaPorId = new Map(todosLosMovimientos.map((m) => [m.id, m.fecha]));
+    const infoDiaSeleccionado = fechaSeleccionada ? dias.get(fechaSeleccionada) : null;
 
     contenedor.innerHTML = `
-      <section class="pantalla" data-pantalla="cliente-detalle">
-        ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY_DETALLE)}
+      <section class="pantalla pantalla-persona" data-pantalla="persona">
+        ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY_PERSONA)}
 
-        <header class="encabezado-cliente">
-          <h1>${escapeHtml(cliente.nombre)}</h1>
-          <p class="encabezado-cliente-telefono">${cliente.telefono ? escapeHtml(cliente.telefono) : '—'}</p>
-          <div class="encabezado-cliente-saldo">
-            <span class="etiqueta-saldo">Saldo actual</span>
-            <span class="monto-grande ${sinMovimientos ? '' : claseSaldo(saldoActual)}">${montoOGuion(saldoParaMostrar)}</span>
-          </div>
-          <p class="encabezado-cliente-cuota">Cuota vigente: ${acuerdoVigenteHoy ? `${montoOGuion(acuerdoVigenteHoy.monto_cuota_centavos)} ${escapeHtml(textoFrecuencia(acuerdoVigenteHoy))}` : '—'}</p>
-          ${cliente.notas ? `
-            <div class="encabezado-cliente-notas">
-              <span class="etiqueta-saldo">Nota</span>
-              <p class="texto-nota-cliente">${escapeHtml(cliente.notas)}</p>
-            </div>` : ''}
+        <header class="encabezado-persona">
+          <a href="#/clientes" class="btn-icono" aria-label="Volver a Clientes">${Iconos.chevronIzquierda()}</a>
+          ${bolitaHtml(categoria ? categoria.color : null, 'bolita-grande')}
+          <h1 class="encabezado-persona-nombre">${escapeHtml(cliente.nombre)}</h1>
         </header>
 
-        <div class="acciones-cliente">
-          ${enlaceWhatsApp
-            ? `<a class="btn btn-secundario" href="${escapeHtml(enlaceWhatsApp)}" target="_blank" rel="noopener">${Iconos.mensaje()} Recordatorio WhatsApp</a>`
-            : `<button type="button" class="btn btn-secundario" disabled title="${escapeHtml(motivoSinWhatsApp || 'Sin teléfono')}">${Iconos.mensaje()} Recordatorio WhatsApp</button>`
-          }
-          <a class="btn btn-secundario" href="#/clientes/${encodeURIComponent(id)}/imprimir" target="_blank" rel="noopener">${Iconos.documento()} Estado de cuenta</a>
-          <button type="button" class="btn btn-secundario" id="btn-toggle-renegociar" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>
-            ${Iconos.renegociar()} ${renegociarAbierto ? 'Cancelar renegociación' : 'Renegociar cuota'}
-          </button>
-          <a class="btn btn-primario" href="#/nuevo-movimiento/${encodeURIComponent(id)}">${Iconos.mas()} Registrar movimiento</a>
+        <div class="tarjeta-persona">
+          <div class="tarjeta-persona-botones">
+            <button type="button" class="btn-dato-grande" id="btn-tarjeta-abono">
+              <span>+Abonos</span><strong>${montoOGuion(abonosMesCentavos)}</strong>
+            </button>
+            <button type="button" class="btn-dato-grande" id="btn-tarjeta-cargo">
+              <span>+Cargos</span><strong>${montoOGuion(cargosMesCentavos)}</strong>
+            </button>
+          </div>
+          <div class="tarjeta-persona-saldo">
+            <span class="etiqueta-saldo">Saldo total</span>
+            <span class="monto-grande ${sinMovimientos ? '' : claseSaldo(saldoTotal)}">${montoOGuion(sinMovimientos ? null : saldoTotal)}</span>
+          </div>
         </div>
 
-        <div id="panel-renegociar">${renegociarAbierto ? renderFormularioRenegociar() : ''}</div>
-
-        <h2 class="titulo-seccion">Calendario</h2>
-        <div class="calendario-wrap">
+        <div class="calendario-mensual-wrap">
           <div class="calendario-nav">
             <button type="button" class="btn-icono" id="btn-mes-anterior" aria-label="Mes anterior">${Iconos.chevronIzquierda()}</button>
-            <span class="calendario-mes-titulo">${escapeHtml(formatearMesAnio(mesCalendario))}</span>
+            <span class="calendario-mes-titulo">${escapeHtml(formatearMesAnio(mesVisible))}</span>
             <button type="button" class="btn-icono" id="btn-mes-siguiente" aria-label="Mes siguiente">${Iconos.chevronDerecha()}</button>
           </div>
-          <div class="calendario-grilla" role="grid">
-            ${DIAS_SEMANA.map((d) => `<div class="calendario-encabezado-dia">${d}</div>`).join('')}
-            ${Array.from({ length: primerDiaSemana }, () => '<div class="calendario-celda calendario-celda-vacia"></div>').join('')}
-            ${Array.from({ length: ultimoDiaNum }, (_, i) => {
-              const numeroDia = i + 1;
-              const fechaDia = `${mesCalendario}-${String(numeroDia).padStart(2, '0')}`;
-              const estadoDia = estadosCalendario.get(fechaDia) || 'SIN_OBLIGACION';
-              const cambioCuota = cambiosDeCuotaEnMes.get(fechaDia);
-              return `<button type="button" class="calendario-celda calendario-dia estado-fondo-${estadoDia.toLowerCase().replace(/_/g, '-')} ${diaSeleccionado === fechaDia ? 'calendario-dia-seleccionado' : ''}"
-                data-fecha="${fechaDia}" aria-label="${fechaDia}: ${escapeHtml(estadoDia)}">
-                <span class="calendario-dia-numero">${numeroDia}</span>
-                ${cambioCuota !== undefined ? `<span class="marcador-cambio-cuota" title="Nueva cuota desde este día: ${escapeHtml(formatearCentavos(cambioCuota))}">${Iconos.punto()}</span>` : ''}
-              </button>`;
-            }).join('')}
+
+          <div class="mes-grilla-wrap">
+            <div class="mes-grilla mes-grilla-encabezado">
+              ${DIAS_SEMANA_LUNES.map((d) => `<div class="mes-encabezado-dia">${d}</div>`).join('')}
+            </div>
+            <div class="mes-grilla">
+              ${Array.from({ length: primerDiaSemana }, () => '<div class="mes-celda mes-celda-vacia"></div>').join('')}
+              ${Array.from({ length: ultimoDiaNum }, (_, i) => {
+                const numeroDia = i + 1;
+                const fechaDia = `${mesVisible}-${String(numeroDia).padStart(2, '0')}`;
+                const diaInfo = dias.get(fechaDia);
+                return `<button type="button" class="mes-celda ${claseColorCelda(diaInfo)}" data-fecha="${fechaDia}">
+                  <span class="mes-celda-numero">${numeroDia}</span>
+                  <span class="mes-celda-datos">${lineasCelda(diaInfo)}</span>
+                  ${mostrarSaldoDiario ? `<span class="mes-celda-saldo">= ${montoCortoOGuion(diaInfo.saldoAcumuladoCentavos)}</span>` : ''}
+                </button>`;
+              }).join('')}
+              ${Array.from({ length: celdasFinales - totalCeldas }, () => '<div class="mes-celda mes-celda-vacia"></div>').join('')}
+            </div>
           </div>
-          <div class="calendario-leyenda">
-            ${leyendaEstados()}
-            <p class="calendario-aviso-alcance">${escapeHtml(AVISO_ALCANCE_CALENDARIO)}</p>
-          </div>
-          ${diaSeleccionado ? `
-            <div class="panel-dia-seleccionado">
-              <div class="panel-dia-seleccionado-header">
-                <strong>${escapeHtml(formatearFechaCorta(diaSeleccionado))}</strong>
-                <button type="button" class="btn-link" id="btn-cerrar-dia">Cerrar</button>
+
+          <label class="switch-fila">
+            <span>Saldo diario en el calendario</span>
+            <span class="switch">
+              <input type="checkbox" id="switch-saldo-diario" ${mostrarSaldoDiario ? 'checked' : ''} />
+              <span class="switch-riel"></span>
+            </span>
+          </label>
+        </div>
+
+        ${fechaSeleccionada ? `
+          <div class="popover-overlay" id="popover-dia-overlay">
+            <div class="popover-dia" role="dialog" aria-modal="true">
+              <div class="popover-dia-header">
+                <strong>${escapeHtml(formatearFechaCorta(fechaSeleccionada))}</strong>
+                <button type="button" class="btn-icono" id="btn-cerrar-popover" aria-label="Cerrar">${Iconos.cruz()}</button>
               </div>
-              ${movimientosDelDia.length === 0
+              ${!infoDiaSeleccionado || infoDiaSeleccionado.movimientos.length === 0
                 ? estadoVacio('Sin movimientos ese día.')
-                : `<ul class="lista lista-compacta">${movimientosDelDia.map((m) => `
+                : `<ul class="lista lista-compacta">${infoDiaSeleccionado.movimientos.map((m) => `
                     <li class="lista-item">
-                      <span>${escapeHtml(m.tipo)}${m.servicio ? ' · ' + escapeHtml(SERVICIO_LABEL[m.servicio] || m.servicio) : ''}</span>
-                      <span class="${textoMontoMovimiento(m).clase}">${textoMontoMovimiento(m).texto}</span>
+                      <span>${m.tipo === 'CARGO' ? escapeHtml(m.concepto || 'Cargo') : 'Abono'}${m.referencia ? ` · ${escapeHtml(m.referencia)}` : ''}</span>
+                      <span class="${m.tipo === 'CARGO' ? 'monto-negativo' : 'monto-positivo'}">${m.tipo === 'CARGO' ? '+' : '−'} ${montoOGuion(m.montoCentavos)}</span>
                     </li>`).join('')}</ul>`
               }
-            </div>` : ''}
-        </div>
-
-        <h2 class="titulo-seccion">Historial de movimientos</h2>
-        <div class="campo campo-filtro-historial">
-          <label for="filtro-tipo-historial">Filtrar por tipo</label>
-          <select id="filtro-tipo-historial">
-            <option value="" ${filtroTipo === '' ? 'selected' : ''}>Todos</option>
-            <option value="CARGO" ${filtroTipo === 'CARGO' ? 'selected' : ''}>Cargos</option>
-            <option value="ABONO" ${filtroTipo === 'ABONO' ? 'selected' : ''}>Abonos</option>
-            <option value="AJUSTE" ${filtroTipo === 'AJUSTE' ? 'selected' : ''}>Ajustes</option>
-          </select>
-        </div>
-        ${sinMovimientos
-          ? estadoVacio('Este cliente todavía no tiene movimientos registrados.')
-          : (movimientosPagina.length === 0
-              ? estadoVacio('No hay movimientos de ese tipo.')
-              : `<ul class="lista lista-historial">
-                  ${movimientosPagina.map((m) => {
-                    const montoInfo = textoMontoMovimiento(m);
-                    const esCorregible = m.tipo === 'CARGO' || m.tipo === 'ABONO';
-                    return `
-                    <li class="lista-item lista-item-historial" data-movimiento-id="${escapeHtml(m.id)}">
-                      <div class="lista-item-principal">
-                        <span>${escapeHtml(formatearFechaCorta(m.fecha))} — ${escapeHtml(m.tipo)}${m.servicio ? ' · ' + escapeHtml(SERVICIO_LABEL[m.servicio] || m.servicio) : ''}</span>
-                        <span class="${montoInfo.clase}">${montoInfo.texto}</span>
-                      </div>
-                      <div class="lista-item-secundaria">
-                        ${m.nota ? `<span>${escapeHtml(m.nota)}</span>` : ''}
-                        ${m.referencia ? `<span>Ref: ${escapeHtml(m.referencia)}</span>` : ''}
-                        ${m.tipo === 'AJUSTE' ? `<span class="etiqueta-ajusta">Ajusta movimiento del ${escapeHtml(formatearFechaCorta(fechaPorId.get(m.movimiento_original_id) || m.fecha))}</span>` : ''}
-                      </div>
-                      ${esCorregible ? `<button type="button" class="btn btn-secundario btn-pequeno" data-accion="abrir-ajuste" data-id="${escapeHtml(m.id)}" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>
-                        ${ajusteMovimientoId === m.id ? 'Cancelar corrección' : 'Corregir con ajuste'}
-                      </button>` : ''}
-                      ${ajusteMovimientoId === m.id ? renderFormularioAjuste(m, saldoActual) : ''}
-                    </li>`;
-                  }).join('')}
-                </ul>`)
-        }
-        <div id="paginador-historial">${paginadorHtml({ pagina: paginaHistorial, tamanioPagina: TAMANIO_PAGINA_HISTORIAL, total: totalHistorial })}</div>
-
-        <details class="panel-colapsable">
-          <summary>Historial de acuerdos (cuotas históricas)</summary>
-          ${acuerdos.length === 0 ? estadoVacio('Sin acuerdos registrados.') : `
-            <table class="tabla">
-              <thead><tr><th>Vigente desde</th><th>Vigente hasta</th><th>Cuota</th><th>Frecuencia</th></tr></thead>
-              <tbody>
-                ${acuerdos.map((a) => `<tr>
-                  <td>${escapeHtml(formatearFechaCorta(a.vigente_desde))}</td>
-                  <td>${a.vigente_hasta ? escapeHtml(formatearFechaCorta(a.vigente_hasta)) : 'Actual'}</td>
-                  <td>${montoOGuion(a.monto_cuota_centavos)}</td>
-                  <td>${escapeHtml(textoFrecuencia(a))}</td>
-                </tr>`).join('')}
-              </tbody>
-            </table>`}
-        </details>
+              <p class="popover-dia-saldo">Saldo a esa fecha: <strong>${montoOGuion(infoDiaSeleccionado ? infoDiaSeleccionado.saldoAcumuladoCentavos : null)}</strong></p>
+            </div>
+          </div>` : ''}
       </section>
     `;
 
-    wireEvents();
+    wireEvents(cliente);
   }
 
-  function renderFormularioRenegociar() {
-    return `
-      <div class="panel-formulario">
-        <h3>Renegociar cuota</h3>
-        <form id="form-renegociar" class="formulario" novalidate>
-          <div class="campo">
-            <label for="campo-nueva-cuota">Nueva cuota</label>
-            <input id="campo-nueva-cuota" name="cuota" type="text" inputmode="decimal" value="${escapeHtml(valoresRenegociar.cuota || '')}" required />
-            ${errorCampo(erroresRenegociar.monto_cuota_centavos)}
-          </div>
-          ${campoFrecuenciaHtml('renegociar', valoresRenegociar, erroresRenegociar)}
-          <div class="campo">
-            <label for="campo-vigencia-nueva">Vigente desde</label>
-            <input id="campo-vigencia-nueva" name="vigente_desde" type="date" max="${hoy()}" value="${escapeHtml(valoresRenegociar.vigente_desde || hoy())}" required />
-            ${errorCampo(erroresRenegociar.vigente_desde)}
-          </div>
-          ${errorGeneral(erroresRenegociar.general || '')}
-          <div class="acciones-formulario">
-            <button type="submit" class="btn btn-primario">Confirmar</button>
-          </div>
-        </form>
-      </div>
-    `;
-  }
+  function wireEvents(cliente) {
+    contenedor.querySelector('#btn-tarjeta-abono').addEventListener('click', () => {
+      abrirPanelRapido({ tipo: 'ABONO', clienteId: id, clienteNombre: cliente.nombre, onGuardado: renderTodo });
+    });
+    contenedor.querySelector('#btn-tarjeta-cargo').addEventListener('click', () => {
+      abrirPanelRapido({ tipo: 'CARGO', clienteId: id, clienteNombre: cliente.nombre, onGuardado: renderTodo });
+    });
 
-  function renderFormularioAjuste(movimientoOriginal, saldoActual) {
-    return `
-      <div class="panel-formulario panel-ajuste">
-        <form class="formulario formulario-ajuste" data-form-ajuste="${escapeHtml(movimientoOriginal.id)}" novalidate>
-          <fieldset class="campo">
-            <legend>¿La corrección aumenta o reduce la deuda del cliente?</legend>
-            <label class="opcion-radio"><input type="radio" name="signo" value="aumenta" /> Aumenta la deuda</label>
-            <label class="opcion-radio"><input type="radio" name="signo" value="reduce" checked /> Reduce la deuda</label>
-          </fieldset>
-          <div class="campo">
-            <label>Monto de la corrección</label>
-            <input name="monto" type="text" inputmode="decimal" placeholder="Ej. 50.00" />
-            ${errorCampo(erroresAjuste.monto)}
-          </div>
-          <div class="campo">
-            <label>Nota (opcional)</label>
-            <input name="nota" type="text" maxlength="280" />
-          </div>
-          <p class="previsualizacion-ajuste">Ingresá un monto para ver la previsualización.</p>
-          ${errorGeneral(erroresAjuste.general || '')}
-          <div class="acciones-formulario">
-            <button type="submit" class="btn btn-primario">Confirmar ajuste</button>
-          </div>
-        </form>
-      </div>
-    `;
-  }
-
-  function actualizarPreviewAjuste(form, saldoActual) {
-    const previewEl = form.querySelector('.previsualizacion-ajuste');
-    const montoTexto = form.querySelector('[name="monto"]').value.trim();
-    const signo = form.querySelector('[name="signo"]:checked').value;
-    if (!montoTexto) {
-      previewEl.textContent = 'Ingresá un monto para ver la previsualización.';
-      previewEl.classList.remove('previsualizacion-invalida');
-      return;
-    }
-    try {
-      const centavos = parsearAPesos(montoTexto);
-      const delta = signo === 'aumenta' ? centavos : -centavos;
-      const nuevoSaldo = saldoActual + delta;
-      previewEl.textContent = `El saldo pasará de ${formatearCentavos(saldoActual)} a ${formatearCentavos(nuevoSaldo)}.`;
-      previewEl.classList.remove('previsualizacion-invalida');
-    } catch (e) {
-      previewEl.textContent = 'Ese monto no es válido.';
-      previewEl.classList.add('previsualizacion-invalida');
-    }
-  }
-
-  function wireEvents() {
     contenedor.querySelector('#btn-mes-anterior').addEventListener('click', () => {
-      mesCalendario = mesAnterior(mesCalendario);
-      diaSeleccionado = null;
+      mesVisible = mesAnterior(mesVisible);
+      fechaSeleccionada = null;
       renderTodo();
     });
     contenedor.querySelector('#btn-mes-siguiente').addEventListener('click', () => {
-      mesCalendario = mesSiguiente(mesCalendario);
-      diaSeleccionado = null;
-      renderTodo();
-    });
-    contenedor.querySelectorAll('.calendario-dia').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        diaSeleccionado = diaSeleccionado === btn.dataset.fecha ? null : btn.dataset.fecha;
-        renderTodo();
-      });
-    });
-    const btnCerrarDia = contenedor.querySelector('#btn-cerrar-dia');
-    if (btnCerrarDia) btnCerrarDia.addEventListener('click', () => { diaSeleccionado = null; renderTodo(); });
-
-    contenedor.querySelector('#btn-toggle-renegociar').addEventListener('click', () => {
-      renegociarAbierto = !renegociarAbierto;
-      erroresRenegociar = {};
-      // Precarga la frecuencia del acuerdo vigente (§2.8): al abrir el
-      // formulario, no al cerrarlo (para no perder lo tipeado si el usuario
-      // solo está corrigiendo un error de validación).
-      valoresRenegociar = renegociarAbierto && acuerdoVigenteHoy
-        ? { frecuencia: acuerdoVigenteHoy.frecuencia, dia_semana: acuerdoVigenteHoy.dia_semana, dia_mes: acuerdoVigenteHoy.dia_mes }
-        : {};
+      mesVisible = mesSiguiente(mesVisible);
+      fechaSeleccionada = null;
       renderTodo();
     });
 
-    const formRenegociar = contenedor.querySelector('#form-renegociar');
-    if (formRenegociar) {
-      activarCampoFrecuencia(formRenegociar, 'renegociar');
-      formRenegociar.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const datos = new FormData(formRenegociar);
-        valoresRenegociar = {
-          cuota: datos.get('cuota') || '',
-          vigente_desde: datos.get('vigente_desde') || hoy(),
-          ...leerCampoFrecuencia(datos),
-        };
-        erroresRenegociar = {};
-        let montoCuotaCentavos = null;
-        try {
-          montoCuotaCentavos = parsearAPesos(valoresRenegociar.cuota.trim());
-          if (montoCuotaCentavos <= 0) erroresRenegociar.monto_cuota_centavos = 'La cuota debe ser mayor a $0.00.';
-        } catch (err) {
-          erroresRenegociar.monto_cuota_centavos = err.message;
-        }
-        if (Object.keys(erroresRenegociar).length > 0) { renderTodo(); return; }
-        try {
-          await crearAcuerdo({
-            cliente_id: id,
-            monto_cuota_centavos: montoCuotaCentavos,
-            vigente_desde: valoresRenegociar.vigente_desde,
-            frecuencia: valoresRenegociar.frecuencia,
-            dia_semana: valoresRenegociar.dia_semana,
-            dia_mes: valoresRenegociar.dia_mes,
-          });
-          renegociarAbierto = false;
-          erroresRenegociar = {};
-          valoresRenegociar = {};
-          mostrarToast('Cuota renegociada correctamente.', 'exito');
-          await renderTodo();
-        } catch (err) {
-          if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) {
-            erroresRenegociar[err.detalle.campo] = err.message;
-          } else {
-            erroresRenegociar.general = err.message || 'No se pudo renegociar la cuota.';
-          }
-          renderTodo();
-        }
-      });
-    }
-
-    contenedor.querySelectorAll('[data-accion="abrir-ajuste"]').forEach((btn) => {
+    contenedor.querySelectorAll('.mes-celda[data-fecha]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        ajusteMovimientoId = ajusteMovimientoId === btn.dataset.id ? null : btn.dataset.id;
-        erroresAjuste = {};
+        fechaSeleccionada = fechaSeleccionada === btn.dataset.fecha ? null : btn.dataset.fecha;
         renderTodo();
       });
     });
 
-    const formAjuste = contenedor.querySelector('[data-form-ajuste]');
-    if (formAjuste) {
-      calcularSaldo(id).then((saldoActual) => {
-        actualizarPreviewAjuste(formAjuste, saldoActual);
-        formAjuste.querySelector('[name="monto"]').addEventListener('input', () => actualizarPreviewAjuste(formAjuste, saldoActual));
-        formAjuste.querySelectorAll('[name="signo"]').forEach((r) => r.addEventListener('change', () => actualizarPreviewAjuste(formAjuste, saldoActual)));
-      });
-      formAjuste.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const datos = new FormData(formAjuste);
-        const montoTexto = (datos.get('monto') || '').trim();
-        const signo = datos.get('signo');
-        const nota = (datos.get('nota') || '').trim();
-        erroresAjuste = {};
-        let montoCentavos = null;
-        try {
-          montoCentavos = parsearAPesos(montoTexto);
-          if (montoCentavos <= 0) erroresAjuste.monto = 'El monto debe ser mayor a $0.00.';
-        } catch (err) {
-          erroresAjuste.monto = err.message;
-        }
-        if (Object.keys(erroresAjuste).length > 0) { renderTodo(); return; }
-        const deltaCentavos = signo === 'aumenta' ? montoCentavos : -montoCentavos;
-        try {
-          await registrarAjuste({ movimiento_original_id: formAjuste.dataset.formAjuste, delta_centavos: deltaCentavos, nota: nota || undefined });
-          ajusteMovimientoId = null;
-          erroresAjuste = {};
-          mostrarToast('Ajuste registrado correctamente.', 'exito');
-          await renderTodo();
-        } catch (err) {
-          erroresAjuste.general = err.message || 'No se pudo registrar el ajuste.';
-          renderTodo();
-        }
-      });
+    const overlay = contenedor.querySelector('#popover-dia-overlay');
+    if (overlay) {
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) { fechaSeleccionada = null; renderTodo(); } });
+      contenedor.querySelector('#btn-cerrar-popover').addEventListener('click', () => { fechaSeleccionada = null; renderTodo(); });
     }
 
-    const selectFiltro = contenedor.querySelector('#filtro-tipo-historial');
-    selectFiltro.addEventListener('change', () => {
-      filtroTipo = selectFiltro.value;
-      paginaHistorial = 1;
-      ajusteMovimientoId = null;
-      renderTodo();
-    });
-
-    activarPaginador(contenedor.querySelector('#paginador-historial'), (nuevaPagina) => {
-      paginaHistorial = nuevaPagina;
-      ajusteMovimientoId = null;
+    contenedor.querySelector('#switch-saldo-diario').addEventListener('change', (e) => {
+      mostrarSaldoDiario = e.target.checked;
+      guardarPreferenciaSaldoDiario(mostrarSaldoDiario);
       renderTodo();
     });
   }
@@ -472,9 +263,11 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
 }
 
 /**
- * Vista imprimible del estado de cuenta (window.print()). El CSS de impresión
- * (@media print) oculta la barra de navegación, el FAB y los botones no
- * imprimibles, dejando solo esta sección limpia.
+ * Vista imprimible del estado de cuenta (window.print()). Sin botón visible
+ * en la pantalla Persona (§2.9 la retira de la UI principal) pero conservada
+ * — es gratis mantenerla — y accesible por URL directa
+ * (#/clientes/:id/imprimir). El CSS de impresión (@media print) oculta la
+ * barra de navegación y los botones no imprimibles.
  * @param {HTMLElement} contenedor
  * @param {{id: string}} opciones
  */
@@ -494,7 +287,7 @@ export async function renderEstadoCuentaImprimible(contenedor, { id }) {
   contenedor.innerHTML = `
     <section class="pantalla hoja-imprimible">
       <div class="no-imprimir acciones-impresion">
-        <a href="#/clientes/${encodeURIComponent(id)}" class="btn btn-secundario">Volver al detalle</a>
+        <a href="#/clientes/${encodeURIComponent(id)}" class="btn btn-secundario">Volver</a>
         <button type="button" class="btn btn-primario" id="btn-imprimir">Imprimir</button>
       </div>
       <h1>Estado de cuenta</h1>
@@ -506,13 +299,13 @@ export async function renderEstadoCuentaImprimible(contenedor, { id }) {
           <thead><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th><th>Monto</th></tr></thead>
           <tbody>
             ${movimientosAsc.map((m) => {
-              const info = textoMontoMovimiento(m);
-              const detalle = m.tipo === 'CARGO' ? (SERVICIO_LABEL[m.servicio] || m.servicio || '') : (m.nota || '');
+              const detalle = m.tipo === 'CARGO' ? (m.servicio || '') : (m.nota || '');
+              const signo = m.tipo === 'CARGO' ? '+' : m.tipo === 'ABONO' ? '−' : (m.monto_centavos >= 0 ? '+' : '−');
               return `<tr>
                 <td>${escapeHtml(formatearFechaCorta(m.fecha))}</td>
                 <td>${escapeHtml(m.tipo)}</td>
                 <td>${escapeHtml(detalle)}</td>
-                <td>${info.texto}</td>
+                <td>${signo} ${montoOGuion(Math.abs(m.monto_centavos))}</td>
               </tr>`;
             }).join('')}
           </tbody>

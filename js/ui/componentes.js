@@ -1,14 +1,20 @@
-// Componentes de UI reutilizables (contrato 2.4/2.7 del PLAN-MVP.md):
-// microcopy didáctica colapsable, toast, paginador, estado vacío, badge de
-// estado con color semántico + texto/ícono (accesibilidad: nunca solo color).
+// Componentes de UI reutilizables — contrato vigente §2.9 (PLAN-MVP.md):
+// rediseño "sencillo" sin cuotas/frecuencias/WhatsApp. Estilo Excel: mínimos
+// clics, datos a la vista.
 //
-// Convención de este módulo: los componentes "de layout" (microcopy, estado
-// vacío, badge) devuelven HTML en string para insertarse con innerHTML; los
-// que necesitan comportamiento (toast, paginador) exponen una función
-// "activar*" que se llama después de insertar el HTML en el DOM.
+// Convención: los componentes "de layout" (microcopy, estado vacío, chip)
+// devuelven HTML en string para insertarse con innerHTML; los que necesitan
+// comportamiento (toast, paginador, sheet, panel rápido, arrastre) exponen
+// una función que se llama después de insertar el HTML en el DOM, o que
+// arma+monta todo de punta a punta (abrirSheet, abrirPanelRapido, etc.).
 
 import { formatearCentavos } from '../utils/money.js';
-import { listarClientes } from '../db.js';
+import { parsearAPesos } from '../utils/money.js';
+import { hoy, esFechaIsoValida, esFutura } from '../utils/date.js';
+import {
+  crearCategoria, actualizarCategoria, borrarCategoriaLogica,
+  listarConceptos, crearConcepto, registrarCargo, registrarAbono,
+} from '../db.js';
 
 // ============================================================
 // Escape de HTML (toda interpolación de datos del usuario pasa por acá)
@@ -25,16 +31,10 @@ export function escapeHtml(valor) {
 }
 
 // ============================================================
-// Iconos SVG inline (pase visual, gate del dueño 25-ago-2026)
-//
-// Set propio, sin dependencias externas: trazo simple de 2px, esquinas y
-// remates redondeados, currentColor (heredan el color de su contenedor en
-// ambos temas). Relleno (fill) solo en los pocos puntos que representan un
-// "estado" (el punto del día en el ícono de Hoy, la media luna de PARCIAL,
-// los puntos de exclamación/alerta) — nunca como estilo decorativo general.
-// Reemplazan los emoji/caracteres usados antes en la barra de navegación,
-// los badges de estado del calendario, el botón flotante, las acciones del
-// Detalle y el selector de persona.
+// Iconos SVG inline — set propio, sin dependencias externas: trazo simple de
+// 2px, esquinas y remates redondeados, currentColor (heredan el color de su
+// contenedor en ambos temas). Set reducido tras el rediseño §2.9 (se retiran
+// los íconos de cuotas/frecuencia/WhatsApp/estado de calendario).
 // ============================================================
 
 function svgIcono(interior, { viewBox = '0 0 24 24', tamano = '1em' } = {}) {
@@ -42,16 +42,6 @@ function svgIcono(interior, { viewBox = '0 0 24 24', tamano = '1em' } = {}) {
 }
 
 export const Iconos = {
-  hoy: (o) => svgIcono(
-    '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>' +
-    '<rect x="7" y="13" width="4" height="4" rx="1" fill="currentColor" stroke="none"/>', o),
-  calendario: (o) => svgIcono(
-    '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>' +
-    '<circle cx="8" cy="14.5" r="1" fill="currentColor" stroke="none"/>' +
-    '<circle cx="12" cy="14.5" r="1" fill="currentColor" stroke="none"/>' +
-    '<circle cx="16" cy="14.5" r="1" fill="currentColor" stroke="none"/>' +
-    '<circle cx="8" cy="18" r="1" fill="currentColor" stroke="none"/>' +
-    '<circle cx="12" cy="18" r="1" fill="currentColor" stroke="none"/>', o),
   personas: (o) => svgIcono(
     '<circle cx="9" cy="8" r="3"/><path d="M4 20c0-3 2.2-5.5 5-5.5s5 2.5 5 5.5"/>' +
     '<circle cx="17" cy="9" r="2.3"/><path d="M15.3 14.7c2.2.5 3.9 2.6 3.9 5.3"/>', o),
@@ -63,18 +53,12 @@ export const Iconos = {
   chevronDerecha: (o) => svgIcono('<polyline points="9,5 16,12 9,19"/>', o),
   check: (o) => svgIcono('<polyline points="5,13 10,18 19,7"/>', o),
   cruz: (o) => svgIcono('<line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>', o),
-  flechaArriba: (o) => svgIcono('<line x1="12" y1="19" x2="12" y2="6"/><polyline points="6,12 12,6 18,12"/>', o),
-  medio: (o) => svgIcono('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/>', o),
-  alerta: (o) => svgIcono('<circle cx="12" cy="12" r="9"/><line x1="12" y1="7.5" x2="12" y2="13"/><circle cx="12" cy="16.4" r="1" fill="currentColor" stroke="none"/>', o),
-  guion: (o) => svgIcono('<line x1="6" y1="12" x2="18" y2="12"/>', o),
-  punto: (o) => svgIcono('<circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/>', o),
-  mensaje: (o) => svgIcono('<path d="M4 5h16v11H8l-4 4z"/>', o),
-  documento: (o) => svgIcono(
-    '<path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4"/>' +
-    '<line x1="9.5" y1="11" x2="14.5" y2="11"/><line x1="9.5" y1="14" x2="14.5" y2="14"/><line x1="9.5" y1="17" x2="12.5" y2="17"/>', o),
-  renegociar: (o) => svgIcono(
-    '<path d="M4 12a8 8 0 0 1 14-5.3"/><path d="M20 4v4h-4"/>' +
-    '<path d="M20 12a8 8 0 0 1-14 5.3"/><path d="M6 20v-4h4"/>', o),
+  arrastre: (o) => svgIcono(
+    '<circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/>' +
+    '<circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/>' +
+    '<circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/>', o),
+  lapiz: (o) => svgIcono('<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z"/><path d="M14 7l3 3"/>', o),
+  papelera: (o) => svgIcono('<path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v6M14 11v6"/>', o),
 };
 
 // ============================================================
@@ -110,45 +94,6 @@ const formateadorCorto = new Intl.NumberFormat('es-MX', {
 export function montoCortoOGuion(centavos) {
   if (centavos === null || centavos === undefined) return '—';
   return formateadorCorto.format(Math.round(centavos) / 100);
-}
-
-// ============================================================
-// Frecuencia de cobro (§2.8): un único helper de formateo, usado en los 4
-// lugares donde se muestra la cuota (Detalle, historial de acuerdos,
-// selector de persona del Calendario, lista de Clientes) — no duplicar.
-// ============================================================
-
-export const DIAS_SEMANA_OPCIONES = [
-  { valor: 0, etiqueta: 'Domingo' },
-  { valor: 1, etiqueta: 'Lunes' },
-  { valor: 2, etiqueta: 'Martes' },
-  { valor: 3, etiqueta: 'Miércoles' },
-  { valor: 4, etiqueta: 'Jueves' },
-  { valor: 5, etiqueta: 'Viernes' },
-  { valor: 6, etiqueta: 'Sábado' },
-];
-
-const DIAS_SEMANA_LARGO = DIAS_SEMANA_OPCIONES.map((d) => d.etiqueta.toLowerCase());
-
-/**
- * Descriptor corto de la frecuencia de un acuerdo, para componer junto al
- * monto ("$200.00 " + textoFrecuencia(a) = "$200.00 cada viernes") o solo
- * ("diaria", "cada día 15"). Null honesto: "—" si no hay acuerdo.
- * @param {{frecuencia?:string, dia_semana?:?number, dia_mes?:?number}|null} acuerdo
- * @returns {string}
- */
-export function textoFrecuencia(acuerdo) {
-  if (!acuerdo) return '—';
-  const frecuencia = acuerdo.frecuencia || 'DIARIA';
-  if (frecuencia === 'DIARIA') return 'diaria';
-  if (frecuencia === 'SEMANAL') {
-    const nombreDia = DIAS_SEMANA_LARGO[acuerdo.dia_semana];
-    return nombreDia ? `cada ${nombreDia}` : 'semanal';
-  }
-  if (frecuencia === 'MENSUAL') {
-    return Number.isInteger(acuerdo.dia_mes) ? `cada día ${acuerdo.dia_mes}` : 'mensual';
-  }
-  return frecuencia.toLowerCase();
 }
 
 // ============================================================
@@ -209,31 +154,6 @@ export function estadoVacio(mensaje, subtexto = '') {
 }
 
 // ============================================================
-// Badge de estado (calendario): color + texto + ícono, nunca solo color
-// ============================================================
-
-export const INFO_ESTADO = {
-  PAGADO: { texto: 'Pagado', icono: Iconos.check(), clase: 'estado-pagado' },
-  GRACIA_ADELANTO: { texto: 'Gracia/Adelanto', icono: Iconos.flechaArriba(), clase: 'estado-gracia-adelanto' },
-  PARCIAL: { texto: 'Parcial', icono: Iconos.medio(), clase: 'estado-parcial' },
-  DEUDA: { texto: 'Deuda', icono: Iconos.alerta(), clase: 'estado-deuda' },
-  SIN_OBLIGACION: { texto: 'Sin obligación', icono: Iconos.guion(), clase: 'estado-sin-obligacion' },
-};
-
-export function badgeEstado(estado) {
-  const info = INFO_ESTADO[estado] || { texto: estado || '—', icono: Iconos.guion(), clase: '' };
-  return `<span class="badge-estado ${info.clase}"><span class="badge-estado-icono" aria-hidden="true">${info.icono}</span> ${escapeHtml(info.texto)}</span>`;
-}
-
-/** Leyenda completa de los 5 estados, para el calendario del detalle de cliente. */
-export function leyendaEstados() {
-  const items = Object.keys(INFO_ESTADO)
-    .map((clave) => `<li>${badgeEstado(clave)}</li>`)
-    .join('');
-  return `<ul class="leyenda-estados">${items}</ul>`;
-}
-
-// ============================================================
 // Toast (confirmación visual / error), con aria-live para accesibilidad
 // ============================================================
 
@@ -290,11 +210,11 @@ export function activarPaginador(contenedor, onCambiarPagina) {
 }
 
 // ============================================================
-// Mensaje de error inline genérico (para fallos de guardado no asociados a un campo)
+// Mensajes de error inline
 // ============================================================
 
 export function errorGeneral(mensaje) {
-  return `<p class="error-general" role="alert">${escapeHtml(mensaje)}</p>`;
+  return mensaje ? `<p class="error-general" role="alert">${escapeHtml(mensaje)}</p>` : '';
 }
 
 export function errorCampo(mensaje) {
@@ -302,90 +222,7 @@ export function errorCampo(mensaje) {
 }
 
 // ============================================================
-// Bloque de campos "Frecuencia de cobro" (§2.8): compartido por el alta de
-// cliente (pantalla-clientes.js) y la renegociación de cuota
-// (pantalla-cliente-detalle.js) — un solo lugar para el marcado y el toggle
-// Semanal/Mensual, evita duplicar las dos pantallas.
-// ============================================================
-
-/**
- * @param {string} idBase - prefijo único de ids (dos formularios en la misma
- *   pantalla no deberían coexistir, pero por las dudas)
- * @param {{frecuencia?:string, dia_semana?:number, dia_mes?:number}} [valores]
- * @param {{frecuencia?:string, dia_semana?:string, dia_mes?:string}} [errores] - ya vienen por campo desde db.js
- * @returns {string}
- */
-export function campoFrecuenciaHtml(idBase, valores = {}, errores = {}) {
-  const frecuencia = valores.frecuencia || 'DIARIA';
-  return `
-    <div class="campo">
-      <label for="${idBase}-frecuencia">Frecuencia de cobro</label>
-      <select id="${idBase}-frecuencia" name="frecuencia">
-        <option value="DIARIA" ${frecuencia === 'DIARIA' ? 'selected' : ''}>Diaria</option>
-        <option value="SEMANAL" ${frecuencia === 'SEMANAL' ? 'selected' : ''}>Semanal</option>
-        <option value="MENSUAL" ${frecuencia === 'MENSUAL' ? 'selected' : ''}>Mensual</option>
-      </select>
-      ${errorCampo(errores.frecuencia)}
-    </div>
-    <div class="campo" id="${idBase}-wrap-dia-semana" ${frecuencia !== 'SEMANAL' ? 'hidden' : ''}>
-      <label for="${idBase}-dia-semana">Día de la semana</label>
-      <select id="${idBase}-dia-semana" name="dia_semana">
-        <option value="" ${valores.dia_semana === undefined || valores.dia_semana === null ? 'selected' : ''}>Elegí un día…</option>
-        ${DIAS_SEMANA_OPCIONES.map((d) => `<option value="${d.valor}" ${valores.dia_semana === d.valor ? 'selected' : ''}>${d.etiqueta}</option>`).join('')}
-      </select>
-      ${errorCampo(errores.dia_semana)}
-    </div>
-    <div class="campo" id="${idBase}-wrap-dia-mes" ${frecuencia !== 'MENSUAL' ? 'hidden' : ''}>
-      <label for="${idBase}-dia-mes">Día del mes</label>
-      <input id="${idBase}-dia-mes" name="dia_mes" type="number" inputmode="numeric" min="1" max="31"
-        value="${valores.dia_mes !== undefined && valores.dia_mes !== null ? valores.dia_mes : ''}" />
-      <p class="texto-secundario">Si el mes no tiene ese día, se cobra el último día del mes.</p>
-      ${errorCampo(errores.dia_mes)}
-    </div>
-  `;
-}
-
-/**
- * Activa el toggle de visibilidad Semanal/Mensual del bloque anterior.
- * Llamar una vez, después de insertar campoFrecuenciaHtml() en el DOM.
- * @param {HTMLElement} contenedor - elemento que contiene el bloque (o el formulario entero)
- * @param {string} idBase - el mismo prefijo pasado a campoFrecuenciaHtml()
- */
-export function activarCampoFrecuencia(contenedor, idBase) {
-  const selectFrecuencia = contenedor.querySelector(`#${idBase}-frecuencia`);
-  const wrapSemana = contenedor.querySelector(`#${idBase}-wrap-dia-semana`);
-  const wrapMes = contenedor.querySelector(`#${idBase}-wrap-dia-mes`);
-  if (!selectFrecuencia || !wrapSemana || !wrapMes) return;
-  selectFrecuencia.addEventListener('change', () => {
-    const valor = selectFrecuencia.value;
-    wrapSemana.hidden = valor !== 'SEMANAL';
-    wrapMes.hidden = valor !== 'MENSUAL';
-  });
-}
-
-/**
- * Lee {frecuencia, dia_semana?, dia_mes?} de un FormData que incluye el
- * bloque de campoFrecuenciaHtml(), omitiendo el campo que no corresponde a
- * la frecuencia elegida (aunque su <input>/<select> siga en el DOM oculto
- * con un valor viejo — "hidden" no lo saca de FormData).
- * @param {FormData} datos
- * @returns {{frecuencia:string, dia_semana?:number, dia_mes?:number}}
- */
-export function leerCampoFrecuencia(datos) {
-  const frecuencia = datos.get('frecuencia') || 'DIARIA';
-  const resultado = { frecuencia };
-  if (frecuencia === 'SEMANAL') {
-    const valor = datos.get('dia_semana');
-    resultado.dia_semana = valor === null || valor === '' ? undefined : Number(valor);
-  } else if (frecuencia === 'MENSUAL') {
-    const valor = datos.get('dia_mes');
-    resultado.dia_mes = valor === null || valor === '' ? undefined : Number(valor);
-  }
-  return resultado;
-}
-
-// ============================================================
-// Debounce genérico (buscador de Clientes, selector de cliente del form)
+// Debounce genérico (buscador de Clientes)
 // ============================================================
 
 export function debounce(fn, esperaMs = 300) {
@@ -397,154 +234,456 @@ export function debounce(fn, esperaMs = 300) {
 }
 
 // ============================================================
-// Selector de cliente con buscador (escala a 100+ clientes)
-//
-// Componente compartido: extraído del patrón original de
-// pantalla-movimiento-form.js. Muestra un "chip" con la selección actual;
-// al tocarlo abre un buscador con debounce ~300ms sobre listarClientes()
-// (que ya pagina y filtra en SQL), con "Mostrar más" si hay más de una
-// página de resultados. Usado por pantalla-movimiento-form.js (sin
-// opcionEspecial: siempre hay que elegir un cliente real) y por
-// pantalla-calendario.js (con opcionEspecial "Todas las personas", fija
-// siempre como primera fila, sin filtrar por el texto de búsqueda).
+// Long-press genérico: distingue "tap" de "mantener presionado", suprimiendo
+// el click normal cuando hubo long-press (así un mismo elemento puede tener
+// dos gestos: tocar = una acción, mantener presionado = otra).
+// Usado por los chips de categoría (tap = filtrar, long-press = editar).
 // ============================================================
 
 /**
- * @param {HTMLElement} host - elemento donde se monta (su innerHTML se reemplaza por completo)
- * @param {object} cfg
- * @param {string} cfg.idBase - prefijo único para los ids internos (evita colisiones si hay más de uno en la pantalla)
- * @param {string} [cfg.etiquetaCampo] - texto del <label>, ej. "Cliente" o "Persona"
- * @param {{id:string, etiqueta:string, sublabel?:string, icono?:string}} [cfg.opcionEspecial] - opción fija, siempre primera en el buscador, nunca filtrada por el texto
- * @param {{id:string, etiqueta:string, sublabel?:string, icono?:string}|null} [cfg.seleccionInicial] - qué mostrar como chip al montar
- * @param {boolean} [cfg.iniciarAbierto] - arranca mostrando el buscador en vez del chip (default: true si no hay seleccionInicial)
- * @param {number} [cfg.tamanioPagina=20]
- * @param {(seleccion: {id:string, etiqueta:string, sublabel?:string, icono?:string}|null) => void} cfg.onCambio - se llama con la nueva selección; recibe `null` cuando el usuario reabre el buscador sin haber elegido todavía (para que la pantalla que lo usa sepa que la selección quedó pendiente)
+ * @param {HTMLElement} el
+ * @param {() => void} onLongPress
+ * @param {(e: Event) => void} [onTap]
+ * @param {number} [duracionMs=500]
  */
-export function montarSelectorCliente(host, cfg) {
-  const {
-    idBase,
-    etiquetaCampo = 'Cliente',
-    opcionEspecial = null,
-    seleccionInicial = null,
-    tamanioPagina = 20,
-    onCambio,
-  } = cfg;
+export function activarLongPress(el, onLongPress, onTap, duracionMs = 500) {
+  const UMBRAL_PX = 10;
+  let temporizador = null;
+  let origen = null;
+  let disparado = false;
 
-  let seleccionActual = seleccionInicial;
-  let abierto = cfg.iniciarAbierto !== undefined ? cfg.iniciarAbierto : !seleccionInicial;
-  let busqueda = '';
-  let pagina = 1;
-  let resultados = [];
-  let totalResultados = 0;
+  const cancelar = () => { clearTimeout(temporizador); temporizador = null; };
 
-  function render() {
-    if (abierto) renderBuscador();
-    else renderChip();
-  }
-
-  function renderChip() {
-    const seleccion = seleccionActual || opcionEspecial;
-    const icono = seleccion && seleccion.icono ? `${seleccion.icono} ` : '';
-    const texto = seleccion ? seleccion.etiqueta : 'Elegí una opción…';
-    const sub = seleccion && seleccion.sublabel ? ` — ${seleccion.sublabel}` : '';
-    host.innerHTML = `
-      <div class="campo">
-        ${etiquetaCampo ? `<label>${escapeHtml(etiquetaCampo)}</label>` : ''}
-        <button type="button" class="chip-cliente-seleccionado" id="${idBase}-chip">
-          <span>${icono}${escapeHtml(texto)}${escapeHtml(sub)}</span>
-          <span class="btn-link" aria-hidden="true">Cambiar</span>
-        </button>
-      </div>`;
-    host.querySelector(`#${idBase}-chip`).addEventListener('click', () => {
-      abierto = true;
-      busqueda = '';
-      pagina = 1;
-      resultados = [];
-      totalResultados = 0;
-      render();
-      if (onCambio) onCambio(null); // selección pendiente: se reabrió el buscador sin elegir aún
-    });
-  }
-
-  async function cargarResultados(reset) {
-    if (reset) { pagina = 1; resultados = []; } else { pagina += 1; }
-    const { clientes, total } = await listarClientes({ busqueda, pagina, tamanioPagina });
-    const filaCliente = (c) => ({
-      id: c.id,
-      etiqueta: c.nombre,
-      sublabel: [c.telefono || null, c.cuota_vigente_centavos != null ? montoOGuion(c.cuota_vigente_centavos) : null]
-        .filter(Boolean).join(' — '),
-    });
-    resultados = reset ? clientes.map(filaCliente) : resultados.concat(clientes.map(filaCliente));
-    totalResultados = total;
-    renderListaResultados();
-  }
-
-  function renderBuscador() {
-    host.innerHTML = `
-      <div class="campo">
-        ${etiquetaCampo ? `<label for="${idBase}-input">${escapeHtml(etiquetaCampo)}</label>` : ''}
-        <input id="${idBase}-input" type="search" placeholder="Buscá por nombre o teléfono…" autocomplete="off" value="${escapeHtml(busqueda)}" />
-        <div id="${idBase}-resultados" class="resultados-busqueda" aria-live="polite"></div>
-      </div>`;
-    const input = host.querySelector(`#${idBase}-input`);
-    const buscar = debounce((texto) => {
-      busqueda = texto.trim();
-      cargarResultados(true);
-    }, 300);
-    input.addEventListener('input', (e) => buscar(e.target.value));
-    cargarResultados(true);
-  }
-
-  function renderListaResultados() {
-    const contenedorResultados = host.querySelector(`#${idBase}-resultados`);
-    if (!contenedorResultados) return; // el usuario ya cambió de vista (chip) antes de que resolviera la consulta
-
-    const filas = opcionEspecial ? [opcionEspecial, ...resultados] : resultados;
-    // Null honesto: "resultados" (los clientes reales) puede quedar en cero
-    // aunque "filas" no lo esté, cuando hay opcionEspecial (esa opción fija
-    // siempre se muestra) — el mensaje de "sin resultados" se calcula sobre
-    // los clientes, no sobre la lista final que ve el usuario.
-    const sinResultadosDeClientes = resultados.length === 0;
-    const mensajeVacio = busqueda
-      ? estadoVacio(`No se encontraron clientes para "${busqueda}".`)
-      : estadoVacio('Todavía no hay clientes.');
-
-    if (filas.length === 0) {
-      contenedorResultados.innerHTML = mensajeVacio;
+  el.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    disparado = false;
+    origen = { x: e.clientX, y: e.clientY };
+    temporizador = setTimeout(() => { disparado = true; onLongPress(); }, duracionMs);
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!origen || disparado) return;
+    const dx = e.clientX - origen.x;
+    const dy = e.clientY - origen.y;
+    if (Math.sqrt(dx * dx + dy * dy) > UMBRAL_PX) cancelar();
+  });
+  el.addEventListener('pointerup', cancelar);
+  el.addEventListener('pointercancel', cancelar);
+  el.addEventListener('pointerleave', cancelar);
+  el.addEventListener('click', (e) => {
+    if (disparado) {
+      e.preventDefault();
+      e.stopPropagation();
+      disparado = false;
       return;
     }
+    if (onTap) onTap(e);
+  });
+}
 
-    const hayMas = resultados.length < totalResultados;
-    contenedorResultados.innerHTML = `
-      <ul class="lista lista-resultados-busqueda">
-        ${filas.map((f) => `
-          <li class="lista-item lista-item-clickeable selector-cliente-opcion" data-id="${escapeHtml(f.id)}" tabindex="0" role="button">
-            <div class="lista-item-principal">
-              <span class="lista-item-nombre">${f.icono ? f.icono + ' ' : ''}${escapeHtml(f.etiqueta)}</span>
-            </div>
-            ${f.sublabel ? `<div class="lista-item-secundaria"><span>${escapeHtml(f.sublabel)}</span></div>` : ''}
-          </li>`).join('')}
-      </ul>
-      ${sinResultadosDeClientes && opcionEspecial ? mensajeVacio : ''}
-      ${hayMas ? `<button type="button" class="btn btn-secundario btn-mostrar-mas" id="${idBase}-mostrar-mas">Mostrar más</button>` : ''}
-    `;
+// ============================================================
+// Arrastre para reordenar manualmente dentro de UN grupo (§2.9): agarre
+// (⋮⋮) con arrastre inmediato en mouse, y long-press (~350ms) antes de
+// empezar en táctil (para no interferir con el scroll normal de la lista).
+// Al soltar, llama onSoltar() con el nuevo orden completo de ids del grupo
+// (la fila Σ, sin data-cliente-id, nunca participa ni se mueve).
+// ============================================================
 
-    contenedorResultados.querySelectorAll('.selector-cliente-opcion').forEach((li) => {
-      li.addEventListener('click', () => elegir(li.dataset.id));
-      li.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); elegir(li.dataset.id); } });
-    });
-    const btnMas = contenedorResultados.querySelector(`#${idBase}-mostrar-mas`);
-    if (btnMas) btnMas.addEventListener('click', () => cargarResultados(false));
+/**
+ * @param {HTMLElement} listaEl - <ul> cuyos <li data-cliente-id> son ordenables
+ * @param {(idsEnOrden: string[]) => void} onSoltar
+ */
+export function activarArrastreOrden(listaEl, onSoltar) {
+  let filaArrastrada = null;
+  let armado = false;
+  let temporizadorArmado = null;
+  let origenY = 0;
 
-    function elegir(id) {
-      const elegida = filas.find((f) => f.id === id);
-      if (!elegida) return;
-      seleccionActual = elegida;
-      abierto = false;
-      render();
-      if (onCambio) onCambio(elegida);
+  function filasOrdenables() {
+    return Array.from(listaEl.querySelectorAll(':scope > li[data-cliente-id]'));
+  }
+
+  function empezarArrastre(li) {
+    armado = true;
+    filaArrastrada = li;
+    li.classList.add('fila-arrastrando');
+  }
+
+  function moverSegun(clientY) {
+    if (!filaArrastrada) return;
+    const filas = filasOrdenables().filter((f) => f !== filaArrastrada);
+    let destino = null;
+    for (const fila of filas) {
+      const rect = fila.getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) { destino = fila; break; }
     }
+    if (destino) {
+      if (filaArrastrada.nextElementSibling !== destino) listaEl.insertBefore(filaArrastrada, destino);
+    } else {
+      const filaSuma = listaEl.querySelector(':scope > li.fila-suma-grupo');
+      if (filaSuma) {
+        if (filaArrastrada.nextElementSibling !== filaSuma) listaEl.insertBefore(filaArrastrada, filaSuma);
+      } else if (listaEl.lastElementChild !== filaArrastrada) {
+        listaEl.appendChild(filaArrastrada);
+      }
+    }
+  }
+
+  function soltar() {
+    clearTimeout(temporizadorArmado);
+    if (filaArrastrada) {
+      filaArrastrada.classList.remove('fila-arrastrando');
+      const ids = filasOrdenables().map((li) => li.dataset.clienteId);
+      onSoltar(ids);
+    }
+    filaArrastrada = null;
+    armado = false;
+  }
+
+  listaEl.querySelectorAll(':scope > li[data-cliente-id] .asa-arrastre').forEach((asa) => {
+    const li = asa.closest('li[data-cliente-id]');
+    if (!li) return;
+    asa.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      origenY = e.clientY;
+      try { asa.setPointerCapture(e.pointerId); } catch { /* no soportado, seguimos igual */ }
+      if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+        temporizadorArmado = setTimeout(() => empezarArrastre(li), 350);
+      } else {
+        empezarArrastre(li);
+      }
+    });
+    asa.addEventListener('pointermove', (e) => {
+      if (!armado) {
+        if (Math.abs(e.clientY - origenY) > 10) clearTimeout(temporizadorArmado);
+        return;
+      }
+      e.preventDefault();
+      moverSegun(e.clientY);
+    });
+    asa.addEventListener('pointerup', soltar);
+    asa.addEventListener('pointercancel', soltar);
+  });
+}
+
+// ============================================================
+// Bottom sheet genérico (modal deslizable desde abajo) — infraestructura
+// compartida por el panel rápido (abono/cargo), nueva/editar categoría, y
+// nuevo cliente. Un solo sheet activo a la vez.
+// ============================================================
+
+let elementoSheetActual = null;
+
+function alTeclaEscSheet(e) {
+  if (e.key === 'Escape') cerrarSheet();
+}
+
+export function cerrarSheet() {
+  if (!elementoSheetActual) return;
+  const el = elementoSheetActual;
+  elementoSheetActual = null;
+  document.removeEventListener('keydown', alTeclaEscSheet);
+  el.classList.remove('sheet-overlay-visible');
+  setTimeout(() => el.remove(), 200);
+}
+
+/**
+ * @param {(host: HTMLElement) => void} armarContenido - arma y wire su propio
+ *   contenido dentro de `host`; puede llamar cerrarSheet() cuando termine.
+ * @param {{titulo: string}} opciones
+ * @returns {HTMLElement} el host del contenido (por si el caller necesita re-render)
+ */
+export function abrirSheet(armarContenido, { titulo } = {}) {
+  cerrarSheet();
+  const overlay = document.createElement('div');
+  overlay.className = 'sheet-overlay';
+  overlay.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(titulo || '')}">
+      <div class="sheet-agarre" aria-hidden="true"></div>
+      <div class="sheet-header">
+        <h2>${escapeHtml(titulo || '')}</h2>
+        <button type="button" class="btn-icono sheet-cerrar" aria-label="Cerrar">${Iconos.cruz()}</button>
+      </div>
+      <div class="sheet-contenido"></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  elementoSheetActual = overlay;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) cerrarSheet(); });
+  overlay.querySelector('.sheet-cerrar').addEventListener('click', () => cerrarSheet());
+  document.addEventListener('keydown', alTeclaEscSheet);
+  requestAnimationFrame(() => overlay.classList.add('sheet-overlay-visible'));
+  const host = overlay.querySelector('.sheet-contenido');
+  armarContenido(host);
+  return host;
+}
+
+// ============================================================
+// Paleta fija de categorías (§2.9): 12 colores; se repiten si hay más de 12
+// categorías — la bolita + el nombre desambiguan.
+// ============================================================
+
+export const PALETA_COLORES_CATEGORIA = [
+  'hsl(0 70% 45%)', 'hsl(25 75% 48%)', 'hsl(45 80% 42%)', 'hsl(95 45% 38%)',
+  'hsl(150 55% 34%)', 'hsl(175 55% 34%)', 'hsl(205 65% 45%)', 'hsl(225 60% 55%)',
+  'hsl(265 55% 55%)', 'hsl(300 45% 45%)', 'hsl(335 60% 48%)', 'hsl(20 20% 40%)',
+];
+
+/** Bolita de color de categoría (o gris neutro si no hay categoría). */
+export function bolitaHtml(color, extraClase = '') {
+  const estilo = color ? `background:${escapeHtml(color)}` : '';
+  return `<span class="bolita ${color ? '' : 'bolita-neutra'} ${extraClase}" style="${estilo}" aria-hidden="true"></span>`;
+}
+
+/**
+ * Sheet para crear o editar una categoría (nombre + paleta de 12 colores).
+ * @param {{categoria?: object|null, onGuardado?: (cat:object)=>void, onEliminada?: (id:string)=>void}} cfg
+ */
+export function abrirSheetCategoria({ categoria = null, onGuardado, onEliminada } = {}) {
+  abrirSheet((host) => {
+    let colorSeleccionado = categoria ? categoria.color : PALETA_COLORES_CATEGORIA[0];
+    let error = {};
+    // Lo ya tipeado en Nombre sobrevive a los re-render que dispara elegir un
+    // color (si no se capturara acá, cada render() reconstruye el <form> desde
+    // cero y el nombre ya tipeado se perdería silenciosamente — A-102).
+    let valorNombre = categoria ? categoria.nombre : '';
+
+    function capturarValoresActuales() {
+      const nombreEl = host.querySelector('#cat-nombre');
+      if (nombreEl) valorNombre = nombreEl.value;
+    }
+
+    function render() {
+      capturarValoresActuales();
+      host.innerHTML = `
+        <form id="form-categoria" class="formulario" novalidate>
+          <div class="campo">
+            <label for="cat-nombre">Nombre</label>
+            <input id="cat-nombre" name="nombre" type="text" value="${escapeHtml(valorNombre)}" required autofocus />
+            ${errorCampo(error.nombre)}
+          </div>
+          <div class="campo">
+            <label>Color</label>
+            <div class="paleta-colores">
+              ${PALETA_COLORES_CATEGORIA.map((c) => `
+                <button type="button" class="bolita-color ${c === colorSeleccionado ? 'bolita-color-activa' : ''}" data-color="${escapeHtml(c)}" style="background:${escapeHtml(c)}" aria-label="Elegir este color">
+                  ${c === colorSeleccionado ? `<span class="bolita-color-check">${Iconos.check()}</span>` : ''}
+                </button>`).join('')}
+            </div>
+            ${errorCampo(error.color)}
+          </div>
+          ${errorGeneral(error.general)}
+          <div class="acciones-formulario acciones-formulario-columna">
+            <button type="submit" class="btn btn-primario btn-ancho">${categoria ? 'Guardar cambios' : 'Crear categoría'}</button>
+            ${categoria ? `<button type="button" class="btn btn-peligro btn-ancho" id="btn-eliminar-categoria">Eliminar categoría</button>` : ''}
+          </div>
+        </form>`;
+
+      host.querySelectorAll('.bolita-color').forEach((b) => {
+        b.addEventListener('click', () => { colorSeleccionado = b.dataset.color; render(); });
+      });
+      const form = host.querySelector('#form-categoria');
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const nombre = form.nombre.value.trim();
+        error = {};
+        if (nombre.length < 1) error.nombre = 'El nombre es obligatorio.';
+        if (Object.keys(error).length > 0) { render(); return; }
+        try {
+          const resultado = categoria
+            ? await actualizarCategoria(categoria.id, { nombre, color: colorSeleccionado })
+            : await crearCategoria({ nombre, color: colorSeleccionado });
+          cerrarSheet();
+          mostrarToast(categoria ? 'Categoría actualizada.' : 'Categoría creada.', 'exito');
+          if (onGuardado) onGuardado(resultado);
+        } catch (err) {
+          if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) error[err.detalle.campo] = err.message;
+          else if (err.code === 'CONFLICT') error.nombre = err.message;
+          else error.general = err.message || 'No se pudo guardar la categoría.';
+          render();
+        }
+      });
+      const btnEliminar = host.querySelector('#btn-eliminar-categoria');
+      if (btnEliminar) {
+        btnEliminar.addEventListener('click', async () => {
+          const ok = window.confirm(`¿Eliminar la categoría "${categoria.nombre}"? Sus clientes pasarán a "Sin categoría".`);
+          if (!ok) return;
+          try {
+            await borrarCategoriaLogica(categoria.id);
+            cerrarSheet();
+            mostrarToast('Categoría eliminada.', 'exito');
+            if (onEliminada) onEliminada(categoria.id);
+          } catch (err) {
+            error.general = err.message || 'No se pudo eliminar la categoría.';
+            render();
+          }
+        });
+      }
+    }
+    render();
+  }, { titulo: categoria ? 'Editar categoría' : 'Nueva categoría' });
+}
+
+// ============================================================
+// Panel rápido (bottom sheet): registrar abono o cargo en 3 toques.
+// ============================================================
+
+/**
+ * @param {{tipo:'ABONO'|'CARGO', clienteId:string, clienteNombre:string, onGuardado?: ()=>void}} cfg
+ */
+export function abrirPanelRapido({ tipo, clienteId, clienteNombre, onGuardado }) {
+  abrirSheet((host) => {
+    renderPanelRapidoInterno(host, tipo, clienteId, onGuardado);
+  }, { titulo: `${tipo === 'ABONO' ? 'Abono' : 'Cargo'} — ${clienteNombre}` });
+}
+
+async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado) {
+  let conceptos = tipo === 'CARGO' ? await listarConceptos() : [];
+  let conceptoElegido = null;
+  let mostrarNuevoConcepto = false;
+  let error = {};
+  // Lo que el usuario ya tipeó sobrevive a los re-render que disparan elegir
+  // un concepto o crear uno al vuelo (si no se capturara acá, cada render()
+  // reconstruye el <form> desde cero y el monto/fecha/referencia ya tipeados
+  // se perderían silenciosamente).
+  let valorMonto = '';
+  let valorFecha = hoy();
+  let valorReferencia = '';
+
+  function capturarValoresActuales() {
+    const montoEl = host.querySelector('#pr-monto');
+    if (montoEl) valorMonto = montoEl.value;
+    const fechaEl = host.querySelector('#pr-fecha');
+    if (fechaEl) valorFecha = fechaEl.value;
+    const refEl = host.querySelector('#pr-referencia');
+    if (refEl) valorReferencia = refEl.value;
+  }
+
+  function render() {
+    capturarValoresActuales();
+    host.innerHTML = `
+      <form id="form-panel-rapido" class="formulario" novalidate>
+        <div class="campo campo-monto-grande">
+          <input id="pr-monto" name="monto" type="text" inputmode="decimal" placeholder="$0.00" class="input-monto-grande" autocomplete="off" value="${escapeHtml(valorMonto)}" />
+          ${errorCampo(error.monto_centavos)}
+        </div>
+        ${tipo === 'CARGO' ? `
+          <div class="campo">
+            <label>Concepto</label>
+            <div class="chips-fila">
+              ${conceptos.map((c) => `<button type="button" class="chip chip-concepto ${conceptoElegido === c.nombre ? 'chip-activo' : ''}" data-concepto="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</button>`).join('')}
+              <button type="button" class="chip chip-nuevo" id="pr-btn-nuevo-concepto">${Iconos.mas()} Nuevo</button>
+            </div>
+            ${mostrarNuevoConcepto ? `
+              <div class="fila-nuevo-inline">
+                <input id="pr-nuevo-concepto-nombre" type="text" placeholder="Nombre del concepto" />
+                <button type="button" class="btn btn-primario btn-pequeno" id="pr-confirmar-nuevo-concepto">Agregar</button>
+              </div>` : ''}
+            ${errorCampo(error.concepto)}
+          </div>
+          <div class="campo">
+            <label for="pr-referencia">Referencia (opcional)</label>
+            <input id="pr-referencia" name="referencia" type="text" value="${escapeHtml(valorReferencia)}" />
+          </div>` : ''}
+        <div class="campo">
+          <label for="pr-fecha">Fecha</label>
+          <input id="pr-fecha" name="fecha" type="date" max="${hoy()}" value="${escapeHtml(valorFecha)}" />
+          ${errorCampo(error.fecha)}
+        </div>
+        ${errorGeneral(error.general)}
+        <div class="acciones-formulario">
+          <button type="submit" class="btn btn-primario btn-ancho">Guardar</button>
+        </div>
+      </form>`;
+
+    const montoInput = host.querySelector('#pr-monto');
+    montoInput.focus();
+
+    if (tipo === 'CARGO') {
+      host.querySelectorAll('.chip-concepto').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          conceptoElegido = conceptoElegido === chip.dataset.concepto ? null : chip.dataset.concepto;
+          mostrarNuevoConcepto = false;
+          render();
+        });
+      });
+      host.querySelector('#pr-btn-nuevo-concepto').addEventListener('click', () => {
+        mostrarNuevoConcepto = !mostrarNuevoConcepto;
+        render();
+        const campoNuevo = host.querySelector('#pr-nuevo-concepto-nombre');
+        if (campoNuevo) campoNuevo.focus();
+      });
+      const btnConfirmarNuevo = host.querySelector('#pr-confirmar-nuevo-concepto');
+      if (btnConfirmarNuevo) {
+        const confirmar = async () => {
+          const campoNuevo = host.querySelector('#pr-nuevo-concepto-nombre');
+          const nombre = campoNuevo.value.trim();
+          if (nombre.length < 1) { campoNuevo.focus(); return; }
+          try {
+            const concepto = await crearConcepto({ nombre });
+            conceptos = await listarConceptos();
+            conceptoElegido = concepto.nombre;
+            mostrarNuevoConcepto = false;
+            error = {};
+            render();
+          } catch (err) {
+            error.concepto = err.message || 'No se pudo crear el concepto.';
+            render();
+          }
+        };
+        btnConfirmarNuevo.addEventListener('click', confirmar);
+        host.querySelector('#pr-nuevo-concepto-nombre').addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); confirmar(); }
+        });
+      }
+    }
+
+    host.querySelector('#form-panel-rapido').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      error = {};
+
+      const montoTexto = montoInput.value.trim();
+      let montoCentavos = null;
+      if (!montoTexto) {
+        error.monto_centavos = 'El monto es obligatorio.';
+      } else {
+        try {
+          montoCentavos = parsearAPesos(montoTexto);
+          if (montoCentavos <= 0) error.monto_centavos = 'El monto debe ser mayor a $0.00.';
+        } catch (err) {
+          error.monto_centavos = err.message;
+        }
+      }
+
+      const fechaTexto = host.querySelector('#pr-fecha').value;
+      if (!fechaTexto) error.fecha = 'La fecha es obligatoria.';
+      else if (!esFechaIsoValida(fechaTexto)) error.fecha = 'La fecha no es válida.';
+      else if (esFutura(fechaTexto)) error.fecha = 'La fecha no puede ser futura.';
+
+      if (tipo === 'CARGO' && !conceptoElegido) error.concepto = 'Elegí (o creá) un concepto.';
+
+      if (Object.keys(error).length > 0) { render(); return; }
+
+      try {
+        if (tipo === 'ABONO') {
+          await registrarAbono({ cliente_id: clienteId, monto_centavos: montoCentavos, fecha: fechaTexto });
+        } else {
+          const referencia = (host.querySelector('#pr-referencia').value || '').trim();
+          await registrarCargo({
+            cliente_id: clienteId, monto_centavos: montoCentavos, fecha: fechaTexto,
+            concepto: conceptoElegido, referencia: referencia || undefined,
+          });
+        }
+        cerrarSheet();
+        mostrarToast(tipo === 'ABONO' ? 'Abono registrado.' : 'Cargo registrado.', 'exito');
+        if (onGuardado) onGuardado();
+      } catch (err) {
+        if (err.code === 'VALIDATION_ERROR' && err.detalle && err.detalle.campo) {
+          error[err.detalle.campo] = err.message;
+        } else {
+          error.general = err.message || 'No se pudo guardar el movimiento.';
+        }
+        render();
+      }
+    });
   }
 
   render();

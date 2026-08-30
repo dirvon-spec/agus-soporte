@@ -1,4 +1,4 @@
-// Bootstrap de la app: initDb() -> router -> pantalla inicial "Hoy".
+// Bootstrap de la app: initDb() -> router -> pantalla inicial "Clientes".
 // Maneja el modo solo-lectura de una segunda pestaña (aviso permanente
 // mostrado por router.js) y errores fatales de inicialización (DB_ERROR)
 // con un mensaje explícito en vez de una pantalla en blanco.

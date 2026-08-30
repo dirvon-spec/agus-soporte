@@ -199,6 +199,21 @@ verificar('seed.js: generarSeed() incluye un cliente con cambio de cuota (2 acue
   assert(!!conDosAcuerdos);
 });
 
+verificar('§2.9: generarSeed() siembra 3-4 categorías, catálogo de 4 conceptos y orden manual variado', () => {
+  const datos = generarSeed();
+  assert(datos.categorias.length >= 3 && datos.categorias.length <= 4, `categorías fuera de 3-4: ${datos.categorias.length}`);
+  for (const cat of datos.categorias) {
+    assert(typeof cat.color === 'string' && cat.color.length > 0, `categoría "${cat.nombre}" sin color`);
+  }
+  const nombresConceptos = datos.conceptos.map((c) => c.nombre);
+  for (const esperado of ['Luz', 'Agua', 'Internet', 'Préstamo']) {
+    assert(nombresConceptos.includes(esperado), `falta el concepto "${esperado}" en el catálogo del seed`);
+  }
+  assert(datos.clientes.some((c) => c.categoria_id === null), 'debería haber al menos un cliente SIN categoría en el seed');
+  const conCategoria = datos.clientes.filter((c) => c.categoria_id !== null);
+  assert(conCategoria.every((c) => Number.isInteger(c.orden)), 'todo cliente con categoría debería tener un orden entero asignado');
+});
+
 // ============================================================
 // calendar.js — §2.8 (gate del dueño 25-ago-2026): frecuencia de cobro
 // configurable (DIARIA/SEMANAL/MENSUAL). Mismos 4 casos puros que corren

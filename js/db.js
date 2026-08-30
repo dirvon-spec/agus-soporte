@@ -3,7 +3,7 @@
 // aislar la capa y facilitar el reemplazo futuro por un driver nativo de Capacitor.
 // Ningún error se traga: todo se relanza con {code, message} vía crearError().
 
-import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2 } from './schema.js';
+import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2, MIGRACION_V2_A_V3 } from './schema.js';
 import { generarSeed } from './seed.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { crearError } from './utils/errors.js';
@@ -12,7 +12,11 @@ import { hoy, ahoraIso, esFechaIsoValida, esFutura, sumarDias, rango, diaDeSeman
 import { formatearCentavos } from './utils/money.js';
 import { construirEnlaceWhatsApp } from './utils/whatsapp.js';
 
-const SERVICIOS_VALIDOS = ['AGUA', 'LUZ', 'INTERNET', 'GAS', 'CABLE', 'OTRO'];
+// §2.9: el enum fijo SERVICIOS_VALIDOS (AGUA/LUZ/INTERNET/GAS/CABLE/OTRO) fue
+// RETIRADO — registrarCargo ahora valida `concepto` contra el catálogo vivo
+// de la tabla `conceptos` (ver más abajo). FRECUENCIAS_VALIDAS se mantiene
+// solo para las funciones LEGACY (crearClienteConAcuerdo/crearAcuerdo,
+// @deprecated) que siguen funcionando por compatibilidad histórica.
 const FRECUENCIAS_VALIDAS = ['DIARIA', 'SEMANAL', 'MENSUAL'];
 
 /**
@@ -191,6 +195,14 @@ function calcularSaldoInterno(clienteId, hastaFecha) {
 function creditoDeMovimiento(m) {
   if (m.tipo === 'ABONO') return m.monto_centavos;
   if (m.tipo === 'AJUSTE') return -m.monto_centavos;
+  return 0;
+}
+
+/** Efecto de un movimiento sobre el SALDO (fórmula de 2.2, misma que calcularSaldoInterno). */
+function efectoSaldoMovimiento(m) {
+  if (m.tipo === 'CARGO') return m.monto_centavos;
+  if (m.tipo === 'ABONO') return -m.monto_centavos;
+  if (m.tipo === 'AJUSTE') return m.monto_centavos; // ya viene firmado
   return 0;
 }
 
@@ -441,11 +453,28 @@ async function insertarSeedEnTransaccion() {
   const datos = generarSeed();
   ejecutarSQL('BEGIN;');
   try {
+    for (const cat of datos.categorias) {
+      db.run('INSERT INTO categorias (id, nombre, color, created_at, updated_at, deleted_at) VALUES (?,?,?,?,?,NULL)', [
+        cat.id,
+        cat.nombre,
+        cat.color,
+        cat.created_at,
+        cat.updated_at,
+      ]);
+    }
+    for (const con of datos.conceptos) {
+      db.run('INSERT INTO conceptos (id, nombre, created_at, updated_at, deleted_at) VALUES (?,?,?,?,NULL)', [
+        con.id,
+        con.nombre,
+        con.created_at,
+        con.updated_at,
+      ]);
+    }
     for (const c of datos.clientes) {
       db.run(
-        `INSERT INTO clientes (id, nombre, telefono, notas, created_at, updated_at, deleted_at)
-         VALUES (?,?,?,?,?,?,NULL)`,
-        [c.id, c.nombre, c.telefono ?? null, c.notas ?? null, c.created_at, c.updated_at]
+        `INSERT INTO clientes (id, nombre, telefono, categoria_id, orden, notas, created_at, updated_at, deleted_at)
+         VALUES (?,?,?,?,?,?,?,?,NULL)`,
+        [c.id, c.nombre, c.telefono ?? null, c.categoria_id ?? null, c.orden ?? null, c.notas ?? null, c.created_at, c.updated_at]
       );
     }
     for (const a of datos.acuerdos) {
@@ -493,34 +522,80 @@ async function insertarSeedEnTransaccion() {
   }
 }
 
-/** Re-sembrado automático anti-congelamiento (mitigación D1), SOLO en modo_demo=1. */
 /**
- * §2.8 (gate del dueño 25-ago-2026): si la base local existente quedó en
- * schema_version=1, aplica MIGRACION_V1_A_V2 (ALTER TABLE, sin tocar datos) y
+ * §2.9: aplica MIGRACION_V2_A_V3 (DDL: categorias/conceptos nuevas,
+ * clientes.categoria_id/orden) + la migración de DATOS que requiere lógica
+ * en JS (no entra en un array plano de SQL, a diferencia de v1->v2):
+ * sembrar `conceptos` desde los valores distintos ya usados en
+ * `movimientos.servicio`, y asignar `orden` inicial a los clientes
+ * existentes por fecha de alta (created_at ASC). Comparte una sola
+ * implementación entre initDb() e importarRespaldo() — mismo principio de
+ * "una sola fuente de verdad" que v1->v2, aunque acá vive en JS y no en el
+ * array exportado de schema.js. NO abre su propia transacción: el caller
+ * decide el alcance.
+ * @param {any} dbObjetivo instancia de sql.js sobre la que migrar
+ */
+function aplicarMigracionV2AV3(dbObjetivo) {
+  for (const sql of MIGRACION_V2_A_V3) dbObjetivo.run(sql);
+
+  const stmtServicios = dbObjetivo.prepare(
+    "SELECT DISTINCT servicio FROM movimientos WHERE servicio IS NOT NULL AND trim(servicio) != ''"
+  );
+  const serviciosDistintos = [];
+  while (stmtServicios.step()) serviciosDistintos.push(stmtServicios.getAsObject().servicio);
+  stmtServicios.free();
+
+  const tsConceptos = ahoraIso();
+  for (const nombreServicio of serviciosDistintos) {
+    dbObjetivo.run('INSERT INTO conceptos (id, nombre, created_at, updated_at, deleted_at) VALUES (?,?,?,?,NULL)', [
+      uuidV7(),
+      nombreServicio,
+      tsConceptos,
+      tsConceptos,
+    ]);
+  }
+
+  const stmtClientes = dbObjetivo.prepare('SELECT id FROM clientes ORDER BY created_at ASC');
+  const idsClientes = [];
+  while (stmtClientes.step()) idsClientes.push(stmtClientes.getAsObject().id);
+  stmtClientes.free();
+  idsClientes.forEach((id, index) => {
+    dbObjetivo.run('UPDATE clientes SET orden = ? WHERE id = ?', [index, id]);
+  });
+}
+
+/**
+ * Si la base local existente quedó en una schema_version vieja, encadena las
+ * migraciones necesarias (v1->v2 de §2.8, v2->v3 de §2.9) SIN TOCAR DATOS y
  * actualiza meta a la versión vigente. No-op si ya está al día.
  */
 async function migrarEsquemaSiHaceFalta() {
-  const version = obtenerMetaInterno('schema_version');
-  if (version === SCHEMA_VERSION) return;
-  if (version !== '1') {
+  const versionInicial = obtenerMetaInterno('schema_version');
+  if (versionInicial === SCHEMA_VERSION) return;
+  if (versionInicial !== '1' && versionInicial !== '2') {
     throw crearError(
       'DB_ERROR',
-      `La base local tiene un schema_version desconocido ("${version}") y no se puede migrar automáticamente.`
+      `La base local tiene un schema_version desconocido ("${versionInicial}") y no se puede migrar automáticamente.`
     );
   }
 
   ejecutarSQL('BEGIN;');
   try {
-    for (const sql of MIGRACION_V1_A_V2) db.run(sql);
+    if (versionInicial === '1') {
+      for (const sql of MIGRACION_V1_A_V2) db.run(sql);
+    }
+    aplicarMigracionV2AV3(db);
     setMetaInterno('schema_version', SCHEMA_VERSION);
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
-    throw crearError('DB_ERROR', 'No se pudo migrar el esquema local (v1 -> v2, frecuencia de cobro).', { original: String(e) });
+    throw crearError('DB_ERROR', 'No se pudo migrar el esquema local.', { original: String(e) });
   }
   await persistirInmediato();
-  console.info(`[db] Migración de esquema aplicada: v1 -> v${SCHEMA_VERSION} (frecuencia de cobro configurable). Datos preservados.`);
+  console.info(`[db] Migración de esquema aplicada: v${versionInicial} -> v${SCHEMA_VERSION}. Datos preservados.`);
 }
+
+/** Re-sembrado automático anti-congelamiento (mitigación D1), SOLO en modo_demo=1. */
 
 async function revisarReSembradoAntiCongelamiento() {
   const modoDemo = obtenerMetaInterno('modo_demo');
@@ -652,8 +727,9 @@ export async function exportarRespaldo() {
 }
 
 /**
- * Valida ANTES de reemplazar nada: schema_version soportada (v1 o v2; v1 se
- * migra en memoria antes de aceptar — §2.8) + cero huérfanos.
+ * Valida ANTES de reemplazar nada: schema_version soportada (v1, v2 o v3;
+ * v1/v2 se migran en memoria encadenando MIGRACION_V1_A_V2 y
+ * aplicarMigracionV2AV3 antes de aceptar — §2.8/§2.9) + cero huérfanos.
  * @param {ArrayBuffer} arrayBuffer
  * @returns {Promise<void>}
  */
@@ -672,15 +748,19 @@ export async function importarRespaldo(arrayBuffer) {
     if (!filaVersion) {
       throw new Error('sin schema_version');
     }
-    if (filaVersion.valor === '1') {
-      // §2.8: un respaldo v1 es válido, pero se migra en memoria (mismas
+    if (!['1', '2', '3'].includes(filaVersion.valor)) {
+      throw new Error(`schema_version "${filaVersion.valor}" no soportada`);
+    }
+    if (filaVersion.valor !== SCHEMA_VERSION) {
+      // Un respaldo v1 o v2 es válido, pero se migra en memoria (mismas
       // sentencias que initDb()) ANTES de correr la validación de huérfanos.
       dbCandidata.run('BEGIN;');
-      for (const sql of MIGRACION_V1_A_V2) dbCandidata.run(sql);
+      if (filaVersion.valor === '1') {
+        for (const sql of MIGRACION_V1_A_V2) dbCandidata.run(sql);
+      }
+      aplicarMigracionV2AV3(dbCandidata);
       dbCandidata.run("UPDATE meta SET valor = ? WHERE clave = 'schema_version'", [SCHEMA_VERSION]);
       dbCandidata.run('COMMIT;');
-    } else if (filaVersion.valor !== SCHEMA_VERSION) {
-      throw new Error(`schema_version "${filaVersion.valor}" no soportada`);
     }
     const huerfanosMov = unaFila(
       'SELECT COUNT(*) AS c FROM movimientos WHERE cliente_id NOT IN (SELECT id FROM clientes)',
@@ -708,10 +788,201 @@ export async function importarRespaldo(arrayBuffer) {
 }
 
 // ============================================================
+// Categorías (§2.9)
+// ============================================================
+
+/**
+ * @param {{nombre:string, color:string}} datos
+ * @returns {Promise<object>}
+ */
+export async function crearCategoria({ nombre, color }) {
+  verificarEscritura();
+
+  const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
+  if (nombreLimpio.length < 1) {
+    throw crearError('VALIDATION_ERROR', 'El nombre de la categoría no puede estar vacío.', { campo: 'nombre' });
+  }
+  const colorLimpio = typeof color === 'string' ? color.trim() : '';
+  if (colorLimpio.length < 1) {
+    throw crearError('VALIDATION_ERROR', 'El color es obligatorio.', { campo: 'color' });
+  }
+  // "nombre único-vivo" (2.9): único entre categorías ACTIVAS, no un UNIQUE de
+  // SQL — así se puede reusar el nombre de una categoría borrada lógicamente.
+  const existente = unaFila('SELECT id FROM categorias WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?)', [nombreLimpio]);
+  if (existente) {
+    throw crearError('CONFLICT', 'Ya existe una categoría activa con ese nombre.', { campo: 'nombre' });
+  }
+
+  const id = uuidV7();
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('INSERT INTO categorias (id, nombre, color, created_at, updated_at, deleted_at) VALUES (?,?,?,?,?,NULL)', [
+      id,
+      nombreLimpio,
+      colorLimpio,
+      ts,
+      ts,
+    ]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM categorias WHERE id = ?', [id]);
+}
+
+/**
+ * @param {string} id
+ * @param {{nombre?:string, color?:string}} cambios
+ * @returns {Promise<object>}
+ */
+export async function actualizarCategoria(id, cambios = {}) {
+  verificarEscritura();
+
+  const actual = unaFila('SELECT * FROM categorias WHERE id = ? AND deleted_at IS NULL', [id]);
+  if (!actual) throw crearError('NOT_FOUND', 'Categoría no encontrada.', { id });
+
+  let nombreFinal = actual.nombre;
+  if (cambios.nombre !== undefined) {
+    const nombreLimpio = String(cambios.nombre).trim();
+    if (nombreLimpio.length < 1) {
+      throw crearError('VALIDATION_ERROR', 'El nombre de la categoría no puede estar vacío.', { campo: 'nombre' });
+    }
+    const otra = unaFila('SELECT id FROM categorias WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?) AND id != ?', [nombreLimpio, id]);
+    if (otra) throw crearError('CONFLICT', 'Ya existe otra categoría activa con ese nombre.', { campo: 'nombre' });
+    nombreFinal = nombreLimpio;
+  }
+  const colorFinal = cambios.color !== undefined ? String(cambios.color).trim() : actual.color;
+  if (colorFinal.length < 1) {
+    throw crearError('VALIDATION_ERROR', 'El color es obligatorio.', { campo: 'color' });
+  }
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE categorias SET nombre=?, color=?, updated_at=? WHERE id=?', [nombreFinal, colorFinal, ts, id]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM categorias WHERE id = ?', [id]);
+}
+
+/**
+ * Borrado lógico: los clientes de esta categoría quedan en "Sin categoría"
+ * (cascada manual, sin ON DELETE CASCADE — mismo patrón que borrarClienteLogico).
+ * @param {string} id
+ * @returns {Promise<void>}
+ */
+export async function borrarCategoriaLogica(id) {
+  verificarEscritura();
+
+  const actual = unaFila('SELECT * FROM categorias WHERE id = ? AND deleted_at IS NULL', [id]);
+  if (!actual) throw crearError('NOT_FOUND', 'Categoría no encontrada.', { id });
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE categorias SET deleted_at=?, updated_at=? WHERE id=?', [ts, ts, id]);
+    db.run('UPDATE clientes SET categoria_id=NULL, updated_at=? WHERE categoria_id=? AND deleted_at IS NULL', [ts, id]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+  await persistirEnIndexedDB();
+}
+
+/**
+ * @returns {Promise<object[]>} categorías activas, orden alfabético
+ */
+export async function listarCategorias() {
+  return todasLasFilas('SELECT * FROM categorias WHERE deleted_at IS NULL ORDER BY nombre ASC');
+}
+
+// ============================================================
+// Conceptos (§2.9) — catálogo editable, reemplaza el enum fijo de servicio
+// ============================================================
+
+/**
+ * Idempotente ("crear al vuelo" no debe fallar si el concepto ya existe):
+ * si ya hay un concepto activo con ese nombre (case-insensitive), lo
+ * devuelve tal cual en vez de duplicarlo.
+ * @param {{nombre:string}} datos
+ * @returns {Promise<object>}
+ */
+export async function crearConcepto({ nombre }) {
+  verificarEscritura();
+
+  const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
+  if (nombreLimpio.length < 1) {
+    throw crearError('VALIDATION_ERROR', 'El nombre del concepto no puede estar vacío.', { campo: 'nombre' });
+  }
+
+  const existente = unaFila('SELECT * FROM conceptos WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?)', [nombreLimpio]);
+  if (existente) return existente;
+
+  const id = uuidV7();
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('INSERT INTO conceptos (id, nombre, created_at, updated_at, deleted_at) VALUES (?,?,?,?,NULL)', [id, nombreLimpio, ts, ts]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM conceptos WHERE id = ?', [id]);
+}
+
+/**
+ * Borrado lógico. NO cascada: movimientos.servicio guarda el nombre como
+ * texto plano (sin FK), así que la historia queda intacta — el concepto
+ * borrado simplemente deja de ofrecerse como chip para cargos NUEVOS.
+ * @param {string} id
+ * @returns {Promise<void>}
+ */
+export async function borrarConceptoLogico(id) {
+  verificarEscritura();
+
+  const actual = unaFila('SELECT * FROM conceptos WHERE id = ? AND deleted_at IS NULL', [id]);
+  if (!actual) throw crearError('NOT_FOUND', 'Concepto no encontrado.', { id });
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('UPDATE conceptos SET deleted_at=?, updated_at=? WHERE id=?', [ts, ts, id]);
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+  await persistirEnIndexedDB();
+}
+
+/**
+ * @returns {Promise<object[]>} conceptos activos, orden alfabético
+ */
+export async function listarConceptos() {
+  return todasLasFilas('SELECT * FROM conceptos WHERE deleted_at IS NULL ORDER BY nombre ASC');
+}
+
+// ============================================================
 // Clientes
 // ============================================================
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY: el sistema de cuotas y
+ * frecuencias (§2.8) se retiró de la UI — el alta de cliente ya NO crea
+ * acuerdos (usar `crearCliente`). Se mantiene funcional (no se borra) porque
+ * la tabla `acuerdos` conserva sus datos históricos append-only y las
+ * pruebas LEGACY de dev-verify siguen usando esta función para proteger esa
+ * integridad histórica/de migración.
  * @param {{nombre:string, telefono?:string, notas?:string, monto_cuota_centavos:number, vigente_desde:string, frecuencia?:string, dia_semana?:number, dia_mes?:number}} datos
  * @returns {Promise<{cliente:object, acuerdo:object}>}
  */
@@ -773,6 +1044,64 @@ export async function crearClienteConAcuerdo({ nombre, telefono, notas, monto_cu
 }
 
 /**
+ * §2.9: punto de alta VIGENTE de cliente — SIN acuerdo/cuota/frecuencia.
+ * `orden` se asigna como MAX(orden) + 1 entre los clientes de su MISMO
+ * grupo (misma categoria_id, o "sin categoría" si no se pasa una) — así
+ * entra al final de la lista de su grupo, sin alterar el orden de los demás.
+ * `nombre` es único-vivo (A-101): CONFLICT si ya existe un cliente ACTIVO
+ * con el mismo nombre (case-insensitive, trim) — se puede reusar el nombre
+ * de un cliente dado de baja, igual que con categorías (crearCategoria).
+ * @param {{nombre:string, telefono?:string, categoria_id?:string, notas?:string}} datos
+ * @returns {Promise<object>}
+ */
+export async function crearCliente({ nombre, telefono, categoria_id, notas }) {
+  verificarEscritura();
+
+  const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
+  if (nombreLimpio.length < 2) {
+    throw crearError('VALIDATION_ERROR', 'El nombre debe tener al menos 2 caracteres.', { campo: 'nombre' });
+  }
+  // A-101 (auditoría v2): nombre único-vivo, mismo patrón que crearCategoria
+  // — único entre clientes ACTIVOS, no un UNIQUE de SQL (permite reusar el
+  // nombre de un cliente dado de baja).
+  const clienteExistente = unaFila('SELECT id FROM clientes WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?)', [nombreLimpio]);
+  if (clienteExistente) {
+    throw crearError('CONFLICT', `Ya existe un cliente llamado "${nombreLimpio}".`, { campo: 'nombre' });
+  }
+
+  let categoriaFinal = null;
+  if (categoria_id !== undefined && categoria_id !== null) {
+    const categoria = unaFila('SELECT * FROM categorias WHERE id = ? AND deleted_at IS NULL', [categoria_id]);
+    if (!categoria) throw crearError('NOT_FOUND', 'Categoría no encontrada.', { categoria_id });
+    categoriaFinal = categoria_id;
+  }
+
+  const filaOrden =
+    categoriaFinal === null
+      ? unaFila('SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM clientes WHERE categoria_id IS NULL AND deleted_at IS NULL')
+      : unaFila('SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM clientes WHERE categoria_id = ? AND deleted_at IS NULL', [categoriaFinal]);
+  const ordenNuevo = (filaOrden ? filaOrden.maxOrden : -1) + 1;
+
+  const id = uuidV7();
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run(
+      `INSERT INTO clientes (id, nombre, telefono, categoria_id, orden, notas, created_at, updated_at, deleted_at)
+       VALUES (?,?,?,?,?,?,?,?,NULL)`,
+      [id, nombreLimpio, telefono || null, categoriaFinal, ordenNuevo, notas || null, ts, ts]
+    );
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+
+  await persistirEnIndexedDB();
+  return unaFila('SELECT * FROM clientes WHERE id = ?', [id]);
+}
+
+/**
  * @param {{busqueda?:string, pagina?:number, tamanioPagina?:number}} opciones
  * @returns {Promise<{clientes:object[], total:number}>}
  */
@@ -818,6 +1147,108 @@ export async function listarClientes({ busqueda = '', pagina = 1, tamanioPagina 
 }
 
 /**
+ * §2.9, Pantalla 1 (Clientes): lista AGRUPADA por categoría, en el orden
+ * manual de cada grupo, con los agregados que necesita la fila de cliente
+ * (abonos/cargos del mes, saldo histórico) y la fila Σ de cada grupo. Todo
+ * en 2 queries (categorías + clientes con subconsultas correlacionadas para
+ * los agregados) — sin N+1; el agrupado y las sumas de grupo se hacen en
+ * memoria sobre esas 2 queries, no contra la DB.
+ *
+ * El grupo "Sin categoría" siempre va al final, sin importar el orden
+ * alfabético de las categorías reales.
+ *
+ * @param {{anioMes?:string, busqueda?:string}} opciones anioMes 'YYYY-MM' (default: mes actual)
+ * @returns {Promise<{grupos: Array<{
+ *   categoria_id: string|null,
+ *   categoria_nombre: string,
+ *   categoria_color: string|null,
+ *   clientes: Array<{id:string, nombre:string, telefono:?string, categoria_id:?string, orden:?number, abonos_mes_centavos:number, cargos_mes_centavos:number, saldo_centavos:number, tiene_movimientos:boolean}>,
+ *   totales: {abonos_mes_centavos:number, cargos_mes_centavos:number, saldo_centavos:number}
+ * }>}>}
+ */
+export async function listarClientesAgrupados({ anioMes, busqueda = '' } = {}) {
+  const hoyStr = hoy();
+  const mesObjetivo = anioMes || hoyStr.slice(0, 7);
+  const [anioStr, mesStr] = mesObjetivo.split('-');
+  const primerDiaMes = `${anioStr}-${mesStr}-01`;
+  const ultimoDiaMes = `${anioStr}-${mesStr}-${pad2(new Date(Number(anioStr), Number(mesStr), 0).getDate())}`;
+
+  const textoBusqueda = (busqueda || '').trim();
+  const filtroBusqueda = textoBusqueda
+    ? `AND (LOWER(c.nombre) LIKE LOWER(?) OR LOWER(COALESCE(c.telefono, '')) LIKE LOWER(?))`
+    : '';
+  const like = `%${textoBusqueda}%`;
+  const paramsBusqueda = textoBusqueda ? [like, like] : [];
+
+  const categorias = todasLasFilas('SELECT * FROM categorias WHERE deleted_at IS NULL ORDER BY nombre ASC');
+
+  const filas = todasLasFilas(
+    `SELECT c.*,
+        COALESCE((SELECT SUM(
+            CASE WHEN m.tipo='CARGO' THEN m.monto_centavos
+                 WHEN m.tipo='ABONO' THEN -m.monto_centavos
+                 WHEN m.tipo='AJUSTE' THEN m.monto_centavos
+                 ELSE 0 END)
+          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL AND m.fecha <= ?), 0) AS saldo_centavos,
+        COALESCE((SELECT SUM(m.monto_centavos) FROM movimientos m
+          WHERE m.cliente_id = c.id AND m.tipo='ABONO' AND m.deleted_at IS NULL AND m.fecha BETWEEN ? AND ?), 0) AS abonos_mes_centavos,
+        COALESCE((SELECT SUM(m.monto_centavos) FROM movimientos m
+          WHERE m.cliente_id = c.id AND m.tipo='CARGO' AND m.deleted_at IS NULL AND m.fecha BETWEEN ? AND ?), 0) AS cargos_mes_centavos,
+        EXISTS(SELECT 1 FROM movimientos m2 WHERE m2.cliente_id = c.id AND m2.deleted_at IS NULL) AS tiene_movimientos
+     FROM clientes c
+     WHERE c.deleted_at IS NULL ${filtroBusqueda}
+     ORDER BY c.orden ASC`,
+    [hoyStr, primerDiaMes, ultimoDiaMes, primerDiaMes, ultimoDiaMes, ...paramsBusqueda]
+  );
+
+  const SIN_CATEGORIA = '__sin_categoria__';
+  const balde = new Map();
+  balde.set(SIN_CATEGORIA, { categoria_id: null, categoria_nombre: 'Sin categoría', categoria_color: null, clientes: [] });
+  for (const cat of categorias) {
+    balde.set(cat.id, { categoria_id: cat.id, categoria_nombre: cat.nombre, categoria_color: cat.color, clientes: [] });
+  }
+
+  for (const fila of filas) {
+    const clienteAgregado = {
+      id: fila.id,
+      nombre: fila.nombre,
+      telefono: fila.telefono,
+      categoria_id: fila.categoria_id,
+      orden: fila.orden,
+      abonos_mes_centavos: fila.abonos_mes_centavos,
+      cargos_mes_centavos: fila.cargos_mes_centavos,
+      saldo_centavos: fila.saldo_centavos,
+      tiene_movimientos: !!fila.tiene_movimientos,
+    };
+    const clave = fila.categoria_id && balde.has(fila.categoria_id) ? fila.categoria_id : SIN_CATEGORIA;
+    balde.get(clave).clientes.push(clienteAgregado);
+  }
+
+  const grupos = [];
+  for (const grupo of balde.values()) {
+    if (grupo.clientes.length === 0) continue; // grupo vacío (categoría o "sin categoría"): no ensucia la lista
+    const totales = grupo.clientes.reduce(
+      (acc, cl) => ({
+        abonos_mes_centavos: acc.abonos_mes_centavos + cl.abonos_mes_centavos,
+        cargos_mes_centavos: acc.cargos_mes_centavos + cl.cargos_mes_centavos,
+        saldo_centavos: acc.saldo_centavos + cl.saldo_centavos,
+      }),
+      { abonos_mes_centavos: 0, cargos_mes_centavos: 0, saldo_centavos: 0 }
+    );
+    grupos.push({ ...grupo, totales });
+  }
+
+  // "Sin categoría" siempre al final, sin importar el orden alfabético de las categorías reales.
+  grupos.sort((a, b) => {
+    if (a.categoria_id === null) return 1;
+    if (b.categoria_id === null) return -1;
+    return a.categoria_nombre < b.categoria_nombre ? -1 : a.categoria_nombre > b.categoria_nombre ? 1 : 0;
+  });
+
+  return { grupos };
+}
+
+/**
  * @param {string} id
  * @returns {Promise<object|null>}
  */
@@ -826,8 +1257,15 @@ export async function obtenerCliente(id) {
 }
 
 /**
+ * §2.9: `categoria_id` es opcional — omitido, no toca la categoría actual;
+ * `null` explícito manda al cliente a "sin categoría"; un id válido lo mueve
+ * de grupo. Al CAMBIAR de grupo, `orden` se recalcula como MAX(orden)+1 del
+ * grupo destino (entra al final de su nuevo grupo, igual que un alta nueva).
+ * `nombre` (si se pasa) es único-vivo (A-101): CONFLICT si otro cliente
+ * ACTIVO ya usa ese nombre (case-insensitive, trim) — excluye al propio
+ * cliente, así que no renombrar o solo cambiar casing/espacios no choca.
  * @param {string} id
- * @param {{nombre?:string, telefono?:string, notas?:string}} cambios
+ * @param {{nombre?:string, telefono?:string, notas?:string, categoria_id?:?string}} cambios
  * @returns {Promise<object>}
  */
 export async function actualizarCliente(id, cambios = {}) {
@@ -842,15 +1280,50 @@ export async function actualizarCliente(id, cambios = {}) {
     if (nombreLimpio.length < 2) {
       throw crearError('VALIDATION_ERROR', 'El nombre debe tener al menos 2 caracteres.', { campo: 'nombre' });
     }
+    // A-101: único-vivo, excluyendo al propio cliente (renombrar sin cambiar
+    // el nombre, o solo cambiar casing/espacios, no debe chocar consigo mismo).
+    const otroConMismoNombre = unaFila(
+      'SELECT id FROM clientes WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?) AND id != ?',
+      [nombreLimpio, id]
+    );
+    if (otroConMismoNombre) {
+      throw crearError('CONFLICT', `Ya existe un cliente llamado "${nombreLimpio}".`, { campo: 'nombre' });
+    }
     nombre = nombreLimpio;
   }
   const telefono = cambios.telefono !== undefined ? cambios.telefono : actual.telefono;
   const notas = cambios.notas !== undefined ? cambios.notas : actual.notas;
+
+  let categoriaId = actual.categoria_id;
+  let orden = actual.orden;
+  if (cambios.categoria_id !== undefined && cambios.categoria_id !== actual.categoria_id) {
+    if (cambios.categoria_id === null) {
+      categoriaId = null;
+    } else {
+      const categoria = unaFila('SELECT * FROM categorias WHERE id = ? AND deleted_at IS NULL', [cambios.categoria_id]);
+      if (!categoria) throw crearError('NOT_FOUND', 'Categoría no encontrada.', { categoria_id: cambios.categoria_id });
+      categoriaId = cambios.categoria_id;
+    }
+    const filaOrden =
+      categoriaId === null
+        ? unaFila('SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM clientes WHERE categoria_id IS NULL AND deleted_at IS NULL')
+        : unaFila('SELECT COALESCE(MAX(orden), -1) AS maxOrden FROM clientes WHERE categoria_id = ? AND deleted_at IS NULL', [categoriaId]);
+    orden = (filaOrden ? filaOrden.maxOrden : -1) + 1;
+  }
+
   const ts = ahoraIso();
 
   ejecutarSQL('BEGIN;');
   try {
-    db.run('UPDATE clientes SET nombre=?, telefono=?, notas=?, updated_at=? WHERE id=?', [nombre, telefono, notas, ts, id]);
+    db.run('UPDATE clientes SET nombre=?, telefono=?, notas=?, categoria_id=?, orden=?, updated_at=? WHERE id=?', [
+      nombre,
+      telefono,
+      notas,
+      categoriaId,
+      orden,
+      ts,
+      id,
+    ]);
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -859,6 +1332,38 @@ export async function actualizarCliente(id, cambios = {}) {
 
   await persistirEnIndexedDB();
   return unaFila('SELECT * FROM clientes WHERE id = ?', [id]);
+}
+
+/**
+ * §2.9: persiste el orden manual dentro de UN grupo (el gestor arrastra
+ * filas dentro de la misma categoría — nunca entre categorías distintas
+ * desde esta función). Asigna orden = índice en `idsEnOrden` (0,1,2,...).
+ * @param {string[]} idsEnOrden ids de cliente en el nuevo orden deseado
+ * @returns {Promise<void>}
+ */
+export async function actualizarOrdenClientes(idsEnOrden) {
+  verificarEscritura();
+
+  if (!Array.isArray(idsEnOrden) || idsEnOrden.length === 0) {
+    throw crearError('VALIDATION_ERROR', 'Se requiere una lista de ids de clientes.', { campo: 'idsEnOrden' });
+  }
+  for (const id of idsEnOrden) {
+    const cliente = unaFila('SELECT id FROM clientes WHERE id = ? AND deleted_at IS NULL', [id]);
+    if (!cliente) throw crearError('NOT_FOUND', 'Cliente no encontrado.', { id });
+  }
+
+  const ts = ahoraIso();
+  ejecutarSQL('BEGIN;');
+  try {
+    idsEnOrden.forEach((id, indice) => {
+      db.run('UPDATE clientes SET orden=?, updated_at=? WHERE id=?', [indice, ts, id]);
+    });
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw normalizarError(e);
+  }
+  await persistirEnIndexedDB();
 }
 
 /**
@@ -898,6 +1403,10 @@ export async function borrarClienteLogico(id, opciones = {}) {
 // ============================================================
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY: el sistema de cuotas y
+ * frecuencias (§2.8) se retiró de la UI. Se mantiene funcional (no se borra)
+ * porque `acuerdos` conserva su historia append-only y las pruebas LEGACY de
+ * dev-verify siguen usando esta función para protegerla.
  * @param {{cliente_id:string, monto_cuota_centavos:number, vigente_desde:string, frecuencia?:string, dia_semana?:number, dia_mes?:number}} datos
  * @returns {Promise<object>}
  */
@@ -969,6 +1478,8 @@ export async function crearAcuerdo({ cliente_id, monto_cuota_centavos, vigente_d
 }
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY. Se mantiene funcional por las
+ * pruebas LEGACY (protegen la historia de `acuerdos`).
  * @param {string} cliente_id
  * @returns {Promise<object[]>} ordenado por vigente_desde ascendente, incluye cerrados
  */
@@ -980,6 +1491,8 @@ export async function listarAcuerdos(cliente_id) {
 }
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY. Se mantiene funcional por las
+ * pruebas LEGACY (protegen la historia de `acuerdos`).
  * @param {string} cliente_id
  * @param {string} fecha
  * @returns {Promise<object|null>}
@@ -1004,18 +1517,32 @@ async function verificarClienteActivo(cliente_id) {
 }
 
 /**
- * @param {{cliente_id:string, monto_centavos:number, fecha:string, servicio:string, referencia?:string, nota?:string}} datos
+ * §2.9: `concepto` valida contra el catálogo VIVO de `conceptos` (ya no el
+ * enum fijo `SERVICIOS_VALIDOS`, retirado). El texto guardado en
+ * `movimientos.servicio` es el nombre CANÓNICO del concepto encontrado en el
+ * catálogo (no el texto crudo del caller), para no acumular variantes de
+ * casing en el ledger histórico.
+ * @param {{cliente_id:string, monto_centavos:number, fecha:string, concepto:string, referencia?:string, nota?:string}} datos
  * @returns {Promise<object>}
  */
-export async function registrarCargo({ cliente_id, monto_centavos, fecha, servicio, referencia, nota }) {
+export async function registrarCargo({ cliente_id, monto_centavos, fecha, concepto, referencia, nota }) {
   verificarEscritura();
   await verificarClienteActivo(cliente_id);
 
   if (!Number.isInteger(monto_centavos) || monto_centavos <= 0) {
     throw crearError('VALIDATION_ERROR', 'El monto debe ser un entero positivo, en centavos.', { campo: 'monto_centavos' });
   }
-  if (!SERVICIOS_VALIDOS.includes(servicio)) {
-    throw crearError('VALIDATION_ERROR', `El servicio debe ser uno de: ${SERVICIOS_VALIDOS.join(', ')}.`, { campo: 'servicio' });
+  const conceptoLimpio = typeof concepto === 'string' ? concepto.trim() : '';
+  if (conceptoLimpio.length === 0) {
+    throw crearError('VALIDATION_ERROR', 'El concepto es obligatorio.', { campo: 'concepto' });
+  }
+  const conceptoCatalogo = unaFila('SELECT * FROM conceptos WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?)', [conceptoLimpio]);
+  if (!conceptoCatalogo) {
+    throw crearError(
+      'VALIDATION_ERROR',
+      `"${conceptoLimpio}" no existe en el catálogo de conceptos. Creálo primero con crearConcepto().`,
+      { campo: 'concepto' }
+    );
   }
   if (!esFechaIsoValida(fecha)) {
     throw crearError('VALIDATION_ERROR', 'La fecha no es una fecha válida.', { campo: 'fecha' });
@@ -1031,7 +1558,7 @@ export async function registrarCargo({ cliente_id, monto_centavos, fecha, servic
     db.run(
       `INSERT INTO movimientos (id, cliente_id, tipo, monto_centavos, fecha, servicio, referencia, nota, movimiento_original_id, created_at, updated_at, deleted_at)
        VALUES (?,?,?,?,?,?,?,?,NULL,?,?,NULL)`,
-      [id, cliente_id, 'CARGO', monto_centavos, fecha, servicio, referencia || null, nota || null, ts, ts]
+      [id, cliente_id, 'CARGO', monto_centavos, fecha, conceptoCatalogo.nombre, referencia || null, nota || null, ts, ts]
     );
     db.run('COMMIT;');
   } catch (e) {
@@ -1160,11 +1687,85 @@ export async function calcularSaldo(cliente_id, hastaFecha) {
   return calcularSaldoInterno(cliente_id, hastaFecha || hoy());
 }
 
+/**
+ * §2.9, Pantalla 2 (Persona): datos por día del mes para el calendario de
+ * movimientos — saldo acumulado con la fórmula de 2.2 (CARGO +, ABONO -,
+ * AJUSTE firmado), en UNA sola pasada (2 queries: saldo inicial + movimientos
+ * del mes; el resto es acumulación en memoria, nunca N queries por día).
+ *
+ * Entrega SOLO los días 1..fin-de-mes (el armado de la grilla completa,
+ * semana-a-semana empezando en lunes, con días de meses vecinos de relleno,
+ * es responsabilidad de la UI) más el saldo justo antes del día 1, para que
+ * la UI pueda derivar cualquier dato de los días de relleno si lo necesita.
+ *
+ * @param {string} cliente_id
+ * @param {string} anioMes 'YYYY-MM'
+ * @returns {Promise<{
+ *   saldoInicialCentavos: number,
+ *   dias: Map<string, {
+ *     movimientos: Array<{tipo:string, montoCentavos:number, concepto:?string, referencia:?string}>,
+ *     abonosCentavos: number,
+ *     cargosCentavos: number,
+ *     saldoAcumuladoCentavos: number
+ *   }>
+ * }>}
+ */
+export async function obtenerCalendarioMovimientos(cliente_id, anioMes) {
+  const [anioStr, mesStr] = anioMes.split('-');
+  const anio = Number(anioStr);
+  const mes = Number(mesStr);
+  const primerDia = `${anioStr}-${mesStr}-01`;
+  const ultimoDiaNum = new Date(anio, mes, 0).getDate();
+  const ultimoDia = `${anioStr}-${mesStr}-${pad2(ultimoDiaNum)}`;
+
+  const saldoInicialCentavos = calcularSaldoInterno(cliente_id, sumarDias(primerDia, -1));
+
+  const movimientosDelMes = todasLasFilas(
+    `SELECT tipo, monto_centavos, fecha, servicio, referencia FROM movimientos
+     WHERE cliente_id=? AND deleted_at IS NULL AND fecha BETWEEN ? AND ?
+     ORDER BY fecha ASC, created_at ASC`,
+    [cliente_id, primerDia, ultimoDia]
+  );
+
+  const movimientosPorFecha = new Map();
+  for (const m of movimientosDelMes) {
+    if (!movimientosPorFecha.has(m.fecha)) movimientosPorFecha.set(m.fecha, []);
+    movimientosPorFecha.get(m.fecha).push(m);
+  }
+
+  const dias = new Map();
+  let saldoAcumulado = saldoInicialCentavos;
+  for (const fecha of rango(primerDia, ultimoDia)) {
+    const movimientosDelDia = movimientosPorFecha.get(fecha) || [];
+    let abonosCentavos = 0;
+    let cargosCentavos = 0;
+    const movimientos = [];
+    for (const m of movimientosDelDia) {
+      saldoAcumulado += efectoSaldoMovimiento(m);
+      if (m.tipo === 'ABONO') abonosCentavos += m.monto_centavos;
+      if (m.tipo === 'CARGO') cargosCentavos += m.monto_centavos;
+      movimientos.push({
+        tipo: m.tipo,
+        montoCentavos: m.monto_centavos,
+        concepto: m.tipo === 'CARGO' ? m.servicio : null,
+        referencia: m.referencia,
+      });
+    }
+    dias.set(fecha, { movimientos, abonosCentavos, cargosCentavos, saldoAcumuladoCentavos: saldoAcumulado });
+  }
+
+  return { saldoInicialCentavos, dias };
+}
+
 // ============================================================
 // Reportes / pantallas
 // ============================================================
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY: la pantalla "Hoy" se retiró de
+ * la UI (navegación queda en Clientes + Resumen). Se mantiene funcional (no
+ * se borra) porque las pruebas LEGACY de dev-verify siguen usando esta
+ * función para proteger la integridad histórica del sistema de cuotas.
  * @param {string} fecha
  * @returns {Promise<{totalEsperadoCentavos:number, totalCobradoCentavos:number, clientes:object[]}>}
  */
@@ -1300,6 +1901,10 @@ export async function resumenMensual(anioMes) {
 }
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY: el nuevo calendario de la
+ * pantalla Persona (`obtenerCalendarioMovimientos`) muestra movimientos y
+ * saldo acumulado, no estados de cumplimiento de cuota. Se mantiene
+ * funcional (no se borra) por las pruebas LEGACY (protegen la historia).
  * @param {string} cliente_id
  * @param {string} fechaDesde
  * @param {string} fechaHasta
@@ -1324,6 +1929,10 @@ export async function obtenerEstadoCalendario(cliente_id, fechaDesde, fechaHasta
 }
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY: la pestaña "Calendario" global
+ * se retiró de la UI (navegación queda en Clientes + Resumen). Se mantiene
+ * funcional (no se borra) por las pruebas LEGACY (protegen la historia).
+ *
  * Calendario en modo GLOBAL (pantalla 6, Fase 12, gate del dueño 25-ago-2026):
  * agregado día por día de "cuántos clientes tenían obligación ese día" vs.
  * "cuántos cumplieron", para toda la cartera activa en un mes.
@@ -1427,6 +2036,9 @@ export async function obtenerCalendarioGlobal(anioMes) {
 // ============================================================
 
 /**
+ * @deprecated Retirado en v3, ver §2.9/STORY: el recordatorio por WhatsApp se
+ * retiró de la UI (generaba fricción con los clientes del gestor). Se
+ * mantiene funcional (no se borra) por si alguna prueba LEGACY la ejercita.
  * @param {string} cliente_id
  * @returns {Promise<string>}
  */

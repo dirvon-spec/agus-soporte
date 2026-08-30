@@ -1,7 +1,8 @@
-/* Agus Soporte — estilos (contrato 2.4/2.1 del PLAN-MVP.md).
-   Mobile-first real, variables CSS, colores semánticos del calendario,
-   barra inferior fija, botón flotante "+", vista imprimible limpia.
-   Sin frameworks CSS. Diseño sobrio y profesional. */
+/* Agus Soporte — estilos. Contrato vigente §2.9 (PLAN-MVP.md): rediseño
+   "sencillo" sin cuotas/frecuencias/WhatsApp/calendario-de-estados. Estilo
+   Excel: mínimos clics, datos a la vista. Mobile-first real, variables CSS,
+   sheets (bottom sheets) para altas/edición rápida, calendario de
+   movimientos por persona. Sin frameworks CSS. */
 
 :root {
   color-scheme: light dark;
@@ -20,24 +21,8 @@
   --color-error-bg: #ffebe9;
   --color-exito: #1a7f37;
   --color-exito-bg: #dafbe1;
-
-  /* Colores semánticos del calendario (2.1 / 2.5): los 5 estados de
-     calcularEstadosCalendario (calendar.js). Ajustados (pase visual, gate
-     25-ago-2026) tras medir contraste real texto/fondo en tema claro: los
-     valores originales de gracia-adelanto (3.29:1) y sin-obligacion (4.27:1)
-     no llegaban al mínimo WCAG AA de 4.5:1 para texto normal; pagado/parcial/
-     deuda pasaban por muy poco margen (4.5x:1). Verificado con la fórmula de
-     luminancia relativa de WCAG contra su propio *-bg; todos ahora ≥5.6:1. */
-  --color-estado-pagado: #116b2c;
-  --color-estado-pagado-bg: #dafbe1;
-  --color-estado-gracia-adelanto: #0757ba;
-  --color-estado-gracia-adelanto-bg: #ddf4ff;
-  --color-estado-parcial: #7d5300;
-  --color-estado-parcial-bg: #fff8c5;
-  --color-estado-deuda: #b91c26;
-  --color-estado-deuda-bg: #ffebe9;
-  --color-estado-sin-obligacion: #57606a;
-  --color-estado-sin-obligacion-bg: #f6f8fa;
+  --color-advertencia: #7d5300;
+  --color-advertencia-bg: #fff8c5;
 
   --espaciado-xs: 4px;
   --espaciado-sm: 8px;
@@ -48,20 +33,12 @@
   --radio-borde: 10px;
   --radio-borde-chico: 6px;
 
-  --altura-nav: 64px;
-  --tamano-fab: 56px;
+  --altura-nav: 60px;
 
   --sombra: 0 1px 3px rgba(27, 31, 36, 0.12);
   --sombra-elevada: 0 4px 12px rgba(27, 31, 36, 0.18);
 }
 
-/* ============================================================
-   Tema oscuro (prefers-color-scheme): el dueño prueba en claro, pero la app
-   corre en teléfonos con "oscuro" como preferencia del sistema — mismos
-   nombres de variable, valores redefinidos, contraste verificado para los
-   5 colores semánticos del calendario en ambos temas. Nada de esto toca
-   .toast a propósito (queda fijo en ambos temas, ver su regla).
-   ============================================================ */
 @media (prefers-color-scheme: dark) {
   :root {
     --color-fondo: #161b22;
@@ -78,17 +55,8 @@
     --color-error-bg: #3c1618;
     --color-exito: #56d364;
     --color-exito-bg: #0f2e1b;
-
-    --color-estado-pagado: #56d364;
-    --color-estado-pagado-bg: #10231a;
-    --color-estado-gracia-adelanto: #79c0ff;
-    --color-estado-gracia-adelanto-bg: #0d2540;
-    --color-estado-parcial: #e3b341;
-    --color-estado-parcial-bg: #2d2200;
-    --color-estado-deuda: #ff7b72;
-    --color-estado-deuda-bg: #3c1618;
-    --color-estado-sin-obligacion: #9198a1;
-    --color-estado-sin-obligacion-bg: #21262d;
+    --color-advertencia: #e3b341;
+    --color-advertencia-bg: #2d2200;
 
     --sombra: 0 1px 3px rgba(0, 0, 0, 0.5);
     --sombra-elevada: 0 4px 14px rgba(0, 0, 0, 0.65);
@@ -107,7 +75,7 @@ body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
-  line-height: 1.45;
+  line-height: 1.4;
   background: var(--color-fondo-secundario);
   color: var(--color-texto);
 }
@@ -118,8 +86,8 @@ body {
 }
 
 h1 {
-  font-size: 1.3rem;
-  margin: 0 0 var(--espaciado-md);
+  font-size: 1.2rem;
+  margin: 0 0 var(--espaciado-sm);
 }
 
 h2.titulo-seccion {
@@ -138,17 +106,13 @@ button {
 }
 
 /* ============================================================
-   Iconos SVG inline (componentes.js: Iconos.*)
+   Iconos SVG inline
    ============================================================ */
 
 .icono-svg {
   display: inline-block;
   vertical-align: -0.15em;
   flex-shrink: 0;
-}
-
-.badge-estado-icono {
-  display: inline-flex;
 }
 
 /* ============================================================
@@ -158,7 +122,7 @@ button {
 .pantalla-contenido {
   max-width: 720px;
   margin: 0 auto;
-  padding: var(--espaciado-md) var(--espaciado-md) calc(var(--altura-nav) + var(--tamano-fab) + var(--espaciado-lg));
+  padding: var(--espaciado-md) var(--espaciado-md) calc(var(--altura-nav) + var(--espaciado-md));
 }
 
 .pantalla {
@@ -178,7 +142,7 @@ button {
 }
 
 /* ============================================================
-   Navegación inferior fija + FAB
+   Navegación inferior fija (2 pestañas: Clientes, Resumen)
    ============================================================ */
 
 .nav-inferior {
@@ -207,34 +171,13 @@ button {
 }
 
 .nav-icono {
-  font-size: 1.25rem;
+  font-size: 1.2rem;
   line-height: 1;
 }
 
 .nav-item-activo {
   color: var(--color-primario);
   font-weight: 600;
-}
-
-.fab {
-  position: fixed;
-  right: var(--espaciado-lg);
-  bottom: calc(var(--altura-nav) + var(--espaciado-md));
-  width: var(--tamano-fab);
-  height: var(--tamano-fab);
-  border-radius: 50%;
-  border: none;
-  background: var(--color-primario);
-  color: var(--color-primario-texto);
-  font-size: 1.8rem;
-  line-height: 1;
-  box-shadow: var(--sombra-elevada);
-  cursor: pointer;
-  z-index: 100;
-}
-
-.fab:hover {
-  background: var(--color-primario-oscuro);
 }
 
 /* ============================================================
@@ -254,9 +197,9 @@ button {
 }
 
 .aviso-discreto {
-  background: var(--color-estado-parcial-bg);
-  color: var(--color-estado-parcial);
-  border-bottom: 1px solid var(--color-estado-parcial);
+  background: var(--color-advertencia-bg);
+  color: var(--color-advertencia);
+  border-bottom: 1px solid var(--color-advertencia);
 }
 
 .btn-cerrar-aviso {
@@ -311,15 +254,16 @@ button {
   background: var(--color-fondo);
   border: 1px solid var(--color-borde);
   border-radius: var(--radio-borde);
-  margin-bottom: var(--espaciado-md);
-  padding: var(--espaciado-sm) var(--espaciado-md);
+  margin-bottom: var(--espaciado-sm);
+  padding: var(--espaciado-xs) var(--espaciado-md);
 }
 
 .microcopy summary {
   cursor: pointer;
   font-weight: 600;
   color: var(--color-primario);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  padding: 4px 0;
 }
 
 .microcopy-contenido {
@@ -353,36 +297,6 @@ button {
 }
 
 /* ============================================================
-   Badge de estado (nunca solo color: siempre texto + ícono)
-   ============================================================ */
-
-.badge-estado {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.estado-pagado { background: var(--color-estado-pagado-bg); color: var(--color-estado-pagado); }
-.estado-gracia-adelanto { background: var(--color-estado-gracia-adelanto-bg); color: var(--color-estado-gracia-adelanto); }
-.estado-parcial { background: var(--color-estado-parcial-bg); color: var(--color-estado-parcial); }
-.estado-deuda { background: var(--color-estado-deuda-bg); color: var(--color-estado-deuda); }
-.estado-sin-obligacion { background: var(--color-estado-sin-obligacion-bg); color: var(--color-estado-sin-obligacion); }
-
-.leyenda-estados {
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--espaciado-sm);
-  padding: 0;
-  margin: var(--espaciado-sm) 0;
-}
-
-/* ============================================================
    Toast
    ============================================================ */
 
@@ -391,7 +305,7 @@ button {
   left: 50%;
   bottom: calc(var(--altura-nav) + var(--espaciado-md));
   transform: translateX(-50%);
-  z-index: 300;
+  z-index: 400;
   display: flex;
   flex-direction: column;
   gap: var(--espaciado-xs);
@@ -399,9 +313,6 @@ button {
 }
 
 .toast {
-  /* Deliberadamente fijo (no ligado a --color-texto): el toast es una
-     "snackbar" oscura en ambos temas, no una tarjeta que deba invertirse
-     con el modo oscuro. */
   background: #1a1a1a;
   color: #fff;
   padding: var(--espaciado-sm) var(--espaciado-md);
@@ -432,6 +343,7 @@ button {
   justify-content: center;
   gap: 6px;
   padding: 10px 16px;
+  min-height: 44px;
   border-radius: var(--radio-borde-chico);
   border: 1px solid transparent;
   font-size: 0.9rem;
@@ -465,8 +377,19 @@ button {
   background: var(--color-fondo-secundario);
 }
 
+.btn-peligro {
+  background: var(--color-error-bg);
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.btn-ancho {
+  width: 100%;
+}
+
 .btn-pequeno {
-  padding: 5px 10px;
+  padding: 6px 10px;
+  min-height: 36px;
   font-size: 0.78rem;
 }
 
@@ -480,6 +403,9 @@ button {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  color: var(--color-texto);
+  text-decoration: none;
+  flex-shrink: 0;
 }
 
 .btn-link {
@@ -537,23 +463,6 @@ button {
   resize: vertical;
 }
 
-.campo fieldset,
-fieldset.campo {
-  border: 1px solid var(--color-borde);
-  border-radius: var(--radio-borde-chico);
-  padding: var(--espaciado-sm) var(--espaciado-md);
-}
-
-.opcion-radio {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 400;
-  color: var(--color-texto);
-  font-size: 0.92rem;
-  padding: 4px 0;
-}
-
 .acciones-formulario {
   display: flex;
   gap: var(--espaciado-sm);
@@ -561,12 +470,8 @@ fieldset.campo {
   margin-top: var(--espaciado-sm);
 }
 
-.panel-formulario {
-  background: var(--color-fondo);
-  border: 1px solid var(--color-borde);
-  border-radius: var(--radio-borde);
-  padding: var(--espaciado-md);
-  margin-bottom: var(--espaciado-md);
+.acciones-formulario-columna {
+  flex-direction: column;
 }
 
 .error-general,
@@ -582,40 +487,186 @@ fieldset.campo {
   border-radius: var(--radio-borde-chico);
 }
 
-.chip-cliente-seleccionado {
+.fila-nuevo-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espaciado-sm);
+  margin-top: var(--espaciado-sm);
+  padding: var(--espaciado-sm);
+  background: var(--color-fondo-secundario);
+  border-radius: var(--radio-borde-chico);
+}
+
+.fila-nuevo-inline input[type="text"] {
+  flex: 1;
+  min-width: 140px;
+  padding: 8px;
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde-chico);
+  background: var(--color-fondo);
+  color: var(--color-texto);
+}
+
+.fila-nueva-categoria-inline {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* ============================================================
+   Chips (filtro de categoría, selector de concepto/categoría)
+   ============================================================ */
+
+.chips-fila {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--espaciado-sm);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  min-height: 40px;
+  border-radius: 999px;
+  border: 1px solid var(--color-borde);
+  background: var(--color-fondo);
+  color: var(--color-texto);
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip-activo {
+  background: var(--color-primario);
+  border-color: var(--color-primario);
+  color: var(--color-primario-texto);
+}
+
+.chip-activo .bolita-chip {
+  outline: 2px solid var(--color-primario-texto);
+  outline-offset: 1px;
+}
+
+.chip-nuevo {
+  border-style: dashed;
+  color: var(--color-primario);
+}
+
+/* ============================================================
+   Bolitas de categoría
+   ============================================================ */
+
+.bolita {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.bolita-neutra {
+  background: var(--color-texto-secundario);
+  opacity: 0.4;
+}
+
+.bolita-chip {
+  width: 9px;
+  height: 9px;
+}
+
+.bolita-grande {
+  width: 16px;
+  height: 16px;
+}
+
+.paleta-colores {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: var(--espaciado-sm);
+}
+
+.paleta-colores-chica {
+  grid-template-columns: repeat(6, 1fr);
+  margin: var(--espaciado-xs) 0;
+}
+
+.bolita-color {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.bolita-color-activa {
+  border-color: var(--color-texto);
+}
+
+.bolita-color-check {
+  display: inline-flex;
+}
+
+/* ============================================================
+   Bottom sheet (modal deslizable)
+   ============================================================ */
+
+.sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0);
+  z-index: 500;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transition: background 0.2s ease;
+}
+
+.sheet-overlay-visible {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.sheet-panel {
+  background: var(--color-fondo);
+  color: var(--color-texto);
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  border-radius: var(--radio-borde) var(--radio-borde) 0 0;
+  padding: var(--espaciado-sm) var(--espaciado-md) var(--espaciado-lg);
+  box-shadow: var(--sombra-elevada);
+  transform: translateY(100%);
+  transition: transform 0.2s ease;
+}
+
+.sheet-overlay-visible .sheet-panel {
+  transform: translateY(0);
+}
+
+.sheet-agarre {
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-borde);
+  margin: 0 auto var(--espaciado-sm);
+}
+
+.sheet-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--espaciado-sm);
-  padding: 10px;
-  min-height: 44px;
-  width: 100%;
-  border: 1px solid var(--color-borde);
-  border-radius: var(--radio-borde-chico);
-  background: var(--color-fondo-secundario);
-  /* reset de <button>: el selector de cliente compartido (componentes.js) lo
-     usa como control táctil completo, no solo como texto informativo */
-  font: inherit;
-  color: var(--color-texto);
-  text-align: left;
-  cursor: pointer;
+  margin-bottom: var(--espaciado-md);
 }
 
-.resultados-busqueda {
-  margin-top: 4px;
-}
-
-/* Filas del selector de cliente compartido (componentes.js): mínimo táctil 44px. */
-.selector-cliente-opcion {
-  min-height: 44px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.btn-mostrar-mas {
-  width: 100%;
-  margin-top: var(--espaciado-sm);
+.sheet-header h2 {
+  font-size: 1.05rem;
+  margin: 0;
 }
 
 /* ============================================================
@@ -637,16 +688,6 @@ fieldset.campo {
   border-radius: 0;
 }
 
-/* Va DESPUÉS de .lista a propósito: .lista fija "overflow: hidden" y, con
-   igual especificidad, la regla que aparece más tarde en la hoja gana el
-   empate — así esta sí puede habilitar el scroll vertical interno cuando el
-   selector de cliente compartido (componentes.js) acumula muchas páginas de
-   resultados ("Mostrar más" con 100+ clientes), sin desbordar la pantalla. */
-.lista-resultados-busqueda {
-  max-height: 55vh;
-  overflow-y: auto;
-}
-
 .lista-item {
   padding: var(--espaciado-sm) var(--espaciado-md);
   border-bottom: 1px solid var(--color-borde);
@@ -654,47 +695,6 @@ fieldset.campo {
 
 .lista-item:last-child {
   border-bottom: none;
-}
-
-.lista-item-clickeable {
-  cursor: pointer;
-}
-
-.lista-item-clickeable:hover,
-.lista-item-clickeable:focus-visible {
-  background: var(--color-fondo-secundario);
-}
-
-.lista-item-principal {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--espaciado-sm);
-  font-weight: 600;
-}
-
-.lista-item-secundaria {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--espaciado-sm);
-  color: var(--color-texto-secundario);
-  font-size: 0.82rem;
-  margin-top: 2px;
-  flex-wrap: wrap;
-}
-
-.lista-item-nombre {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.lista-item-historial {
-  position: relative;
-}
-
-.etiqueta-ajusta {
-  font-style: italic;
 }
 
 .monto-positivo { color: var(--color-exito); }
@@ -719,85 +719,223 @@ fieldset.campo {
 }
 
 /* ============================================================
-   Pantalla Hoy
+   Pantalla Clientes: chips de filtro + lista agrupada + arrastre
    ============================================================ */
 
-.encabezado-hoy {
+.cabecera-columnas {
+  font-size: 0.75rem;
+  color: var(--color-texto-secundario);
+  margin: var(--espaciado-md) 0 var(--espaciado-xs);
+  text-align: right;
+}
+
+.grupo-clientes {
+  margin-bottom: var(--espaciado-lg);
+}
+
+.grupo-titulo {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--espaciado-sm);
-  margin-bottom: var(--espaciado-md);
+  font-size: 0.95rem;
+  margin: 0 0 var(--espaciado-sm);
 }
 
-.encabezado-hoy-titulo {
-  text-align: center;
-  flex: 1;
-}
-
-.encabezado-hoy-titulo h1 {
-  margin: 0;
-}
-
-.encabezado-hoy-fecha {
-  margin: 2px 0;
-  color: var(--color-texto-secundario);
-  font-size: 0.9rem;
-  text-transform: capitalize;
-}
-
-.tarjetas-resumen {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--espaciado-sm);
-  margin-bottom: var(--espaciado-md);
-}
-
-.tarjeta-resumen {
-  background: var(--color-fondo);
-  border: 1px solid var(--color-borde);
-  border-radius: var(--radio-borde);
-  padding: var(--espaciado-md);
+.fila-cliente {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  padding: var(--espaciado-sm);
 }
 
-.tarjeta-resumen-etiqueta {
-  font-size: 0.78rem;
+.fila-cliente-principal {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+}
+
+.asa-arrastre {
+  display: inline-flex;
   color: var(--color-texto-secundario);
+  cursor: grab;
+  padding: 6px;
+  margin: -6px;
+  touch-action: none;
+  flex-shrink: 0;
 }
 
-.tarjeta-resumen-monto {
-  font-size: 1.3rem;
+.fila-cliente-nombre {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--color-texto);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.fila-cliente-saldo {
+  font-weight: 700;
+  font-size: 0.92rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.fila-cliente-botones {
+  display: flex;
+  gap: var(--espaciado-sm);
+  padding-left: calc(10px + 6px + 8px + var(--espaciado-sm)); /* alinea bajo el nombre (agarre + bolita + gaps) */
+}
+
+.btn-dato {
+  flex: 1;
+  min-height: 40px;
+  padding: 6px 10px;
+  border-radius: var(--radio-borde-chico);
+  border: 1px solid var(--color-borde);
+  background: var(--color-fondo-secundario);
+  color: var(--color-texto);
+  font-size: 0.78rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.btn-dato strong {
+  font-size: 0.85rem;
+}
+
+.btn-dato-abono strong { color: var(--color-exito); }
+.btn-dato-cargo strong { color: var(--color-error); }
+
+.fila-arrastrando {
+  opacity: 0.6;
+  background: var(--color-fondo-secundario);
+}
+
+.fila-suma-grupo {
+  background: var(--color-fondo-secundario);
+  font-weight: 600;
+}
+
+.fila-suma-etiqueta {
   font-weight: 700;
 }
 
+.fila-suma-datos {
+  padding-left: 0;
+  font-size: 0.78rem;
+  color: inherit;
+  opacity: 0.85;
+  justify-content: flex-start;
+  gap: var(--espaciado-md);
+}
+
+.fila-suma-datos span {
+  background: none;
+  border: none;
+  padding: 0;
+  min-height: 0;
+}
+
 /* ============================================================
-   Pantalla Detalle de cliente
+   Panel rápido (abono/cargo)
    ============================================================ */
 
-.encabezado-cliente {
+.campo-monto-grande {
+  align-items: center;
+}
+
+.input-monto-grande {
+  text-align: center;
+  font-size: 2.2rem;
+  font-weight: 700;
+  padding: var(--espaciado-md) !important;
+}
+
+/* ============================================================
+   Pantalla Persona: encabezado, tarjeta, calendario mensual
+   ============================================================ */
+
+.pantalla-persona .microcopy {
+  margin-bottom: var(--espaciado-xs);
+}
+
+.encabezado-persona {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-sm);
+}
+
+.encabezado-persona-nombre {
+  margin: 0;
+  font-size: 1.1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tarjeta-persona {
   background: var(--color-fondo);
   border: 1px solid var(--color-borde);
   border-radius: var(--radio-borde);
-  padding: var(--espaciado-md);
-  margin-bottom: var(--espaciado-md);
+  padding: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-sm);
 }
 
-.encabezado-cliente h1 {
-  margin-bottom: 2px;
+.tarjeta-persona-botones {
+  display: flex;
+  gap: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-sm);
 }
 
-.encabezado-cliente-telefono {
-  margin: 0 0 var(--espaciado-sm);
+.btn-dato-grande {
+  flex: 1;
+  min-height: 44px;
+  padding: 6px 8px;
+  border-radius: var(--radio-borde-chico);
+  border: 1px solid var(--color-borde);
+  background: var(--color-fondo-secundario);
+  color: var(--color-texto);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  line-height: 1.15;
+}
+
+.btn-dato-grande span {
+  font-size: 0.72rem;
   color: var(--color-texto-secundario);
 }
 
-.encabezado-cliente-saldo {
+.btn-dato-grande strong {
+  font-size: 1rem;
+}
+
+#btn-tarjeta-abono strong { color: var(--color-exito); }
+#btn-tarjeta-cargo strong { color: var(--color-error); }
+
+.tarjeta-persona-saldo {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: baseline;
+  justify-content: space-between;
+  border-top: 1px dashed var(--color-borde);
+  padding-top: 6px;
 }
 
 .etiqueta-saldo {
@@ -806,198 +944,218 @@ fieldset.campo {
 }
 
 .monto-grande {
-  font-size: 1.8rem;
+  font-size: 1.3rem;
   font-weight: 700;
 }
 
-.encabezado-cliente-cuota {
-  margin: var(--espaciado-xs) 0 0;
-  color: var(--color-texto-secundario);
-}
-
-.encabezado-cliente-notas {
-  margin-top: var(--espaciado-sm);
-  padding-top: var(--espaciado-sm);
-  border-top: 1px dashed var(--color-borde);
-}
-
-.texto-nota-cliente {
-  margin: 2px 0 0;
-  font-size: 0.88rem;
-  white-space: pre-wrap;
-}
-
-.texto-cliente-baja {
-  color: var(--color-texto-secundario);
-  font-style: italic;
-}
-
-.fila-cliente-baja {
-  opacity: 0.65;
-}
-
-.acciones-cliente {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--espaciado-sm);
-  margin-bottom: var(--espaciado-md);
-}
-
-.calendario-wrap {
+.calendario-mensual-wrap {
   background: var(--color-fondo);
   border: 1px solid var(--color-borde);
   border-radius: var(--radio-borde);
-  padding: var(--espaciado-md);
-  margin-bottom: var(--espaciado-md);
+  padding: var(--espaciado-sm);
+  position: relative;
 }
 
 .calendario-nav {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--espaciado-sm);
+  margin-bottom: 6px;
 }
 
 .calendario-mes-titulo {
   font-weight: 600;
+  font-size: 0.92rem;
   text-transform: capitalize;
 }
 
-.calendario-grilla {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 3px;
+.mes-grilla-wrap {
+  width: 100%;
 }
 
-.calendario-encabezado-dia {
+.mes-grilla {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.mes-grilla-encabezado {
+  margin-bottom: 2px;
+}
+
+.mes-encabezado-dia {
   text-align: center;
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   color: var(--color-texto-secundario);
   padding: 2px 0;
 }
 
-.calendario-celda {
+.mes-celda {
   aspect-ratio: 1;
-  min-height: 44px; /* mínimo táctil (A-006) */
-}
-
-.calendario-celda-vacia {
-  background: transparent;
-}
-
-.calendario-dia {
+  min-height: 44px;
   border: 1px solid var(--color-borde);
-  border-radius: var(--radio-borde-chico);
+  border-radius: 4px;
   background: var(--color-fondo);
+  color: var(--color-texto);
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  position: relative;
-  padding: 2px;
-  font-size: 0.8rem;
+  padding: 1px;
+  overflow: hidden;
 }
 
-.calendario-dia-seleccionado {
-  outline: 2px solid var(--color-primario);
-  outline-offset: -2px;
+.mes-celda-vacia {
+  border: none;
+  background: transparent;
+  cursor: default;
 }
 
-.calendario-dia-numero {
-  font-size: 0.92rem;
+.mes-celda-numero {
+  font-size: 0.68rem;
   font-weight: 600;
   line-height: 1;
 }
 
-/* Segunda línea chica dentro de la casilla: monto abonado (modo persona) o
-   fracción cumplieron/esperados (modo todas las personas). Reutilizado por
-   pantalla-calendario.js en ambos modos. Tamaño y contraste subidos a pedido
-   del dueño (feedback en teléfono real, "casi no se ven") — sigue en 44px de
-   celda (ver .calendario-celda) sin desbordar. */
-.calendario-dia-dato {
-  font-size: 0.74rem;
-  font-weight: 600;
-  line-height: 1.1;
-  margin-top: 1px;
-  white-space: nowrap;
+.mes-celda-datos {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.05;
   max-width: 100%;
+}
+
+.mes-dato-abono,
+.mes-dato-cargo {
+  font-size: 0.5rem;
+  font-weight: 600;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
-.calendario-dia:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
+.mes-dato-abono { color: var(--color-exito); }
+.mes-dato-cargo { color: var(--color-error); }
 
-.calendario-dia.estado-fondo-pagado { background: var(--color-estado-pagado-bg); color: var(--color-estado-pagado); }
-.calendario-dia.estado-fondo-gracia-adelanto { background: var(--color-estado-gracia-adelanto-bg); color: var(--color-estado-gracia-adelanto); }
-.calendario-dia.estado-fondo-parcial { background: var(--color-estado-parcial-bg); color: var(--color-estado-parcial); }
-.calendario-dia.estado-fondo-deuda { background: var(--color-estado-deuda-bg); color: var(--color-estado-deuda); }
-.calendario-dia.estado-fondo-sin-obligacion { background: var(--color-estado-sin-obligacion-bg); color: var(--color-estado-sin-obligacion); }
-
-.marcador-cambio-cuota {
-  position: absolute;
-  top: 1px;
-  right: 3px;
-  font-size: 0.5rem;
-}
-
-.calendario-leyenda {
-  margin-top: var(--espaciado-sm);
-}
-
-.calendario-aviso-alcance {
-  font-size: 0.78rem;
+.mes-celda-saldo {
+  font-size: 0.48rem;
   color: var(--color-texto-secundario);
-  margin: var(--espaciado-xs) 0 0;
+  line-height: 1;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
-.panel-dia-seleccionado {
-  margin-top: var(--espaciado-sm);
-  border-top: 1px solid var(--color-borde);
-  padding-top: var(--espaciado-sm);
-}
+.mes-celda-verde { background: var(--color-exito-bg); }
+.mes-celda-rojo { background: var(--color-error-bg); }
+.mes-celda-mixto { background: linear-gradient(135deg, var(--color-exito-bg) 0%, var(--color-exito-bg) 48%, var(--color-error-bg) 52%, var(--color-error-bg) 100%); }
+.mes-celda-neutro { background: var(--color-fondo); }
 
-.panel-dia-seleccionado-header {
+/* ============================================================
+   Switch (preferencia persistente: saldo diario)
+   ============================================================ */
+
+.switch-fila {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--espaciado-xs);
-}
-
-.panel-ajuste {
-  margin: var(--espaciado-sm) calc(var(--espaciado-md) * -1) calc(var(--espaciado-sm) * -1);
-  border-top: 1px dashed var(--color-borde);
-  border-radius: 0;
-}
-
-.previsualizacion-ajuste {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--color-primario);
-}
-
-.previsualizacion-invalida {
-  color: var(--color-error);
-}
-
-.panel-colapsable {
-  background: var(--color-fondo);
-  border: 1px solid var(--color-borde);
-  border-radius: var(--radio-borde);
-  padding: var(--espaciado-sm) var(--espaciado-md);
-  margin-top: var(--espaciado-md);
-}
-
-.panel-colapsable summary {
+  justify-content: space-between;
+  gap: var(--espaciado-sm);
+  margin-top: var(--espaciado-sm);
+  font-size: 0.82rem;
   cursor: pointer;
-  font-weight: 600;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.switch-riel {
+  position: absolute;
+  inset: 0;
+  background: var(--color-borde);
+  border-radius: 999px;
+  transition: background 0.15s ease;
+}
+
+.switch-riel::before {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 2px;
+  top: 2px;
+  background: var(--color-fondo);
+  border-radius: 50%;
+  transition: transform 0.15s ease;
+  box-shadow: var(--sombra);
+}
+
+.switch input:checked + .switch-riel {
+  background: var(--color-primario);
+}
+
+.switch input:checked + .switch-riel::before {
+  transform: translateX(18px);
 }
 
 /* ============================================================
-   Tablas (Resumen, historial de acuerdos, estado de cuenta)
+   Popover de día (calendario Persona)
+   ============================================================ */
+
+.popover-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: var(--radio-borde);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  padding: var(--espaciado-md);
+}
+
+.popover-dia {
+  background: var(--color-fondo);
+  border-radius: var(--radio-borde);
+  box-shadow: var(--sombra-elevada);
+  padding: var(--espaciado-md);
+  width: 100%;
+  max-width: 320px;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.popover-dia-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--espaciado-sm);
+}
+
+.popover-dia-saldo {
+  margin: var(--espaciado-sm) 0 0;
+  font-size: 0.88rem;
+  border-top: 1px dashed var(--color-borde);
+  padding-top: var(--espaciado-sm);
+}
+
+/* ============================================================
+   Tablas (Resumen, estado de cuenta)
    ============================================================ */
 
 .tabla-scroll {
@@ -1028,9 +1186,62 @@ fieldset.campo {
   color: var(--color-texto);
 }
 
+.texto-cliente-baja {
+  color: var(--color-texto-secundario);
+  font-style: italic;
+}
+
+.fila-cliente-baja {
+  opacity: 0.65;
+}
+
+/* ============================================================
+   Resumen: tarjetas de totales (reutilizadas también en encabezados simples)
+   ============================================================ */
+
+.tarjetas-resumen {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--espaciado-sm);
+  margin-bottom: var(--espaciado-md);
+}
+
+.tarjeta-resumen {
+  background: var(--color-fondo);
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde);
+  padding: var(--espaciado-md);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tarjeta-resumen-etiqueta {
+  font-size: 0.78rem;
+  color: var(--color-texto-secundario);
+}
+
+.tarjeta-resumen-monto {
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
 /* ============================================================
    Ajustes / Respaldo
    ============================================================ */
+
+.panel-colapsable {
+  background: var(--color-fondo);
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde);
+  padding: var(--espaciado-sm) var(--espaciado-md);
+  margin-top: var(--espaciado-md);
+}
+
+.panel-colapsable summary {
+  cursor: pointer;
+  font-weight: 600;
+}
 
 .acciones-respaldo {
   display: flex;
@@ -1045,7 +1256,7 @@ fieldset.campo {
 }
 
 .aviso-persistencia-denegada {
-  color: var(--color-estado-parcial);
+  color: var(--color-advertencia);
   font-weight: 600;
 }
 
@@ -1058,7 +1269,7 @@ fieldset.campo {
     grid-template-columns: repeat(3, 1fr);
   }
 
-  .acciones-formulario {
+  .acciones-formulario:not(.acciones-formulario-columna) {
     justify-content: flex-start;
   }
 }
@@ -1069,7 +1280,6 @@ fieldset.campo {
 
 @media print {
   #nav-inferior,
-  .fab,
   .aviso-banner,
   .microcopy,
   .no-imprimir {
@@ -1077,8 +1287,6 @@ fieldset.campo {
   }
 
   body {
-    /* Fuerza claro para imprimir aunque el sistema esté en modo oscuro
-       (el papel es blanco de cualquier manera). */
     background: #fff;
     color: #1a1a1a;
   }
@@ -1092,4 +1300,11 @@ fieldset.campo {
   .hoja-imprimible .tabla td {
     white-space: normal;
   }
+}
+
+.acciones-impresion {
+  display: flex;
+  gap: var(--espaciado-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--espaciado-md);
 }

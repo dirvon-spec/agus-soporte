@@ -11,8 +11,6 @@
 import { uuidV7 } from './utils/uuid.js';
 import { hoy, sumarDias, rango, diaDeSemana } from './utils/date.js';
 
-const SERVICIOS = ['AGUA', 'LUZ', 'INTERNET', 'GAS', 'CABLE', 'OTRO'];
-
 function ts(fechaIso, hhmmss = '09:00:00') {
   return `${fechaIso}T${hhmmss}.000Z`;
 }
@@ -21,15 +19,27 @@ function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-function nuevoCliente({ nombre, telefono, notas, fechaAlta }) {
+function nuevoCliente({ nombre, telefono, notas, fechaAlta, categoriaId = null, orden = null }) {
   return {
     id: uuidV7(),
     nombre,
     telefono: telefono || null,
+    categoria_id: categoriaId,
+    orden,
     notas: notas || null,
     created_at: ts(fechaAlta),
     updated_at: ts(fechaAlta),
   };
+}
+
+/** §2.9: categoría del seed (paleta definida en la UI; acá solo se usa un nombre de color plausible). */
+function nuevaCategoria({ nombre, color, fechaAlta }) {
+  return { id: uuidV7(), nombre, color, created_at: ts(fechaAlta), updated_at: ts(fechaAlta) };
+}
+
+/** §2.9: concepto del catálogo (reemplaza el enum fijo de `servicio`). */
+function nuevoConcepto({ nombre, fechaAlta }) {
+  return { id: uuidV7(), nombre, created_at: ts(fechaAlta), updated_at: ts(fechaAlta) };
 }
 
 function nuevoAcuerdo({
@@ -103,7 +113,12 @@ function nuevoMovimiento({ clienteId, tipo, montoCentavos, fecha, servicio = nul
  * Genera el set completo de datos de ejemplo, cubriendo los 9 casos
  * obligatorios de 2.6 entre 10 clientes con ~2 meses de movimientos, más 2
  * clientes adicionales de §2.8 (frecuencia SEMANAL y MENSUAL) — 12 en total.
- * @returns {{clientes: object[], acuerdos: object[], movimientos: object[]}}
+ * §2.9: además siembra 3-4 categorías (con color de paleta), orden manual
+ * variado (deliberadamente NO alfabético, para probar que el orden es
+ * genuinamente manual) y un catálogo de 4 conceptos (Luz/Agua/Internet/
+ * Préstamo). NO crea acuerdos nuevos — los 12 clientes conservan los mismos
+ * acuerdos de siempre (histórico, append-only, ya no se usa para altas).
+ * @returns {{clientes: object[], acuerdos: object[], movimientos: object[], categorias: object[], conceptos: object[]}}
  */
 export function generarSeed() {
   const clientes = [];
@@ -113,12 +128,30 @@ export function generarSeed() {
   const hoyStr = hoy();
   const inicioRango = sumarDias(hoyStr, -60);
 
+  // ---- §2.9: categorías y catálogo de conceptos ----
+  const categorias = [
+    nuevaCategoria({ nombre: 'Confiables', color: 'verde', fechaAlta: inicioRango }),
+    nuevaCategoria({ nombre: 'Regulares', color: 'azul', fechaAlta: inicioRango }),
+    nuevaCategoria({ nombre: 'Riesgo', color: 'rojo', fechaAlta: inicioRango }),
+    nuevaCategoria({ nombre: 'Nuevos', color: 'amarillo', fechaAlta: inicioRango }),
+  ];
+  const [catConfiables, catRegulares, catRiesgo, catNuevos] = categorias;
+
+  const conceptos = [
+    nuevoConcepto({ nombre: 'Luz', fechaAlta: inicioRango }),
+    nuevoConcepto({ nombre: 'Agua', fechaAlta: inicioRango }),
+    nuevoConcepto({ nombre: 'Internet', fechaAlta: inicioRango }),
+    nuevoConcepto({ nombre: 'Préstamo', fechaAlta: inicioRango }),
+  ];
+
   // ---- Caso 1: cliente siempre PAGADO (abona su cuota todos los días) ----
   const cliente1 = nuevoCliente({
     nombre: 'Rosa Martínez',
     telefono: '5215512340001',
     notas: 'Cliente puntual, paga todos los días.',
     fechaAlta: inicioRango,
+    categoriaId: catConfiables.id,
+    orden: 1,
   });
   clientes.push(cliente1);
   const cuota1 = 5000; // $50.00
@@ -134,6 +167,8 @@ export function generarSeed() {
     telefono: '5215512340002',
     notas: 'Adelantó varios días de golpe.',
     fechaAlta: inicio2,
+    categoriaId: catRiesgo.id,
+    orden: 2,
   });
   clientes.push(cliente2);
   const cuota2 = 4000; // $40.00
@@ -150,6 +185,8 @@ export function generarSeed() {
     telefono: '5215512340003',
     notas: 'Abona menos que la cuota casi todos los días.',
     fechaAlta: inicio3,
+    categoriaId: catRiesgo.id,
+    orden: 0,
   });
   clientes.push(cliente3);
   const cuota3 = 6000; // $60.00
@@ -168,6 +205,8 @@ export function generarSeed() {
     telefono: '5215512340004',
     notas: 'Dejó de abonar hace varias semanas.',
     fechaAlta: inicio4,
+    categoriaId: catRiesgo.id,
+    orden: 1,
   });
   clientes.push(cliente4);
   const cuota4 = 3000; // $30.00
@@ -184,6 +223,8 @@ export function generarSeed() {
     telefono: '5215512340005',
     notas: 'Cliente nueva, alta reciente.',
     fechaAlta: inicio5,
+    categoriaId: catConfiables.id,
+    orden: 2,
   });
   clientes.push(cliente5);
   const cuota5 = 4500; // $45.00
@@ -200,6 +241,8 @@ export function generarSeed() {
     telefono: '5215512340006',
     notas: 'Renegoció su cuota diaria.',
     fechaAlta: inicio6,
+    categoriaId: catRegulares.id,
+    orden: 1,
   });
   clientes.push(cliente6);
   const cuota6a = 3500; // $35.00
@@ -220,6 +263,8 @@ export function generarSeed() {
     telefono: '5215512340007',
     notas: 'Se le cargó un servicio de más y se corrigió con un ajuste.',
     fechaAlta: inicio7,
+    categoriaId: catRegulares.id,
+    orden: 3,
   });
   clientes.push(cliente7);
   const cuota7 = 5000; // $50.00
@@ -233,7 +278,7 @@ export function generarSeed() {
     tipo: 'CARGO',
     montoCentavos: 12000,
     fecha: fechaCargo7,
-    servicio: SERVICIOS[1], // LUZ
+    servicio: 'Luz', // coincide con el concepto sembrado en el catálogo (§2.9)
     referencia: 'F-00123',
     nota: 'Pago de luz',
   });
@@ -256,6 +301,8 @@ export function generarSeed() {
     telefono: null,
     notas: 'Todavía no dejó su número de teléfono.',
     fechaAlta: inicio8,
+    categoriaId: catRegulares.id,
+    orden: 0,
   });
   clientes.push(cliente8);
   const cuota8 = 2500; // $25.00
@@ -266,7 +313,14 @@ export function generarSeed() {
 
   // ---- Caso 9: clientes de relleno (para probar listas/paginación) ----
   const inicio9 = sumarDias(hoyStr, -5);
-  const cliente9 = nuevoCliente({ nombre: 'Sofía Ramírez', telefono: '5215512340009', notas: null, fechaAlta: inicio9 });
+  const cliente9 = nuevoCliente({
+    nombre: 'Sofía Ramírez',
+    telefono: '5215512340009',
+    notas: null,
+    fechaAlta: inicio9,
+    categoriaId: catConfiables.id,
+    orden: 0,
+  });
   clientes.push(cliente9);
   const cuota9 = 2000; // $20.00
   acuerdos.push(nuevoAcuerdo({ clienteId: cliente9.id, montoCuotaCentavos: cuota9, vigenteDesde: inicio9 }));
@@ -275,7 +329,9 @@ export function generarSeed() {
   }
 
   const inicio10 = sumarDias(hoyStr, -3);
-  const cliente10 = nuevoCliente({ nombre: 'Tomás Vega', telefono: '5215512340010', notas: null, fechaAlta: inicio10 });
+  // Deliberadamente SIN categoría (categoriaId por defecto null): prueba el
+  // grupo "Sin categoría" del rediseño de §2.9.
+  const cliente10 = nuevoCliente({ nombre: 'Tomás Vega', telefono: '5215512340010', notas: null, fechaAlta: inicio10, orden: 0 });
   clientes.push(cliente10);
   const cuota10 = 15000; // $150.00, tope superior del rango de cuotas
   acuerdos.push(nuevoAcuerdo({ clienteId: cliente10.id, montoCuotaCentavos: cuota10, vigenteDesde: inicio10 }));
@@ -289,6 +345,8 @@ export function generarSeed() {
     telefono: '5215512340011',
     notas: 'Cobro semanal, todos los viernes.',
     fechaAlta: primerViernes,
+    categoriaId: catRegulares.id,
+    orden: 2,
   });
   clientes.push(cliente11);
   const cuotaSemanal = 20000; // $200.00 por semana
@@ -307,6 +365,8 @@ export function generarSeed() {
     telefono: '5215512340012',
     notas: 'Cobro mensual, día 31 (se ajusta al último día en meses cortos).',
     fechaAlta: inicioMensual,
+    categoriaId: catNuevos.id,
+    orden: 0,
   });
   clientes.push(cliente12);
   const cuotaMensual = 80000; // $800.00 por mes
@@ -317,5 +377,5 @@ export function generarSeed() {
     movimientos.push(nuevoMovimiento({ clienteId: cliente12.id, tipo: 'ABONO', montoCentavos: cuotaMensual, fecha, nota: 'Cuota mensual' }));
   }
 
-  return { clientes, acuerdos, movimientos };
+  return { clientes, acuerdos, movimientos, categorias, conceptos };
 }

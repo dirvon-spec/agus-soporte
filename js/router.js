@@ -1,60 +1,45 @@
-// Router por hash (contrato 2.4 del PLAN-MVP.md): #/hoy, #/clientes,
-// #/clientes/:id, #/nuevo-movimiento, #/resumen. Además arma el "shell" fijo
-// de la app: barra inferior (Hoy/Clientes/Resumen), botón flotante "+"
-// (visible en Hoy y Clientes), aviso de instancia única (modo solo-lectura)
-// y aviso discreto de almacenamiento persistente denegado.
+// Router por hash — contrato vigente §2.9 (PLAN-MVP.md): rediseño "sencillo",
+// navegación en 2 pestañas (Clientes, Resumen). Se retiraron Hoy y Calendario
+// junto con todo el sistema de cuotas/frecuencias y WhatsApp — ver STORY.md.
 //
-// Error boundary global (mitigación F2): el render de cada pantalla va
-// envuelto en try/catch; una excepción no capturada muestra un estado de
-// error recuperable ("Algo salió mal. [Volver a Hoy]") con el detalle
-// técnico en un <details> colapsado — nunca una pantalla en blanco.
+// Rutas: #/clientes (inicio y default), #/clientes/:id (pantalla Persona),
+// #/clientes/:id/imprimir (estado de cuenta imprimible, sin botón visible en
+// la UI pero conservado — es gratis mantenerlo), #/resumen.
+//
+// Error boundary global: el render de cada pantalla va envuelto en
+// try/catch; una excepción no capturada muestra un estado de error
+// recuperable ("Algo salió mal. [Volver a Clientes]") con el detalle técnico
+// en un <details> colapsado — nunca una pantalla en blanco.
 
 import { estaSoloLectura } from './db.js';
-import { escapeHtml, Iconos } from './ui/componentes.js';
-import { renderPantallaHoy } from './ui/pantalla-hoy.js';
-import { renderPantallaCalendario } from './ui/pantalla-calendario.js';
+import { escapeHtml, Iconos, cerrarSheet } from './ui/componentes.js';
 import { renderPantallaClientes } from './ui/pantalla-clientes.js';
 import { renderPantallaClienteDetalle, renderEstadoCuentaImprimible } from './ui/pantalla-cliente-detalle.js';
-import { renderPantallaMovimientoForm } from './ui/pantalla-movimiento-form.js';
 import { renderPantallaResumen } from './ui/pantalla-resumen.js';
 
 const RUTAS = [
-  { patron: /^#\/hoy\/(\d{4}-\d{2}-\d{2})$/, tab: 'hoy', fab: true,
-    render: (m, el) => renderPantallaHoy(el, { fecha: m[1] }) },
-  { patron: /^#\/hoy$/, tab: 'hoy', fab: true,
-    render: (m, el) => renderPantallaHoy(el, {}) },
-  { patron: /^#\/calendario\/([^/]+)$/, tab: 'calendario', fab: false,
-    render: (m, el) => renderPantallaCalendario(el, { clienteId: decodeURIComponent(m[1]) }) },
-  { patron: /^#\/calendario$/, tab: 'calendario', fab: false,
-    render: (m, el) => renderPantallaCalendario(el, {}) },
-  { patron: /^#\/clientes\/([^/]+)\/imprimir$/, tab: 'clientes', fab: false,
+  { patron: /^#\/clientes\/([^/]+)\/imprimir$/, tab: 'clientes',
     render: (m, el) => renderEstadoCuentaImprimible(el, { id: decodeURIComponent(m[1]) }) },
-  { patron: /^#\/clientes\/([^/]+)$/, tab: 'clientes', fab: false,
+  { patron: /^#\/clientes\/([^/]+)$/, tab: 'clientes',
     render: (m, el) => renderPantallaClienteDetalle(el, { id: decodeURIComponent(m[1]) }) },
-  { patron: /^#\/clientes$/, tab: 'clientes', fab: true,
+  { patron: /^#\/clientes$/, tab: 'clientes',
     render: (m, el) => renderPantallaClientes(el, {}) },
-  { patron: /^#\/nuevo-movimiento\/([^/]+)$/, tab: null, fab: false,
-    render: (m, el) => renderPantallaMovimientoForm(el, { clienteId: decodeURIComponent(m[1]) }) },
-  { patron: /^#\/nuevo-movimiento$/, tab: null, fab: false,
-    render: (m, el) => renderPantallaMovimientoForm(el, {}) },
-  { patron: /^#\/resumen\/(\d{4}-\d{2})$/, tab: 'resumen', fab: false,
+  { patron: /^#\/resumen\/(\d{4}-\d{2})$/, tab: 'resumen',
     render: (m, el) => renderPantallaResumen(el, { anioMes: m[1] }) },
-  { patron: /^#\/resumen$/, tab: 'resumen', fab: false,
+  { patron: /^#\/resumen$/, tab: 'resumen',
     render: (m, el) => renderPantallaResumen(el, {}) },
 ];
 
-const RUTA_POR_DEFECTO = '#/hoy';
+const RUTA_POR_DEFECTO = '#/clientes';
 
 let elApp = null;
 let elContenido = null;
 let generacionActual = 0; // evita que una respuesta async vieja pise una navegación más nueva
 
 function iconoTab(tab) {
-  if (tab === 'hoy') return Iconos.hoy();
-  if (tab === 'calendario') return Iconos.calendario();
   if (tab === 'clientes') return Iconos.personas();
   if (tab === 'resumen') return Iconos.resumen();
-  return Iconos.guion();
+  return '';
 }
 
 function armarShell() {
@@ -62,14 +47,7 @@ function armarShell() {
     <div id="aviso-solo-lectura" class="aviso-banner aviso-solo-lectura" hidden role="alert"></div>
     <div id="aviso-persist" class="aviso-banner aviso-discreto" hidden></div>
     <main id="pantalla-contenido" class="pantalla-contenido" aria-live="polite"></main>
-    <button type="button" id="fab-nuevo-movimiento" class="fab" hidden aria-label="Registrar movimiento">${Iconos.mas()}</button>
     <nav id="nav-inferior" class="nav-inferior" aria-label="Navegación principal">
-      <a href="#/hoy" data-tab="hoy" class="nav-item">
-        <span class="nav-icono" aria-hidden="true">${iconoTab('hoy')}</span><span class="nav-texto">Hoy</span>
-      </a>
-      <a href="#/calendario" data-tab="calendario" class="nav-item">
-        <span class="nav-icono" aria-hidden="true">${iconoTab('calendario')}</span><span class="nav-texto">Calendario</span>
-      </a>
       <a href="#/clientes" data-tab="clientes" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('clientes')}</span><span class="nav-texto">Clientes</span>
       </a>
@@ -79,10 +57,6 @@ function armarShell() {
     </nav>
   `;
   elContenido = document.getElementById('pantalla-contenido');
-
-  document.getElementById('fab-nuevo-movimiento').addEventListener('click', () => {
-    window.location.hash = '#/nuevo-movimiento';
-  });
 
   if (estaSoloLectura()) {
     const aviso = document.getElementById('aviso-solo-lectura');
@@ -126,18 +100,13 @@ function actualizarNavActiva(tabActivo) {
   });
 }
 
-function actualizarFab(mostrar) {
-  const fab = document.getElementById('fab-nuevo-movimiento');
-  if (fab) fab.hidden = !mostrar;
-}
-
 function renderErrorBoundary(error) {
   const detalle = (error && (error.stack || error.message)) || String(error);
   const code = (error && error.code) ? ` [${error.code}]` : '';
   return `
     <div class="error-boundary">
       <p class="error-boundary-titulo">Algo salió mal${escapeHtml(code)}.</p>
-      <button type="button" class="btn btn-primario" data-accion="volver-a-hoy">Volver a Hoy</button>
+      <button type="button" class="btn btn-primario" data-accion="volver-a-clientes">Volver a Clientes</button>
       <details class="error-boundary-detalle">
         <summary>Detalle técnico</summary>
         <pre>${escapeHtml(detalle)}</pre>
@@ -152,6 +121,8 @@ async function manejarCambioDeRuta() {
     return; // el reemplazo dispara un nuevo evento hashchange
   }
 
+  cerrarSheet(); // navegar (incl. "atrás" del navegador) cierra cualquier sheet abierto
+
   const hash = window.location.hash;
   const miGeneracion = ++generacionActual;
 
@@ -162,14 +133,13 @@ async function manejarCambioDeRuta() {
   }, null);
 
   actualizarNavActiva(coincidencia ? coincidencia.ruta.tab : null);
-  actualizarFab(coincidencia ? coincidencia.ruta.fab : false);
 
   try {
     if (!coincidencia) {
       elContenido.innerHTML = `
         <div class="error-boundary">
           <p class="error-boundary-titulo">No se encontró esa pantalla.</p>
-          <button type="button" class="btn btn-primario" data-accion="volver-a-hoy">Volver a Hoy</button>
+          <button type="button" class="btn btn-primario" data-accion="volver-a-clientes">Volver a Clientes</button>
         </div>`;
     } else {
       elContenido.innerHTML = '<p class="cargando">Cargando…</p>';
@@ -182,13 +152,12 @@ async function manejarCambioDeRuta() {
   }
 
   if (miGeneracion !== generacionActual) return;
-  const btnVolver = elContenido.querySelector('[data-accion="volver-a-hoy"]');
+  const btnVolver = elContenido.querySelector('[data-accion="volver-a-clientes"]');
   if (btnVolver) {
     btnVolver.addEventListener('click', () => {
-      // Si el error ocurrió en la propia pantalla Hoy, el hash ya es "#/hoy" y
-      // asignarlo de nuevo NO dispara "hashchange" (comportamiento estándar del
-      // navegador) — el router quedaría trabado en la pantalla de error. Se
-      // fuerza el re-render directamente en ese caso.
+      // Si el error ocurrió en la propia pantalla Clientes, el hash ya es
+      // "#/clientes" y asignarlo de nuevo NO dispara "hashchange"
+      // (comportamiento estándar del navegador) — se fuerza el re-render.
       if (window.location.hash === RUTA_POR_DEFECTO) {
         manejarCambioDeRuta();
       } else {
@@ -202,7 +171,7 @@ async function manejarCambioDeRuta() {
 
 /**
  * Inicializa el router: arma el shell fijo, registra el listener de
- * hashchange y renderiza la ruta actual (o #/hoy por defecto).
+ * hashchange y renderiza la ruta actual (o #/clientes por defecto).
  * @param {HTMLElement} contenedorApp
  */
 export function iniciarRouter(contenedorApp) {

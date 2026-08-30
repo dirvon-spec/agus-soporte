@@ -5,14 +5,27 @@
 import {
   initDb,
   crearClienteConAcuerdo,
+  crearCliente,
+  actualizarCliente,
+  actualizarOrdenClientes,
   registrarCargo,
   registrarAbono,
   registrarAjuste,
+  listarMovimientos,
   calcularSaldo,
   crearAcuerdo,
   listarAcuerdos,
   obtenerAcuerdoVigente,
   listarClientes,
+  listarClientesAgrupados,
+  obtenerCalendarioMovimientos,
+  crearCategoria,
+  actualizarCategoria,
+  borrarCategoriaLogica,
+  listarCategorias,
+  crearConcepto,
+  borrarConceptoLogico,
+  listarConceptos,
   obtenerEstadoCalendario,
   resumenDia,
   resumenMensual,
@@ -123,6 +136,87 @@ function crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuer
   return dbV1;
 }
 
+// v2: acuerdos ya tiene frecuencia/dia_semana/dia_mes (§2.8), pero clientes
+// TODAVÍA no tiene categoria_id/orden y NO existen categorias/conceptos —
+// exactamente el punto de partida real para probar la migración v2->v3 (§2.9).
+const DDL_V2_LITERAL = `
+CREATE TABLE IF NOT EXISTS clientes (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 2),
+  telefono      TEXT,
+  notas         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS acuerdos (
+  id                      TEXT PRIMARY KEY,
+  cliente_id              TEXT NOT NULL REFERENCES clientes(id),
+  monto_cuota_centavos    INTEGER NOT NULL CHECK (monto_cuota_centavos > 0),
+  frecuencia              TEXT NOT NULL DEFAULT 'DIARIA' CHECK (frecuencia IN ('DIARIA','SEMANAL','MENSUAL')),
+  dia_semana              INTEGER,
+  dia_mes                 INTEGER,
+  vigente_desde           TEXT NOT NULL,
+  vigente_hasta           TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL,
+  deleted_at              TEXT,
+  CHECK (vigente_hasta IS NULL OR vigente_hasta >= vigente_desde)
+);
+CREATE TABLE IF NOT EXISTS movimientos (
+  id                        TEXT PRIMARY KEY,
+  cliente_id                TEXT NOT NULL REFERENCES clientes(id),
+  tipo                       TEXT NOT NULL CHECK (tipo IN ('CARGO', 'ABONO', 'AJUSTE')),
+  monto_centavos             INTEGER NOT NULL,
+  fecha                      TEXT NOT NULL,
+  servicio                   TEXT,
+  referencia                 TEXT,
+  nota                       TEXT,
+  movimiento_original_id     TEXT REFERENCES movimientos(id),
+  created_at                 TEXT NOT NULL,
+  updated_at                 TEXT NOT NULL,
+  deleted_at                 TEXT,
+  CHECK (
+    (tipo IN ('CARGO','ABONO') AND monto_centavos > 0 AND movimiento_original_id IS NULL)
+    OR
+    (tipo = 'AJUSTE' AND monto_centavos != 0 AND movimiento_original_id IS NOT NULL)
+  )
+);
+CREATE TABLE IF NOT EXISTS meta (
+  clave  TEXT PRIMARY KEY,
+  valor  TEXT NOT NULL
+);
+`;
+
+/** Cliente con un CARGO cuyo `servicio` es un concepto DISTINTO ("Renta") — no
+ * está en el catálogo por defecto del seed, para probar que la migración lo
+ * siembra desde la historia real y no desde una lista fija. */
+function crearDbV2VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo }) {
+  const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+  const dbV2 = new DatabaseCtor();
+  dbV2.run(DDL_V2_LITERAL);
+  const ts = '2026-02-01T00:00:00.000Z';
+  dbV2.run('INSERT INTO clientes (id,nombre,telefono,notas,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,NULL)', [
+    clienteId,
+    'Cliente Migracion V2 Verify',
+    '5215500000098',
+    null,
+    ts,
+    ts,
+  ]);
+  dbV2.run(
+    "INSERT INTO acuerdos (id,cliente_id,monto_cuota_centavos,frecuencia,dia_semana,dia_mes,vigente_desde,vigente_hasta,created_at,updated_at,deleted_at) VALUES (?,?,?,?,NULL,NULL,?,NULL,?,?,NULL)",
+    [acuerdoId, clienteId, 9000, 'DIARIA', fechaAcuerdo, ts, ts]
+  );
+  dbV2.run(
+    `INSERT INTO movimientos (id,cliente_id,tipo,monto_centavos,fecha,servicio,referencia,nota,movimiento_original_id,created_at,updated_at,deleted_at)
+     VALUES (?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL)`,
+    [movimientoId, clienteId, 'CARGO', 15000, fechaAcuerdo, 'Renta', ts, ts]
+  );
+  dbV2.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', '2')");
+  return dbV2;
+}
+
 export async function ejecutarVerificacion() {
   await initDb();
 
@@ -197,11 +291,19 @@ export async function ejecutarVerificacion() {
   });
 
   // ============================================================
-  // Sección 2 — crearClienteConAcuerdo válido/inválido
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 2: crearClienteConAcuerdo
+  // válido/inválido. El sistema de cuotas/frecuencias ya no se usa desde la
+  // UI, pero `crearClienteConAcuerdo` sigue funcional y `acuerdos` conserva
+  // su historia append-only — estos tests protegen esa función y alimentan
+  // con `clienteLegacyId` a las Secciones 5/6/6b (también LEGACY), que sí
+  // necesitan un cliente con acuerdos reales para probar reglas del viejo
+  // sistema. Las Secciones 3/4 (registrarCargo/Abono/Ajuste/calcularSaldo)
+  // son funciones VIGENTES y se probaron con su propio cliente vía
+  // `crearCliente` para no depender de esta cadena legacy.
   // ============================================================
-  let clienteTestId = null;
+  let clienteLegacyId = null;
 
-  await verificar('crearClienteConAcuerdo con datos válidos crea cliente + acuerdo', async () => {
+  await verificar('LEGACY: crearClienteConAcuerdo con datos válidos crea cliente + acuerdo', async () => {
     const r = await crearClienteConAcuerdo({
       nombre: 'Cliente De Prueba Verify',
       telefono: '5215500000000',
@@ -213,7 +315,7 @@ export async function ejecutarVerificacion() {
     assert(r.acuerdo && r.acuerdo.id, 'no devolvió acuerdo');
     assert(r.acuerdo.monto_cuota_centavos === 1000, 'monto de cuota incorrecto');
     assert(r.acuerdo.vigente_hasta === null, 'el acuerdo nuevo debería quedar abierto (vigente_hasta NULL)');
-    clienteTestId = r.cliente.id;
+    clienteLegacyId = r.cliente.id;
   });
 
   await verificar('crearClienteConAcuerdo con nombre corto lanza VALIDATION_ERROR', async () => {
@@ -257,11 +359,7 @@ export async function ejecutarVerificacion() {
   // Sección 2b — A-005: listarClientes expone tiene_movimientos (sin N+1)
   // ============================================================
   await verificar('A-005: listarClientes trae tiene_movimientos correcto (false sin movimientos, true con)', async () => {
-    const { cliente } = await crearClienteConAcuerdo({
-      nombre: 'Cliente A005 TieneMovimientos Verify',
-      monto_cuota_centavos: 1000,
-      vigente_desde: hoy(),
-    });
+    const cliente = await crearCliente({ nombre: 'Cliente A005 TieneMovimientos Verify' });
 
     const { clientes: antesDeMovimiento } = await listarClientes({ busqueda: 'Cliente A005 TieneMovimientos Verify' });
     const filaAntes = antesDeMovimiento.find((c) => c.id === cliente.id);
@@ -277,24 +375,41 @@ export async function ejecutarVerificacion() {
   });
 
   // ============================================================
-  // Sección 3 — registrarCargo / registrarAbono / registrarAjuste
+  // Sección 3 — registrarCargo / registrarAbono / registrarAjuste (VIGENTES)
+  // Cliente propio vía crearCliente (§2.9, sin acuerdo) — desacoplado de la
+  // cadena LEGACY de crearClienteConAcuerdo.
   // ============================================================
+  const clienteMovimientos = await crearCliente({ nombre: 'Cliente Movimientos Verify', telefono: '5215500000001' });
+  const clienteMovimientosId = clienteMovimientos.id;
+
   await verificar('registrarCargo válido se guarda con tipo CARGO', async () => {
     const mov = await registrarCargo({
-      cliente_id: clienteTestId,
+      cliente_id: clienteMovimientosId,
       monto_centavos: 5000,
       fecha: hoy(),
-      servicio: 'AGUA',
+      concepto: 'Agua', // sembrado en el catálogo (§2.9)
       referencia: 'X-1',
       nota: 'test',
     });
     assert(mov.tipo === 'CARGO' && mov.monto_centavos === 5000, 'cargo no se guardó como se esperaba');
+    assert(mov.servicio === 'Agua', `el nombre canónico del catálogo debería quedar en movimientos.servicio, es "${mov.servicio}"`);
   });
 
-  await verificar('registrarCargo con servicio inválido lanza VALIDATION_ERROR', async () => {
+  await verificar('registrarCargo con concepto fuera del catálogo lanza VALIDATION_ERROR', async () => {
     let lanzo = false;
     try {
-      await registrarCargo({ cliente_id: clienteTestId, monto_centavos: 5000, fecha: hoy(), servicio: 'NO_EXISTE' });
+      await registrarCargo({ cliente_id: clienteMovimientosId, monto_centavos: 5000, fecha: hoy(), concepto: 'NoExisteEnCatalogo' });
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar un concepto que no está en el catálogo vivo');
+  });
+
+  await verificar('registrarCargo con concepto vacío lanza VALIDATION_ERROR', async () => {
+    let lanzo = false;
+    try {
+      await registrarCargo({ cliente_id: clienteMovimientosId, monto_centavos: 5000, fecha: hoy(), concepto: '   ' });
     } catch (e) {
       lanzo = true;
       assert(e.code === 'VALIDATION_ERROR');
@@ -305,7 +420,7 @@ export async function ejecutarVerificacion() {
   await verificar('registrarCargo con fecha futura lanza VALIDATION_ERROR', async () => {
     let lanzo = false;
     try {
-      await registrarCargo({ cliente_id: clienteTestId, monto_centavos: 5000, fecha: sumarDias(hoy(), 1), servicio: 'AGUA' });
+      await registrarCargo({ cliente_id: clienteMovimientosId, monto_centavos: 5000, fecha: sumarDias(hoy(), 1), concepto: 'Agua' });
     } catch (e) {
       lanzo = true;
       assert(e.code === 'VALIDATION_ERROR');
@@ -316,7 +431,7 @@ export async function ejecutarVerificacion() {
   await verificar('registrarCargo con cliente inexistente lanza NOT_FOUND', async () => {
     let lanzo = false;
     try {
-      await registrarCargo({ cliente_id: 'no-existe', monto_centavos: 5000, fecha: hoy(), servicio: 'AGUA' });
+      await registrarCargo({ cliente_id: 'no-existe', monto_centavos: 5000, fecha: hoy(), concepto: 'Agua' });
     } catch (e) {
       lanzo = true;
       assert(e.code === 'NOT_FOUND');
@@ -326,7 +441,7 @@ export async function ejecutarVerificacion() {
 
   let abonoTestId = null;
   await verificar('registrarAbono válido se guarda con tipo ABONO', async () => {
-    const mov = await registrarAbono({ cliente_id: clienteTestId, monto_centavos: 3000, fecha: hoy(), nota: 'abono test' });
+    const mov = await registrarAbono({ cliente_id: clienteMovimientosId, monto_centavos: 3000, fecha: hoy(), nota: 'abono test' });
     assert(mov.tipo === 'ABONO' && mov.monto_centavos === 3000, 'abono no se guardó como se esperaba');
     abonoTestId = mov.id;
   });
@@ -334,7 +449,7 @@ export async function ejecutarVerificacion() {
   await verificar('registrarAbono con monto negativo lanza VALIDATION_ERROR', async () => {
     let lanzo = false;
     try {
-      await registrarAbono({ cliente_id: clienteTestId, monto_centavos: -100, fecha: hoy() });
+      await registrarAbono({ cliente_id: clienteMovimientosId, monto_centavos: -100, fecha: hoy() });
     } catch (e) {
       lanzo = true;
       assert(e.code === 'VALIDATION_ERROR');
@@ -377,32 +492,33 @@ export async function ejecutarVerificacion() {
   });
 
   // ============================================================
-  // Sección 4 — calcularSaldo contra un caso calculado a mano
+  // Sección 4 — calcularSaldo contra un caso calculado a mano (VIGENTE)
   //   CARGO 5000 - ABONO 3000 + AJUSTE(-500) + AJUSTE(+100) = 5000-3000-500+100 = 1600
   // ============================================================
   await verificar('calcularSaldo coincide con el cálculo manual (1600 centavos)', async () => {
-    const saldo = await calcularSaldo(clienteTestId);
+    const saldo = await calcularSaldo(clienteMovimientosId);
     assert(saldo === 1600, `saldo esperado 1600, obtenido ${saldo}`);
   });
 
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 5: regla mismo-día de
+  // crearAcuerdo (R-004). Usa clienteLegacyId (Sección 2) porque necesita un
+  // acuerdo abierto real del viejo sistema.
   // ============================================================
-  // Sección 5 — regla mismo-día de crearAcuerdo (R-004)
-  // ============================================================
-  await verificar('crearAcuerdo el mismo día reemplaza al abierto (sin violar CHECK)', async () => {
+  await verificar('LEGACY: crearAcuerdo el mismo día reemplaza al abierto (sin violar CHECK)', async () => {
     const hoyStr = hoy();
-    const primero = await crearAcuerdo({ cliente_id: clienteTestId, monto_cuota_centavos: 2000, vigente_desde: hoyStr });
-    const segundo = await crearAcuerdo({ cliente_id: clienteTestId, monto_cuota_centavos: 2500, vigente_desde: hoyStr });
-    const vigente = await obtenerAcuerdoVigente(clienteTestId, hoyStr);
+    const primero = await crearAcuerdo({ cliente_id: clienteLegacyId, monto_cuota_centavos: 2000, vigente_desde: hoyStr });
+    const segundo = await crearAcuerdo({ cliente_id: clienteLegacyId, monto_cuota_centavos: 2500, vigente_desde: hoyStr });
+    const vigente = await obtenerAcuerdoVigente(clienteLegacyId, hoyStr);
     assert(vigente.id === segundo.id, 'el acuerdo vigente debería ser el segundo (el que reemplaza)');
     assert(vigente.monto_cuota_centavos === 2500, 'la cuota vigente no es la del segundo acuerdo');
-    const historial = await listarAcuerdos(clienteTestId);
+    const historial = await listarAcuerdos(clienteLegacyId);
     assert(!historial.some((a) => a.id === primero.id), 'el primer acuerdo mismo-día debería quedar excluido del historial (deleted_at)');
   });
 
-  await verificar('crearAcuerdo con vigente_desde anterior al acuerdo abierto lanza VALIDATION_ERROR', async () => {
+  await verificar('LEGACY: crearAcuerdo con vigente_desde anterior al acuerdo abierto lanza VALIDATION_ERROR', async () => {
     let lanzo = false;
     try {
-      await crearAcuerdo({ cliente_id: clienteTestId, monto_cuota_centavos: 1000, vigente_desde: sumarDias(hoy(), -100) });
+      await crearAcuerdo({ cliente_id: clienteLegacyId, monto_cuota_centavos: 1000, vigente_desde: sumarDias(hoy(), -100) });
     } catch (e) {
       lanzo = true;
       assert(e.code === 'VALIDATION_ERROR');
@@ -410,11 +526,12 @@ export async function ejecutarVerificacion() {
     assert(lanzo, 'no lanzó error con vigencia anterior al acuerdo actual');
   });
 
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 6: R-001, un CARGO
+  // intermedio NO cambia los estados de calendario, pero SÍ sube
+  // calcularSaldo de inmediato. Protege obtenerEstadoCalendario (deprecated
+  // pero funcional) contra regresiones.
   // ============================================================
-  // Sección 6 — R-001: un CARGO intermedio NO cambia los estados de calendario,
-  //   pero SÍ sube calcularSaldo de inmediato.
-  // ============================================================
-  await verificar('R-001: CARGO intermedio no afecta calendario pero sí el saldo', async () => {
+  await verificar('LEGACY: R-001 — CARGO intermedio no afecta calendario pero sí el saldo', async () => {
     const desde = sumarDias(hoy(), -4);
     const { cliente } = await crearClienteConAcuerdo({
       nombre: 'Cliente R001 Verify',
@@ -427,7 +544,7 @@ export async function ejecutarVerificacion() {
     const saldoAntes = await calcularSaldo(cliente.id);
     const estadosAntes = await obtenerEstadoCalendario(cliente.id, desde, hoy());
 
-    await registrarCargo({ cliente_id: cliente.id, monto_centavos: 20000, fecha: sumarDias(hoy(), -1), servicio: 'LUZ' });
+    await registrarCargo({ cliente_id: cliente.id, monto_centavos: 20000, fecha: sumarDias(hoy(), -1), concepto: 'Luz' });
 
     const saldoDespues = await calcularSaldo(cliente.id);
     const estadosDespues = await obtenerEstadoCalendario(cliente.id, desde, hoy());
@@ -442,18 +559,18 @@ export async function ejecutarVerificacion() {
     }
   });
 
-  // ============================================================
-  // Sección 6b — BUG (Builder B, verificación en vivo): arrastreInicial de
-  // obtenerEstadoCalendario()/resumenDia() usaba -calcularSaldo(), que es la
-  // fórmula de SALDO del ledger (2.2, incluye CARGO), no la de CUMPLIMIENTO
-  // DE CUOTA (2.5, solo ABONO/AJUSTE vs. cuotas exigidas). Un cliente con un
-  // tramo histórico bien pagado seguido de un tramo de incumplimiento parecía
-  // "a favor" (arrastreInicial gigante y positivo) en vez de en DEUDA, porque
-  // el saldo del ledger no resta las cuotas no cobradas de los días sin CARGO.
-  // Corregido en PLAN-MVP.md §2.5 (nota del gate 25-ago-2026).
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 6b: BUG (Builder B,
+  // verificación en vivo) de arrastreInicial en obtenerEstadoCalendario()/
+  // resumenDia() — usaba -calcularSaldo(), que es la fórmula de SALDO del
+  // ledger (2.2, incluye CARGO), no la de CUMPLIMIENTO DE CUOTA (2.5, solo
+  // ABONO/AJUSTE vs. cuotas exigidas). Un cliente con un tramo histórico bien
+  // pagado seguido de un tramo de incumplimiento parecía "a favor" en vez de
+  // en DEUDA. Corregido en PLAN-MVP.md §2.5 (nota del gate 25-ago-2026). Se
+  // mantiene para proteger obtenerEstadoCalendario/resumenDia (deprecated
+  // pero funcionales) contra que el bug reaparezca silenciosamente.
   // ============================================================
   await verificar(
-    'BUG arrastreInicial: ventana de calendario a mitad de un tramo de incumplimiento debe salir DEUDA (no GRACIA_ADELANTO)',
+    'LEGACY: BUG arrastreInicial — ventana de calendario a mitad de un tramo de incumplimiento debe salir DEUDA (no GRACIA_ADELANTO)',
     async () => {
       const vigenteDesde = sumarDias(hoy(), -30);
       const cuota = 10000;
@@ -482,7 +599,7 @@ export async function ejecutarVerificacion() {
     }
   );
 
-  await verificar('BUG arrastreInicial: Manuel Torres (caso 4 del seed, DEUDA franca) debe estar en DEUDA hoy', async () => {
+  await verificar('LEGACY: BUG arrastreInicial — Manuel Torres (caso 4 del seed, DEUDA franca) debe estar en DEUDA hoy', async () => {
     const { clientes } = await listarClientes({ busqueda: 'Manuel Torres', tamanioPagina: 5 });
     assert(clientes.length >= 1, 'no se encontró a "Manuel Torres" en la DB sembrada');
     const manuel = clientes[0];
@@ -490,7 +607,7 @@ export async function ejecutarVerificacion() {
     assert(estados.get(hoy()) === 'DEUDA', `Manuel Torres (DEUDA franca) debería estar en DEUDA hoy, está en ${estados.get(hoy())}`);
   });
 
-  await verificar('BUG arrastreInicial: resumenDia(hoy) también debe marcar a Manuel Torres en DEUDA', async () => {
+  await verificar('LEGACY: BUG arrastreInicial — resumenDia(hoy) también debe marcar a Manuel Torres en DEUDA', async () => {
     const resumen = await resumenDia(hoy());
     const filaManuel = resumen.clientes.find((c) => c.nombre === 'Manuel Torres');
     assert(filaManuel, 'Manuel Torres no aparece en resumenDia(hoy) (¿sin acuerdo vigente ese día?)');
@@ -513,13 +630,9 @@ export async function ejecutarVerificacion() {
       const mesActual = hoy().slice(0, 7); // 'YYYY-MM'
       const antes = await resumenMensual(mesActual);
 
-      const { cliente } = await crearClienteConAcuerdo({
-        nombre: 'Cliente A001 Dado De Baja Verify',
-        monto_cuota_centavos: 1000,
-        vigente_desde: hoy(),
-      });
+      const cliente = await crearCliente({ nombre: 'Cliente A001 Dado De Baja Verify' });
       const montoCargo = 12345;
-      await registrarCargo({ cliente_id: cliente.id, monto_centavos: montoCargo, fecha: hoy(), servicio: 'AGUA' });
+      await registrarCargo({ cliente_id: cliente.id, monto_centavos: montoCargo, fecha: hoy(), concepto: 'Agua' });
 
       const saldoAntesDeBorrar = await calcularSaldo(cliente.id);
       assert(saldoAntesDeBorrar === montoCargo, `saldo debería ser ${montoCargo} antes de borrar, es ${saldoAntesDeBorrar}`);
@@ -617,15 +730,289 @@ export async function ejecutarVerificacion() {
     assert(total >= 8, `total de clientes activos ${total}, esperado >= 8`);
   });
 
+  await verificar('§2.9: generarSeed() siembra 3-4 categorías, catálogo de 4 conceptos y orden manual variado', async () => {
+    const datos = generarSeed();
+    assert(datos.categorias.length >= 3 && datos.categorias.length <= 4, `categorías fuera de 3-4: ${datos.categorias.length}`);
+    for (const cat of datos.categorias) {
+      assert(typeof cat.color === 'string' && cat.color.length > 0, `categoría "${cat.nombre}" sin color`);
+    }
+    const nombresConceptos = datos.conceptos.map((c) => c.nombre);
+    for (const esperado of ['Luz', 'Agua', 'Internet', 'Préstamo']) {
+      assert(nombresConceptos.includes(esperado), `falta el concepto "${esperado}" en el catálogo del seed`);
+    }
+    assert(datos.clientes.some((c) => c.categoria_id === null), 'debería haber al menos un cliente SIN categoría en el seed');
+    const conCategoria = datos.clientes.filter((c) => c.categoria_id !== null);
+    assert(conCategoria.every((c) => Number.isInteger(c.orden)), 'todo cliente con categoría debería tener un orden entero asignado');
+    // orden NO debería ser simplemente alfabético dentro de un grupo (prueba de que es "manual").
+    const porCategoria = new Map();
+    for (const c of conCategoria) {
+      if (!porCategoria.has(c.categoria_id)) porCategoria.set(c.categoria_id, []);
+      porCategoria.get(c.categoria_id).push(c);
+    }
+    let algunGrupoNoAlfabetico = false;
+    for (const miembros of porCategoria.values()) {
+      if (miembros.length < 2) continue;
+      const ordenPorOrden = [...miembros].sort((a, b) => a.orden - b.orden).map((c) => c.nombre);
+      const ordenAlfabetico = [...miembros].map((c) => c.nombre).sort();
+      if (JSON.stringify(ordenPorOrden) !== JSON.stringify(ordenAlfabetico)) algunGrupoNoAlfabetico = true;
+    }
+    assert(algunGrupoNoAlfabetico, 'el orden manual del seed no debería coincidir siempre con el orden alfabético (para probar que es genuinamente manual)');
+  });
+
   // ============================================================
-  // Sección 9 — 6+ casos borde del calendario (calendar.js puro, sección 4.2)
-  //   Fechas fijas y sintéticas (no dependen de hoy()) para que el cálculo a
-  //   mano sea reproducible.
+  // Sección 13 — §2.9 (REDISEÑO V2 "SENCILLO", gate del dueño 28-ago-2026):
+  // categorías, conceptos, alta de cliente sin acuerdo, orden manual, y los
+  // dos agregados nuevos (listarClientesAgrupados, obtenerCalendarioMovimientos).
+  // ============================================================
+
+  // --- Categorías CRUD ---
+  let categoriaVerifyId = null;
+  await verificar('crearCategoria válida crea la categoría; nombre duplicado (activo) da CONFLICT', async () => {
+    const cat = await crearCategoria({ nombre: 'CategoriaPruebaAgrupado Verify', color: 'turquesa' });
+    assert(cat.id && cat.nombre === 'CategoriaPruebaAgrupado Verify' && cat.color === 'turquesa', 'categoría no se creó como se esperaba');
+    categoriaVerifyId = cat.id;
+
+    let lanzo = false;
+    try {
+      await crearCategoria({ nombre: 'categoriapruebaagrupado verify', color: 'rojo' }); // mismo nombre, otro casing
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'CONFLICT', `code esperado CONFLICT, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar un nombre de categoría duplicado (case-insensitive) entre activas');
+  });
+
+  await verificar('actualizarCategoria cambia nombre/color; borrarCategoriaLogica deja a sus clientes sin categoría', async () => {
+    const catTemp = await crearCategoria({ nombre: 'CategoriaTemporal Verify', color: 'rosa' });
+    const clienteEnCat = await crearCliente({ nombre: 'Cliente CategoriaTemporal Verify', categoria_id: catTemp.id });
+    assert(clienteEnCat.categoria_id === catTemp.id, 'el cliente debería quedar en la categoría temporal');
+
+    const actualizada = await actualizarCategoria(catTemp.id, { color: 'morado' });
+    assert(actualizada.color === 'morado' && actualizada.nombre === 'CategoriaTemporal Verify', 'actualizarCategoria no aplicó el cambio de color');
+
+    await borrarCategoriaLogica(catTemp.id);
+    const categoriasActivas = await listarCategorias();
+    assert(!categoriasActivas.some((c) => c.id === catTemp.id), 'la categoría borrada no debería listarse como activa');
+
+    const clienteTrasBorrado = (await listarClientes({ busqueda: 'Cliente CategoriaTemporal Verify' })).clientes[0];
+    assert(clienteTrasBorrado.categoria_id === null, 'el cliente debería quedar "sin categoría" tras borrar su categoría (cascada manual)');
+  });
+
+  // --- Conceptos: idempotente + borrado lógico ---
+  await verificar('crearConcepto es idempotente (mismo nombre case-insensitive devuelve el existente)', async () => {
+    const c1 = await crearConcepto({ nombre: 'ConceptoIdempotente Verify' });
+    const c2 = await crearConcepto({ nombre: 'conceptoidempotente verify' });
+    assert(c1.id === c2.id, 'crear con el mismo nombre (otro casing) debería devolver el concepto existente, no duplicarlo');
+  });
+
+  await verificar('borrarConceptoLogico saca el concepto de listarConceptos sin tocar movimientos históricos', async () => {
+    const concepto = await crearConcepto({ nombre: 'ConceptoABorrar Verify' });
+    const clienteConCargo = await crearCliente({ nombre: 'Cliente ConceptoABorrar Verify' });
+    const cargo = await registrarCargo({ cliente_id: clienteConCargo.id, monto_centavos: 1000, fecha: hoy(), concepto: 'ConceptoABorrar Verify' });
+
+    await borrarConceptoLogico(concepto.id);
+    const conceptosActivos = await listarConceptos();
+    assert(!conceptosActivos.some((c) => c.id === concepto.id), 'el concepto borrado no debería listarse como activo');
+
+    const { movimientos } = await listarMovimientos({ cliente_id: clienteConCargo.id });
+    const cargoHistorico = movimientos.find((m) => m.id === cargo.id);
+    assert(cargoHistorico && cargoHistorico.servicio === 'ConceptoABorrar Verify', 'el cargo histórico debería conservar el nombre del concepto como texto');
+  });
+
+  // --- crearCliente (sin acuerdo) ---
+  await verificar('crearCliente NO crea acuerdo y asigna orden=MAX+1 dentro de su grupo', async () => {
+    const c1 = await crearCliente({ nombre: 'Cliente Orden Uno Verify', categoria_id: categoriaVerifyId });
+    const c2 = await crearCliente({ nombre: 'Cliente Orden Dos Verify', categoria_id: categoriaVerifyId });
+    assert(c2.orden === c1.orden + 1, `c2.orden (${c2.orden}) debería ser c1.orden (${c1.orden}) + 1`);
+
+    const acuerdosC1 = await listarAcuerdos(c1.id);
+    assert(acuerdosC1.length === 0, 'crearCliente no debería crear ningún acuerdo');
+  });
+
+  await verificar('crearCliente con categoria_id inexistente lanza NOT_FOUND', async () => {
+    let lanzo = false;
+    try {
+      await crearCliente({ nombre: 'Cliente Categoria Inexistente Verify', categoria_id: 'no-existe' });
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'NOT_FOUND');
+    }
+    assert(lanzo);
+  });
+
+  // --- A-101 (auditoría v2, ALTA): nombre de cliente único-vivo, mismo patrón que crearCategoria ---
+  await verificar('A-101: crearCliente rechaza un nombre duplicado (case-insensitive) con CONFLICT', async () => {
+    await crearCliente({ nombre: 'Sofía Ramírez Auditoria Verify' });
+    let lanzo = false;
+    try {
+      await crearCliente({ nombre: 'sofía ramírez auditoria verify' }); // mismo nombre, otro casing/espacios
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'CONFLICT', `code esperado CONFLICT, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar un segundo cliente con el mismo nombre (case-insensitive) sin avisar');
+  });
+
+  await verificar('A-101: actualizarCliente rechaza renombrar a un nombre ya usado por OTRO cliente (CONFLICT)', async () => {
+    const clienteA = await crearCliente({ nombre: 'Cliente A101 Original A Verify' });
+    await crearCliente({ nombre: 'Cliente A101 Original B Verify' });
+    let lanzo = false;
+    try {
+      await actualizarCliente(clienteA.id, { nombre: '  cliente a101 original b verify  ' }); // con espacios, otro casing
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'CONFLICT', `code esperado CONFLICT, recibido ${e.code}`);
+    }
+    assert(lanzo, 'debería rechazar renombrar a un nombre que ya usa otro cliente activo');
+  });
+
+  await verificar('A-101: SÍ se permite reusar el nombre de un cliente dado de baja', async () => {
+    const original = await crearCliente({ nombre: 'Cliente A101 Reusable Verify' });
+    await borrarClienteLogico(original.id, { forzar: true });
+    let lanzoInesperado = false;
+    let nuevo = null;
+    try {
+      nuevo = await crearCliente({ nombre: 'Cliente A101 Reusable Verify' });
+    } catch (e) {
+      lanzoInesperado = true;
+    }
+    assert(!lanzoInesperado, 'no debería rechazar un nombre que solo usa un cliente YA dado de baja');
+    assert(nuevo && nuevo.id !== original.id, 'debería crear un cliente nuevo, distinto del dado de baja');
+  });
+
+  await verificar('actualizarCliente mueve de categoría y recalcula orden en el grupo destino', async () => {
+    const catOrigen = await crearCategoria({ nombre: 'CategoriaOrigen Verify', color: 'verde' });
+    const catDestino = await crearCategoria({ nombre: 'CategoriaDestino Verify', color: 'naranja' });
+    await crearCliente({ nombre: 'Cliente Destino Previo Verify', categoria_id: catDestino.id }); // ya ocupa orden 0 en destino
+    const cliente = await crearCliente({ nombre: 'Cliente A Mover Verify', categoria_id: catOrigen.id });
+
+    const movido = await actualizarCliente(cliente.id, { categoria_id: catDestino.id });
+    assert(movido.categoria_id === catDestino.id, 'categoria_id debería quedar en el destino');
+    assert(movido.orden === 1, `orden en el grupo destino debería ser 1 (después del cliente previo), es ${movido.orden}`);
+
+    const movidoASinCategoria = await actualizarCliente(cliente.id, { categoria_id: null });
+    assert(movidoASinCategoria.categoria_id === null, 'categoria_id explícito null debería mandar a "sin categoría"');
+  });
+
+  // --- listarClientesAgrupados: Σ de grupo == suma manual, cruce con resumenMensual,
+  //     "sin categoría" cae en su grupo, y el orden manual (actualizarOrdenClientes) se respeta ---
+  await verificar(
+    'listarClientesAgrupados: Σ de grupo coincide con la suma manual y con resumenMensual por cliente',
+    async () => {
+      const anioMes = hoy().slice(0, 7);
+      const catAgrupado = await crearCategoria({ nombre: 'CategoriaSigma Verify', color: 'azul' });
+      const clienteX = await crearCliente({ nombre: 'Cliente Sigma X Verify', categoria_id: catAgrupado.id });
+      const clienteY = await crearCliente({ nombre: 'Cliente Sigma Y Verify', categoria_id: catAgrupado.id });
+
+      await registrarCargo({ cliente_id: clienteX.id, monto_centavos: 5000, fecha: hoy(), concepto: 'Agua' });
+      await registrarAbono({ cliente_id: clienteX.id, monto_centavos: 3000, fecha: hoy() });
+      await registrarCargo({ cliente_id: clienteY.id, monto_centavos: 2000, fecha: hoy(), concepto: 'Luz' });
+      await registrarAbono({ cliente_id: clienteY.id, monto_centavos: 7000, fecha: hoy() });
+
+      const saldoX = await calcularSaldo(clienteX.id);
+      const saldoY = await calcularSaldo(clienteY.id);
+      const abonosManual = 3000 + 7000;
+      const cargosManual = 5000 + 2000;
+      const saldoManual = saldoX + saldoY;
+
+      const { grupos } = await listarClientesAgrupados({ anioMes });
+      const grupo = grupos.find((g) => g.categoria_id === catAgrupado.id);
+      assert(grupo, 'el grupo recién creado debería aparecer en listarClientesAgrupados');
+      assert(grupo.clientes.length === 2, `el grupo debería tener 2 clientes, tiene ${grupo.clientes.length}`);
+      assert(
+        grupo.totales.abonos_mes_centavos === abonosManual,
+        `Σ abonos_mes: esperado ${abonosManual}, obtenido ${grupo.totales.abonos_mes_centavos}`
+      );
+      assert(
+        grupo.totales.cargos_mes_centavos === cargosManual,
+        `Σ cargos_mes: esperado ${cargosManual}, obtenido ${grupo.totales.cargos_mes_centavos}`
+      );
+      assert(grupo.totales.saldo_centavos === saldoManual, `Σ saldo: esperado ${saldoManual}, obtenido ${grupo.totales.saldo_centavos}`);
+
+      // Cruce con resumenMensual: los abonos/cargos del mes de cada cliente deben coincidir.
+      const resumenMes = await resumenMensual(anioMes);
+      const filaX = resumenMes.porCliente.find((p) => p.cliente_id === clienteX.id);
+      const filaY = resumenMes.porCliente.find((p) => p.cliente_id === clienteY.id);
+      const clienteXAgg = grupo.clientes.find((c) => c.id === clienteX.id);
+      const clienteYAgg = grupo.clientes.find((c) => c.id === clienteY.id);
+      assert(filaX.cargos === clienteXAgg.cargos_mes_centavos, 'cargos_mes de X debería coincidir con resumenMensual');
+      assert(filaX.abonos === clienteXAgg.abonos_mes_centavos, 'abonos_mes de X debería coincidir con resumenMensual');
+      assert(filaY.cargos === clienteYAgg.cargos_mes_centavos, 'cargos_mes de Y debería coincidir con resumenMensual');
+      assert(filaY.abonos === clienteYAgg.abonos_mes_centavos, 'abonos_mes de Y debería coincidir con resumenMensual');
+
+      // Orden manual: invertir el orden dentro del grupo y confirmar que se refleja.
+      await actualizarOrdenClientes([clienteY.id, clienteX.id]);
+      const { grupos: gruposTrasReordenar } = await listarClientesAgrupados({ anioMes });
+      const grupoTrasReordenar = gruposTrasReordenar.find((g) => g.categoria_id === catAgrupado.id);
+      assert(
+        grupoTrasReordenar.clientes[0].id === clienteY.id && grupoTrasReordenar.clientes[1].id === clienteX.id,
+        'tras actualizarOrdenClientes([Y,X]), el grupo debería listar a Y antes que a X'
+      );
+    }
+  );
+
+  await verificar('listarClientesAgrupados: un cliente sin categoría cae en el grupo "Sin categoría"', async () => {
+    const anioMes = hoy().slice(0, 7);
+    const clienteSinCat = await crearCliente({ nombre: 'Cliente SinCategoria Verify' });
+    const { grupos } = await listarClientesAgrupados({ anioMes });
+    const grupoSinCategoria = grupos.find((g) => g.categoria_id === null);
+    assert(grupoSinCategoria, 'debería existir el grupo "Sin categoría"');
+    assert(grupoSinCategoria.categoria_nombre === 'Sin categoría', `el nombre del grupo debería ser "Sin categoría", es "${grupoSinCategoria.categoria_nombre}"`);
+    assert(
+      grupoSinCategoria.clientes.some((c) => c.id === clienteSinCat.id),
+      'el cliente sin categoría debería aparecer en el grupo "Sin categoría"'
+    );
+  });
+
+  // --- obtenerCalendarioMovimientos: saldoAcumulado por fecha == calcularSaldo(cliente, fecha) ---
+  await verificar('obtenerCalendarioMovimientos: saldoAcumuladoCentavos coincide con calcularSaldo para 3 fechas', async () => {
+    const anioMes = hoy().slice(0, 7);
+    const d1 = sumarDias(hoy(), -3);
+    const d2 = sumarDias(hoy(), -2);
+    const d3 = hoy();
+
+    const cliente = await crearCliente({ nombre: 'Cliente CalendarioMovimientos Verify' });
+    const cargo = await registrarCargo({ cliente_id: cliente.id, monto_centavos: 8000, fecha: d1, concepto: 'Internet' });
+    await registrarAbono({ cliente_id: cliente.id, monto_centavos: 5000, fecha: d2 });
+    await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: -1000, nota: 'ajuste de prueba' }); // fecha = hoy() = d3
+
+    const { saldoInicialCentavos, dias } = await obtenerCalendarioMovimientos(cliente.id, anioMes);
+    assert(saldoInicialCentavos === 0, `saldoInicialCentavos de un cliente nuevo debería ser 0, es ${saldoInicialCentavos}`);
+
+    for (const fecha of [d1, d2, d3]) {
+      const saldoManual = await calcularSaldo(cliente.id, fecha);
+      const diaAgg = dias.get(fecha);
+      assert(diaAgg, `debería existir una entrada para el día ${fecha}`);
+      assert(
+        diaAgg.saldoAcumuladoCentavos === saldoManual,
+        `día ${fecha}: saldoAcumuladoCentavos=${diaAgg.saldoAcumuladoCentavos}, calcularSaldo=${saldoManual}`
+      );
+    }
+
+    assert(dias.get(d1).cargosCentavos === 8000, 'cargosCentavos del día 1 debería ser 8000');
+    assert(
+      dias.get(d1).movimientos.some((m) => m.tipo === 'CARGO' && m.concepto === 'Internet' && m.montoCentavos === 8000),
+      'el día 1 debería listar el CARGO con su concepto'
+    );
+    assert(dias.get(d2).abonosCentavos === 5000, 'abonosCentavos del día 2 debería ser 5000');
+    assert(
+      dias.get(d3).movimientos.some((m) => m.tipo === 'AJUSTE' && m.montoCentavos === -1000),
+      'el día 3 debería listar el AJUSTE'
+    );
+  });
+
+  // ============================================================
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 9: 6+ casos borde del
+  // calendario (calendar.js puro, sección 4.2). calendar.js se mantiene SIN
+  // CAMBIOS (decisión documentada en el reporte de este builder) porque
+  // obtenerEstadoCalendario/obtenerCalendarioGlobal (deprecated pero
+  // funcionales) siguen dependiendo de él. Fechas fijas y sintéticas (no
+  // dependen de hoy()) para que el cálculo a mano sea reproducible.
   // ============================================================
 
   // Caso A — Adelanto puro: abona 5 cuotas de una vez, no abona los 4 días
   // siguientes → esos 4 días deben pintar GRACIA_ADELANTO, no DEUDA.
-  await verificar('Calendario — Adelanto puro (4.2, caso 1)', async () => {
+  await verificar('LEGACY: Calendario — Adelanto puro (4.2, caso 1)', async () => {
     const cuota = 10000;
     const acuerdos = [{ vigente_desde: '2026-01-01', vigente_hasta: null, monto_cuota_centavos: cuota, created_at: '2026-01-01T00:00:00.000Z' }];
     const movimientos = [{ tipo: 'ABONO', monto_centavos: cuota * 5, fecha: '2026-01-01' }];
@@ -642,7 +1029,7 @@ export async function ejecutarVerificacion() {
 
   // Caso B — Pagos parciales acumulados: abona sistemáticamente el 60% de la
   // cuota → arrastre negativo crece monótonamente, todos los días PARCIAL.
-  await verificar('Calendario — Pagos parciales acumulados (4.2, caso 2)', async () => {
+  await verificar('LEGACY: Calendario — Pagos parciales acumulados (4.2, caso 2)', async () => {
     const cuota = 10000;
     const acuerdos = [{ vigente_desde: '2026-01-01', vigente_hasta: null, monto_cuota_centavos: cuota, created_at: '2026-01-01T00:00:00.000Z' }];
     const movimientos = ['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04', '2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'].map(
@@ -664,7 +1051,7 @@ export async function ejecutarVerificacion() {
   // Caso C — Cliente nuevo a mitad de rango: días previos a vigente_desde son
   // SIN_OBLIGACION y el arrastre NO hereda crédito de esos días (aunque haya
   // un ABONO fechado ahí, por error, en la lista de movimientos).
-  await verificar('Calendario — Cliente nuevo a mitad de rango, sin herencia de arrastre (4.2, caso 3)', async () => {
+  await verificar('LEGACY: Calendario — Cliente nuevo a mitad de rango, sin herencia de arrastre (4.2, caso 3)', async () => {
     const cuota = 5000;
     const acuerdos = [{ vigente_desde: '2026-01-04', vigente_hasta: null, monto_cuota_centavos: cuota, created_at: '2026-01-04T00:00:00.000Z' }];
     const movimientos = [{ tipo: 'ABONO', monto_centavos: 6000, fecha: '2026-01-02' }]; // cae en día SIN_OBLIGACION
@@ -680,7 +1067,7 @@ export async function ejecutarVerificacion() {
 
   // Caso D — Cambio de cuota: el día del cambio usa la cuota NUEVA, y el
   // arrastre acumulado con la cuota vieja sigue aplicando sin reiniciarse.
-  await verificar('Calendario — Cambio de cuota, arrastre continuo (4.2, caso 4)', async () => {
+  await verificar('LEGACY: Calendario — Cambio de cuota, arrastre continuo (4.2, caso 4)', async () => {
     const acuerdos = [
       { vigente_desde: '2026-01-01', vigente_hasta: '2026-01-05', monto_cuota_centavos: 10000, created_at: '2026-01-01T00:00:00.000Z' },
       { vigente_desde: '2026-01-06', vigente_hasta: null, monto_cuota_centavos: 20000, created_at: '2026-01-06T00:00:00.000Z' },
@@ -697,7 +1084,7 @@ export async function ejecutarVerificacion() {
   });
 
   // Caso E — Borde exacto disponible == cuota: debe clasificar GRACIA_ADELANTO, no DEUDA.
-  await verificar('Calendario — Borde disponible == cuota clasifica GRACIA_ADELANTO (4.2, caso 5)', async () => {
+  await verificar('LEGACY: Calendario — Borde disponible == cuota clasifica GRACIA_ADELANTO (4.2, caso 5)', async () => {
     const cuota = 10000;
     const acuerdos = [{ vigente_desde: '2026-01-01', vigente_hasta: null, monto_cuota_centavos: cuota, created_at: '2026-01-01T00:00:00.000Z' }];
     const movimientos = [];
@@ -710,7 +1097,7 @@ export async function ejecutarVerificacion() {
 
   // Caso F — AJUSTE positivo (aumenta deuda) sobre un ABONO del mismo día
   // reduce el crédito efectivo de ESE día en el calendario.
-  await verificar('Calendario — AJUSTE reduce el crédito efectivo del día (4.2, caso 6)', async () => {
+  await verificar('LEGACY: Calendario — AJUSTE reduce el crédito efectivo del día (4.2, caso 6)', async () => {
     const cuota = 10000;
     const acuerdos = [{ vigente_desde: '2026-01-01', vigente_hasta: null, monto_cuota_centavos: cuota, created_at: '2026-01-01T00:00:00.000Z' }];
     const movimientos = [
@@ -722,14 +1109,14 @@ export async function ejecutarVerificacion() {
   });
 
   // ============================================================
-  // Sección 11 — Fase 12 (gate del dueño 25-ago-2026, mockup aprobado):
-  // obtenerCalendarioGlobal(anioMes) — modo "Todas las personas" de la
-  // pestaña Calendario. Reutiliza calcularEstadosCalendario por cliente (vía
-  // obtenerEstadoCalendario), no duplica el algoritmo de estados.
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 11: la pestaña
+  // "Calendario" global (Fase 12) se retiró de la UI. Se mantiene funcional
+  // obtenerCalendarioGlobal(anioMes) y estos tests por las razones ya
+  // explicadas (protege calendar.js, que se mantiene sin cambios).
   // ============================================================
 
   await verificar(
-    'obtenerCalendarioGlobal: esperados/cumplieron coinciden con obtenerEstadoCalendario cliente por cliente para TODOS los días del mes actual',
+    'LEGACY: obtenerCalendarioGlobal — esperados/cumplieron coinciden con obtenerEstadoCalendario cliente por cliente para TODOS los días del mes actual',
     async () => {
       const anioMes = hoy().slice(0, 7);
       const primerDia = `${anioMes}-01`;
@@ -761,7 +1148,7 @@ export async function ejecutarVerificacion() {
     }
   );
 
-  await verificar('obtenerCalendarioGlobal: un cliente en GRACIA_ADELANTO hoy cuenta como cumplido', async () => {
+  await verificar('LEGACY: obtenerCalendarioGlobal — un cliente en GRACIA_ADELANTO hoy cuenta como cumplido', async () => {
     const anioMes = hoy().slice(0, 7);
     const ayer = sumarDias(hoy(), -1);
     const cuota = 10000;
@@ -792,7 +1179,7 @@ export async function ejecutarVerificacion() {
     assert(aggHoy.cumplieron === cumplidosEsperados, 'GRACIA_ADELANTO debería contarse dentro de "cumplieron"');
   });
 
-  await verificar('obtenerCalendarioGlobal: no incluye claves de días futuros', async () => {
+  await verificar('LEGACY: obtenerCalendarioGlobal — no incluye claves de días futuros', async () => {
     const anioMes = hoy().slice(0, 7);
     const global = await obtenerCalendarioGlobal(anioMes);
     for (const fecha of global.dias.keys()) {
@@ -811,7 +1198,7 @@ export async function ejecutarVerificacion() {
     );
   });
 
-  await verificar('obtenerCalendarioGlobal: un mes muy anterior al seed da esperados=0 en todos los días, sin errores', async () => {
+  await verificar('LEGACY: obtenerCalendarioGlobal — un mes muy anterior al seed da esperados=0 en todos los días, sin errores', async () => {
     // El seed más antiguo arranca a hoy-60; hoy-400 cae muy por fuera de eso.
     const fechaVieja = sumarDias(hoy(), -400);
     const anioMesViejo = fechaVieja.slice(0, 7);
@@ -829,17 +1216,14 @@ export async function ejecutarVerificacion() {
     );
   });
 
-  // ============================================================
-  // Sección 12 — §2.8 (gate del dueño 25-ago-2026): frecuencia de cobro
-  // configurable (DIARIA/SEMANAL/MENSUAL). Los 7 casos exigidos por el
-  // protocolo de mutation-check, en el orden del encargo salvo el test de
-  // importarRespaldo (6), que se deja AL FINAL de esta sección porque
-  // reemplaza toda la DB activa de verificación y rompería los tests
-  // siguientes si corriera antes.
+  // LEGACY (retirado en v2, ver §2.9/STORY) — Sección 12, items (1)-(4):
+  // frecuencia de cobro configurable (§2.8, DIARIA/SEMANAL/MENSUAL). Protegen
+  // calendar.js (sin cambios) contra regresiones en su lógica de "día
+  // exigible", que sigue viva ahí aunque la UI ya no la use.
   // ============================================================
 
   // (1) MENSUAL día 31 en un mes de 30 días -> exigible el día 30 (clamp).
-  await verificar('2.8 (1): MENSUAL día 31 en abril (30 días) es exigible el día 30', async () => {
+  await verificar('LEGACY: 2.8 (1) — MENSUAL día 31 en abril (30 días) es exigible el día 30', async () => {
     const cuota = 10000;
     const acuerdos = [
       { vigente_desde: '2026-04-01', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'MENSUAL', dia_mes: 31, dia_semana: null },
@@ -859,7 +1243,7 @@ export async function ejecutarVerificacion() {
   // adelanto de 10 cuotas en el 3er viernes deja EXACTAMENTE 7 viernes en
   // GRACIA_ADELANTO antes de volver a DEUDA (si solo se hubiera debido 1
   // cuota en vez de 2, serían 8 — la cuenta exacta demuestra la magnitud).
-  await verificar('2.8 (2): SEMANAL con 2 viernes impagos acumula deuda de exactamente 2 cuotas', async () => {
+  await verificar('LEGACY: 2.8 (2) — SEMANAL con 2 viernes impagos acumula deuda de exactamente 2 cuotas', async () => {
     const cuota = 10000;
     const acuerdos = [
       { vigente_desde: '2026-01-02', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
@@ -879,7 +1263,7 @@ export async function ejecutarVerificacion() {
   });
 
   // (3) SEMANAL con pago doble la semana previa -> viernes siguiente en GRACIA_ADELANTO.
-  await verificar('2.8 (3): SEMANAL con pago doble deja el viernes siguiente en GRACIA_ADELANTO', async () => {
+  await verificar('LEGACY: 2.8 (3) — SEMANAL con pago doble deja el viernes siguiente en GRACIA_ADELANTO', async () => {
     const cuota = 10000;
     const acuerdos = [
       { vigente_desde: '2026-01-02', vigente_hasta: null, monto_cuota_centavos: cuota, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
@@ -893,7 +1277,7 @@ export async function ejecutarVerificacion() {
   });
 
   // (4) Cambio DIARIA -> SEMANAL a mitad de mes, arrastre continuo (no se reinicia).
-  await verificar('2.8 (4): cambio DIARIA->SEMANAL a mitad de mes mantiene el arrastre continuo', async () => {
+  await verificar('LEGACY: 2.8 (4) — cambio DIARIA->SEMANAL a mitad de mes mantiene el arrastre continuo', async () => {
     const acuerdos = [
       { vigente_desde: '2026-01-01', vigente_hasta: '2026-01-15', monto_cuota_centavos: 10000, frecuencia: 'DIARIA', dia_semana: null, dia_mes: null },
       { vigente_desde: '2026-01-16', vigente_hasta: null, monto_cuota_centavos: 10000, frecuencia: 'SEMANAL', dia_semana: 5, dia_mes: null },
@@ -913,83 +1297,57 @@ export async function ejecutarVerificacion() {
     });
   });
 
-  // (5) Migración v1->v2 (vía initDb): las mismas sentencias que usa initDb()
-  // preservan los datos existentes y dejan frecuencia='DIARIA' en acuerdos viejos.
-  await verificar('2.8 (5): MIGRACION_V1_A_V2 preserva datos y deja frecuencia=DIARIA', async () => {
+  // NOTA — item retirado del protocolo original: "2.8 (7) resumenDia solo
+  // incluye clientes con cobro exigible hoy" se ELIMINÓ (no se movió a
+  // LEGACY) al pivotar a §2.9: probaba un comportamiento de cara a la UI de
+  // la pantalla "Hoy", que ya no existe y no tiene ningún consumidor —
+  // mantenerlo no protege historia ni migración, solo prueba código muerto
+  // por probarlo. resumenDia() sigue funcional y cubierto por la Sección 6b
+  // (BUG arrastreInicial), que sí protege integridad histórica real.
+
+  // ============================================================
+  // Migraciones de esquema (VIGENTES — no son legacy: siguen siendo la única
+  // forma de que una base local vieja o un respaldo antiguo lleguen a v3).
+  // Ambos tests son DESTRUCTIVOS (importarRespaldo reemplaza toda la DB
+  // activa) y van al FINAL de la suite, antes solo de A-002.
+  // ============================================================
+
+  await verificar('Migración v2->v3: importarRespaldo() siembra conceptos desde servicio y backfillea orden', async () => {
     const clienteId = uuidV7();
     const acuerdoId = uuidV7();
     const movimientoId = uuidV7();
-    const dbV1 = crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: '2026-01-01' });
-    try {
-      dbV1.run('BEGIN;');
-      for (const sql of MIGRACION_V1_A_V2) dbV1.run(sql);
-      dbV1.run("UPDATE meta SET valor = '2' WHERE clave = 'schema_version'");
-      dbV1.run('COMMIT;');
+    const dbV2 = crearDbV2VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: '2026-02-01' });
+    const bytes = dbV2.export();
+    dbV2.close();
+    const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 
-      const stmtMeta = dbV1.prepare("SELECT valor FROM meta WHERE clave='schema_version'");
-      stmtMeta.step();
-      const versionFinal = stmtMeta.getAsObject().valor;
-      stmtMeta.free();
-      assert(versionFinal === SCHEMA_VERSION, `schema_version tras migrar debería ser ${SCHEMA_VERSION}, es ${versionFinal}`);
+    await importarRespaldo(arrayBuffer);
 
-      const stmtAcuerdo = dbV1.prepare('SELECT * FROM acuerdos WHERE id = ?');
-      stmtAcuerdo.bind([acuerdoId]);
-      stmtAcuerdo.step();
-      const acuerdoMigrado = stmtAcuerdo.getAsObject();
-      stmtAcuerdo.free();
-      assert(acuerdoMigrado.frecuencia === 'DIARIA', `frecuencia debería quedar DIARIA, es ${acuerdoMigrado.frecuencia}`);
-      assert(acuerdoMigrado.dia_semana === null, `dia_semana debería quedar NULL, es ${acuerdoMigrado.dia_semana}`);
-      assert(acuerdoMigrado.dia_mes === null, `dia_mes debería quedar NULL, es ${acuerdoMigrado.dia_mes}`);
-      assert(acuerdoMigrado.monto_cuota_centavos === 7500, 'el monto de la cuota no debería haber cambiado con la migración');
+    const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V2 Verify', tamanioPagina: 5 });
+    assert(clientes.length === 1, 'el cliente del respaldo v2 debería existir tras importar');
+    const clienteMigrado = clientes[0];
+    assert(clienteMigrado.id === clienteId, 'el id del cliente importado debería coincidir con el del archivo v2');
+    assert(clienteMigrado.categoria_id === null, 'un cliente v2 migrado debería quedar sin categoría');
+    assert(Number.isInteger(clienteMigrado.orden), `orden debería backfillearse como entero, es ${clienteMigrado.orden}`);
 
-      const stmtMov = dbV1.prepare('SELECT COUNT(*) AS c FROM movimientos WHERE id = ?');
-      stmtMov.bind([movimientoId]);
-      stmtMov.step();
-      assert(stmtMov.getAsObject().c === 1, 'el movimiento original debería seguir intacto tras la migración');
-      stmtMov.free();
-    } finally {
-      dbV1.close();
-    }
+    const conceptos = await listarConceptos();
+    assert(
+      conceptos.some((c) => c.nombre === 'Renta'),
+      'la migración debería sembrar el concepto "Renta" desde movimientos.servicio del respaldo v2'
+    );
+
+    const dbInterna = _dbInternaParaVerificacion();
+    const filaVersion = dbInterna.exec("SELECT valor FROM meta WHERE clave='schema_version'");
+    assert(filaVersion.length && filaVersion[0].values[0][0] === SCHEMA_VERSION, `schema_version tras importar debería ser ${SCHEMA_VERSION}`);
+
+    const stmtMov = dbInterna.prepare('SELECT COUNT(*) AS c FROM movimientos WHERE id = ?');
+    stmtMov.bind([movimientoId]);
+    stmtMov.step();
+    assert(stmtMov.getAsObject().c === 1, 'el movimiento original (CARGO "Renta") debería seguir intacto tras la migración');
+    stmtMov.free();
   });
 
-  // (7) Hoy (resumenDia) solo lista clientes con cobro EXIGIBLE ese día.
-  await verificar('2.8 (7): resumenDia solo incluye clientes con cobro exigible hoy', async () => {
-    const hoyDow = diaDeSemana(hoy());
-    const dowDistinto = (hoyDow + 1) % 7;
-
-    const { cliente: clienteDiaria } = await crearClienteConAcuerdo({
-      nombre: 'Cliente Frecuencia Diaria Hoy Verify',
-      monto_cuota_centavos: 1000,
-      vigente_desde: hoy(),
-      frecuencia: 'DIARIA',
-    });
-    const { cliente: clienteSemanalHoy } = await crearClienteConAcuerdo({
-      nombre: 'Cliente Frecuencia Semanal Hoy Verify',
-      monto_cuota_centavos: 2000,
-      vigente_desde: hoy(),
-      frecuencia: 'SEMANAL',
-      dia_semana: hoyDow,
-    });
-    const { cliente: clienteSemanalNoHoy } = await crearClienteConAcuerdo({
-      nombre: 'Cliente Frecuencia Semanal NoHoy Verify',
-      monto_cuota_centavos: 3000,
-      vigente_desde: hoy(),
-      frecuencia: 'SEMANAL',
-      dia_semana: dowDistinto,
-    });
-
-    const resumen = await resumenDia(hoy());
-    const idsEnResumen = new Set(resumen.clientes.map((c) => c.cliente_id));
-
-    assert(idsEnResumen.has(clienteDiaria.id), 'DIARIA siempre es exigible: debería estar en resumenDia de hoy');
-    assert(idsEnResumen.has(clienteSemanalHoy.id), 'SEMANAL cuyo día coincide con hoy debería estar en resumenDia');
-    assert(!idsEnResumen.has(clienteSemanalNoHoy.id), 'SEMANAL cuyo día NO es hoy no debería aparecer en resumenDia');
-  });
-
-  // (6) Import de respaldo v1 funciona — DEBE IR AL FINAL: importarRespaldo
-  // reemplaza toda la DB activa, así que cualquier test posterior que
-  // dependa del seed/los clientes ya creados en esta corrida se rompería.
-  await verificar('2.8 (6): importarRespaldo() acepta un archivo v1 y lo migra en memoria', async () => {
+  await verificar('Migración v1->v3 (encadenada): importarRespaldo() acepta un archivo v1 y preserva todo', async () => {
     const clienteId = uuidV7();
     const acuerdoId = uuidV7();
     const movimientoId = uuidV7();
@@ -1003,6 +1361,8 @@ export async function ejecutarVerificacion() {
     const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V1 Verify', tamanioPagina: 5 });
     assert(clientes.length === 1, 'el cliente del respaldo v1 debería existir tras importar');
     assert(clientes[0].id === clienteId, 'el id del cliente importado debería coincidir con el del archivo v1');
+    assert(clientes[0].categoria_id === null, 'un cliente v1 migrado debería quedar sin categoría');
+    assert(Number.isInteger(clientes[0].orden), `orden debería backfillearse como entero, es ${clientes[0].orden}`);
 
     const acuerdosCliente = await listarAcuerdos(clienteId);
     assert(acuerdosCliente.length === 1, 'el acuerdo del respaldo v1 debería existir tras importar');

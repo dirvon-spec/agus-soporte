@@ -10,9 +10,10 @@ import {
 } from './componentes.js';
 
 const MICROCOPY = `
-  <p>Elegí un mes para ver cuánto se cargó (servicios pagados a nombre de tus
+  <p>Elegí un mes para ver cuánto se cargó (lo que pagaste a nombre de tus
   clientes), cuánto se cobró, y cuánta cartera quedó pendiente a fin de ese
-  mes.</p>
+  mes. Los cobros son como los acuerdes con cada quien: esto es un resumen
+  general, no por categoría (esa suma vive en la pantalla Clientes).</p>
   <p>Al final de esta pantalla encontrás la sección de Ajustes, donde podés
   exportar un respaldo de todos tus datos o importar uno anterior.</p>
 `;
