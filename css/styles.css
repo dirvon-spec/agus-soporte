@@ -830,13 +830,16 @@ button {
 }
 
 .fila-excel-monto {
+  /* SIN color acá a propósito: .monto-positivo/.monto-negativo/.monto-neutro
+     (definidas antes en este archivo, misma especificidad de una clase) deben
+     ganar la cascada. Declarar `color` acá las pisaba en TODAS las filas, en
+     ambos temas — causa raíz del feedback del dueño de montos "en negro". */
   background: none;
   border: none;
   padding: 4px 1px;
   font-weight: 700;
   font-size: 0.78rem;
   text-align: right;
-  color: var(--color-texto);
   min-height: 32px;
   display: flex;
   align-items: center;

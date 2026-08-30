@@ -60,7 +60,7 @@ function filaClienteHtml(c, categoriaColor) {
       <button type="button" class="fila-excel-nombre" data-accion="ver-persona" title="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</button>
       <button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" title="${escapeHtml(montoOGuion(c.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(c.abonos_mes_centavos))}</button>
       <button type="button" class="fila-excel-monto monto-negativo" data-accion="cargo" title="${escapeHtml(montoOGuion(c.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(c.cargos_mes_centavos))}</button>
-      <span class="fila-excel-monto ${sinMovimientos ? '' : claseSaldo(c.saldo_centavos)}" title="${escapeHtml(montoOGuion(saldoParaMostrar))}">${montoSpan(montoListaOGuion(saldoParaMostrar))}</span>
+      <span class="fila-excel-monto ${claseSaldo(saldoParaMostrar)}" title="${escapeHtml(montoOGuion(saldoParaMostrar))}">${montoSpan(montoListaOGuion(saldoParaMostrar))}</span>
     </li>`;
 }
 
@@ -72,7 +72,7 @@ function filaSumaHtml(grupo) {
       <span class="fila-suma-etiqueta">Σ ${escapeHtml(grupo.categoria_nombre)}</span>
       <span class="fila-excel-monto monto-positivo" title="${escapeHtml(montoOGuion(grupo.totales.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.abonos_mes_centavos))}</span>
       <span class="fila-excel-monto monto-negativo" title="${escapeHtml(montoOGuion(grupo.totales.cargos_mes_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.cargos_mes_centavos))}</span>
-      <span class="fila-excel-monto" title="${escapeHtml(montoOGuion(grupo.totales.saldo_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.saldo_centavos))}</span>
+      <span class="fila-excel-monto ${claseSaldo(grupo.totales.saldo_centavos)}" title="${escapeHtml(montoOGuion(grupo.totales.saldo_centavos))}">${montoSpan(montoListaOGuion(grupo.totales.saldo_centavos))}</span>
     </li>`;
 }
 
