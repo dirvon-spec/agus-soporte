@@ -12,7 +12,7 @@
 // se llega solo por URL directa.
 
 import { obtenerCliente, calcularSaldo, listarCategorias, listarMovimientos, obtenerCalendarioMovimientos, actualizarCliente, borrarClienteLogico } from '../db.js';
-import { hoy } from '../utils/date.js';
+import { hoy, esFutura } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, montoCortoOGuion, claseSaldo,
   formatearFechaCorta, formatearMesAnio, escapeHtml, bolitaHtml, abrirPanelRapido, Iconos,
@@ -223,10 +223,11 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
                 const numeroDia = i + 1;
                 const fechaDia = `${mesVisible}-${String(numeroDia).padStart(2, '0')}`;
                 const diaInfo = dias.get(fechaDia);
-                return `<button type="button" class="mes-celda ${claseColorCelda(diaInfo)}" data-fecha="${fechaDia}">
+                const futura = esFutura(fechaDia);
+                return `<button type="button" class="mes-celda ${claseColorCelda(diaInfo)}" data-fecha="${fechaDia}" ${futura ? 'disabled' : ''}>
                   <span class="mes-celda-numero">${numeroDia}</span>
-                  <span class="mes-celda-datos">${lineasCelda(diaInfo)}</span>
-                  ${mostrarSaldoDiario ? `<span class="mes-celda-saldo">= ${montoCortoOGuion(diaInfo.saldoAcumuladoCentavos)}</span>` : ''}
+                  <span class="mes-celda-datos">${futura ? '' : lineasCelda(diaInfo)}</span>
+                  ${mostrarSaldoDiario && !futura ? `<span class="mes-celda-saldo">= ${montoCortoOGuion(diaInfo.saldoAcumuladoCentavos)}</span>` : ''}
                 </button>`;
               }).join('')}
               ${Array.from({ length: celdasFinales - totalCeldas }, () => '<div class="mes-celda mes-celda-vacia"></div>').join('')}
@@ -261,6 +262,10 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
                     </li>`).join('')}</ul>`
               }
               <p class="popover-dia-saldo">Saldo a esa fecha: <strong>${montoOGuion(infoDiaSeleccionado ? infoDiaSeleccionado.saldoAcumuladoCentavos : null)}</strong></p>
+              <div class="popover-dia-acciones">
+                <button type="button" class="btn btn-secundario" id="btn-popover-abono">+ Abono</button>
+                <button type="button" class="btn btn-secundario" id="btn-popover-cargo">+ Cargo</button>
+              </div>
             </div>
           </div>` : ''}
       </section>
@@ -402,7 +407,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
       renderTodo();
     });
 
-    contenedor.querySelectorAll('.mes-celda[data-fecha]').forEach((btn) => {
+    contenedor.querySelectorAll('.mes-celda[data-fecha]:not([disabled])').forEach((btn) => {
       btn.addEventListener('click', () => {
         fechaSeleccionada = fechaSeleccionada === btn.dataset.fecha ? null : btn.dataset.fecha;
         renderTodo();
@@ -413,6 +418,27 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     if (overlay) {
       overlay.addEventListener('click', (e) => { if (e.target === overlay) { fechaSeleccionada = null; renderTodo(); } });
       contenedor.querySelector('#btn-cerrar-popover').addEventListener('click', () => { fechaSeleccionada = null; renderTodo(); });
+
+      // Ajuste aprobado por el dueño: +Abono/+Cargo al pie del popover del
+      // día — cierran el popover y abren el panel rápido con el CLIENTE y la
+      // FECHA (el día tocado) ya puestos, sin selector de fecha visible.
+      const fechaPopover = fechaSeleccionada;
+      function cerrarPopoverYAbrirPanel(tipo) {
+        // El popover vive en `contenedor` (no en el mecanismo de sheet), así
+        // que se saca del DOM al toque para que no quede "stale" debajo del
+        // panel rápido si el gestor cancela sin guardar.
+        fechaSeleccionada = null;
+        overlay.remove();
+        abrirPanelRapido({ tipo, clienteId: id, clienteNombre: cliente.nombre, fechaInicial: fechaPopover, onGuardado: renderTodo });
+      }
+      const btnPopoverAbono = contenedor.querySelector('#btn-popover-abono');
+      if (btnPopoverAbono) {
+        btnPopoverAbono.addEventListener('click', () => cerrarPopoverYAbrirPanel('ABONO'));
+      }
+      const btnPopoverCargo = contenedor.querySelector('#btn-popover-cargo');
+      if (btnPopoverCargo) {
+        btnPopoverCargo.addEventListener('click', () => cerrarPopoverYAbrirPanel('CARGO'));
+      }
     }
 
     contenedor.querySelector('#switch-saldo-diario').addEventListener('change', (e) => {

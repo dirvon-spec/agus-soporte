@@ -1579,6 +1579,17 @@ button.fila-excel-monto:focus-visible {
   padding-top: var(--espaciado-sm);
 }
 
+/* Ajuste aprobado por el dueño: +Abono/+Cargo al pie del popover del día. */
+.popover-dia-acciones {
+  display: flex;
+  gap: var(--espaciado-sm);
+  margin-top: var(--espaciado-sm);
+}
+
+.popover-dia-acciones .btn {
+  flex: 1;
+}
+
 /* ============================================================
    Tablas (Resumen, estado de cuenta)
    ============================================================ */
