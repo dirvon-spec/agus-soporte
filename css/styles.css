@@ -1829,6 +1829,52 @@ button.fila-excel-monto:focus-visible {
 }
 
 /* ============================================================
+   Bloqueante de producción: banner de modo demo + "Empezar a trabajar con
+   mis datos reales"
+   ============================================================ */
+
+/* NO descartable a propósito: sin botón de cerrar. Ocupa todo el ancho,
+   funciona como botón completo (toda la franja es tocable). */
+.banner-modo-demo {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--color-advertencia-bg);
+  color: var(--color-advertencia);
+  border: none;
+  border-bottom: 2px solid var(--color-advertencia);
+  padding: var(--espaciado-sm) var(--espaciado-md);
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  margin: calc(-1 * var(--espaciado-md)) calc(-1 * var(--espaciado-md)) var(--espaciado-sm);
+}
+
+.zona-modo-real {
+  margin-bottom: var(--espaciado-md);
+  padding-bottom: var(--espaciado-md);
+  border-bottom: 1px dashed var(--color-borde);
+}
+
+.aviso-modo-real {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  border-radius: var(--radio-borde);
+  padding: var(--espaciado-sm) var(--espaciado-md);
+  margin-bottom: var(--espaciado-md);
+  font-size: 0.88rem;
+}
+
+.aviso-modo-real p {
+  margin: 0 0 var(--espaciado-xs);
+}
+
+.aviso-modo-real p:last-child {
+  margin-bottom: 0;
+}
+
+/* ============================================================
    §2.11 — Acciones ✎/🗑 por movimiento (Persona y desglose de Global)
    ============================================================ */
 

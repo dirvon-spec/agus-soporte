@@ -16,6 +16,7 @@ import {
   listarConceptos, crearConcepto, borrarConceptoLogico, registrarCargo, registrarAbono,
   listarClientesAgrupados, registrarVisitaSinAbono, eliminarVisitaSinAbono,
   corregirMontoMovimiento, borrarMovimientoLogico, restaurarMovimiento,
+  esModoDemo, iniciarModoReal,
 } from '../db.js';
 
 // ============================================================
@@ -1061,6 +1062,113 @@ export function abrirSheetSeleccionarCliente({ fecha, onGuardado }) {
       render();
     });
   }, { titulo: 'Elegir cliente' });
+}
+
+// ============================================================
+// Bloqueante de producción: banner de modo demo + flujo "Empezar a trabajar
+// con mis datos reales" (iniciarModoReal). Un solo lugar para no repetir la
+// lógica en Clientes y Global.
+// ============================================================
+
+/**
+ * Banner NO descartable, visible arriba de Clientes y Global mientras
+ * `esModoDemo()` sea true. Devuelve '' en modo real (cero rastro).
+ */
+export function bannerModoDemoHtml() {
+  if (!esModoDemo()) return '';
+  return `
+    <button type="button" class="banner-modo-demo" id="btn-banner-modo-demo">
+      Estás viendo datos de EJEMPLO. Antes de registrar tus clientes reales, tocá acá para empezar de cero.
+    </button>`;
+}
+
+/** Wire del click del banner — no-op si no está presente (modo real). */
+export function wireBannerModoDemo(contenedor) {
+  const btn = contenedor.querySelector('#btn-banner-modo-demo');
+  if (btn) btn.addEventListener('click', () => abrirSheetIniciarModoReal());
+}
+
+/**
+ * Confirmación fuerte de dos pasos para `iniciarModoReal()`: paso 1 explica
+ * que es definitivo (sin Deshacer — a propósito, no es un error corregible);
+ * paso 2 exige escribir "EMPEZAR" para habilitar el botón destructivo. Tras
+ * confirmar, recarga la app entera en Clientes (más simple y confiable que
+ * intentar re-renderizar todo el estado en memoria a mano tras borrar
+ * absolutamente todo).
+ */
+export function abrirSheetIniciarModoReal() {
+  abrirSheet((host) => {
+    let paso = 1;
+    let valorConfirmacion = '';
+    let error = '';
+
+    function capturarConfirmacion() {
+      const input = host.querySelector('#confirmar-empezar');
+      if (input) valorConfirmacion = input.value;
+    }
+
+    function render() {
+      capturarConfirmacion();
+      if (paso === 1) {
+        host.innerHTML = `
+          <div class="aviso-modo-real">
+            <p><strong>Esto borra TODOS los clientes, movimientos, categorías y conceptos de EJEMPLO</strong>
+              de esta base. Es definitivo — no hay Deshacer.</p>
+            <p>Tus datos reales van a empezar desde una base completamente vacía.</p>
+          </div>
+          <div class="acciones-formulario acciones-formulario-columna">
+            <button type="button" class="btn btn-peligro btn-ancho" id="btn-continuar-modo-real">Continuar</button>
+            <button type="button" class="btn btn-secundario btn-ancho" id="btn-cancelar-modo-real">Cancelar</button>
+          </div>`;
+        host.querySelector('#btn-continuar-modo-real').addEventListener('click', () => { paso = 2; render(); });
+        host.querySelector('#btn-cancelar-modo-real').addEventListener('click', () => cerrarSheet());
+        return;
+      }
+
+      const coincide = valorConfirmacion.trim().toUpperCase() === 'EMPEZAR';
+      host.innerHTML = `
+        <div class="aviso-modo-real">
+          <p>Para confirmar, escribí <strong>EMPEZAR</strong> abajo. Esta acción no se puede deshacer.</p>
+        </div>
+        <div class="campo">
+          <label for="confirmar-empezar">Escribí "EMPEZAR"</label>
+          <input id="confirmar-empezar" type="text" autocomplete="off" value="${escapeHtml(valorConfirmacion)}" autofocus />
+        </div>
+        ${errorGeneral(error)}
+        <div class="acciones-formulario acciones-formulario-columna">
+          <button type="button" class="btn btn-peligro btn-ancho" id="btn-confirmar-modo-real" ${coincide ? '' : 'disabled'}>Empezar de cero</button>
+          <button type="button" class="btn btn-secundario btn-ancho" id="btn-cancelar-modo-real-2">Cancelar</button>
+        </div>`;
+
+      const input = host.querySelector('#confirmar-empezar');
+      input.focus();
+      const largo = input.value.length;
+      input.setSelectionRange(largo, largo);
+      input.addEventListener('input', () => render());
+
+      host.querySelector('#btn-cancelar-modo-real-2').addEventListener('click', () => cerrarSheet());
+      const btnConfirmar = host.querySelector('#btn-confirmar-modo-real');
+      if (coincide) {
+        btnConfirmar.addEventListener('click', async () => {
+          btnConfirmar.disabled = true;
+          try {
+            await iniciarModoReal();
+            cerrarSheet();
+            mostrarToast('Listo, la app es tuya. Registrá tu primer cliente.', 'exito');
+            window.location.hash = '#/clientes';
+            // Pequeña espera antes de recargar (mismo patrón que importar
+            // respaldo) para que el toast de bienvenida alcance a verse.
+            setTimeout(() => window.location.reload(), 800);
+          } catch (err) {
+            error = err.message || 'No se pudo iniciar el modo real.';
+            btnConfirmar.disabled = false;
+            render();
+          }
+        });
+      }
+    }
+    render();
+  }, { titulo: 'Empezar a trabajar con mis datos reales' });
 }
 
 // ============================================================

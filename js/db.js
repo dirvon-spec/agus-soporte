@@ -434,6 +434,22 @@ export function estaSoloLectura() {
   return soloLectura;
 }
 
+/**
+ * URGENTE (bloqueante de producción, 30-ago-2026): true si la base activa
+ * sigue en modo demo (`meta.modo_demo = '1'`) — la UI la usa para decidir si
+ * mostrar el banner/CTA "Empezar con datos reales" y para saber si el
+ * re-sembrado anti-congelamiento (D1) sigue siendo una amenaza latente sobre
+ * esta base (SOLO corre si modo_demo='1', ver revisarReSembradoAntiCongelamiento).
+ * Si el meta aún no existe (base recién migrada de un esquema muy viejo que
+ * nunca lo seteó), se trata como NO-demo — mismo criterio conservador que ya
+ * usa revisarReSembradoAntiCongelamiento (`modoDemo !== '1'` → no re-siembra).
+ * Requiere initDb() ya resuelto (lee de la base activa, igual que estaSoloLectura()).
+ * @returns {boolean}
+ */
+export function esModoDemo() {
+  return obtenerMetaInterno('modo_demo') === '1';
+}
+
 // ============================================================
 // Ciclo de vida / infraestructura
 // ============================================================
@@ -815,6 +831,48 @@ export async function importarRespaldo(arrayBuffer) {
   db = dbCandidata;
   ejecutarSQL('PRAGMA foreign_keys = ON;');
   setMetaInterno('modo_demo', '0');
+  await persistirInmediato();
+}
+
+/**
+ * URGENTE (bloqueante de producción, 30-ago-2026): "Empezar con datos
+ * reales" — borra TODOS los datos de negocio (clientes, acuerdos,
+ * movimientos, categorias, conceptos, visitas_sin_abono) dejando el esquema
+ * v4 intacto y vacío, y marca `meta.modo_demo = '0'`. `schema_version` NO se
+ * toca. A partir de acá revisarReSembradoAntiCongelamiento() nunca vuelve a
+ * disparar sobre esta base (está condicionado a modo_demo='1' — ver arriba),
+ * así que el gestor puede dejar de abrir la app por días sin riesgo de que
+ * sus datos reales capturados se borren por el re-seed anti-congelamiento.
+ *
+ * Orden de borrado respeta las FKs manuales (children antes que parents):
+ * movimientos/acuerdos/visitas_sin_abono referencian clientes; clientes
+ * referencia categorias — mismo principio de "cascada manual, sin ON DELETE
+ * CASCADE" que el resto de la capa de datos (STORY.md).
+ *
+ * Persiste de INMEDIATO (persistirInmediato(), sin el debounce de 500ms de
+ * persistirEnIndexedDB()) porque esta operación es irreversible y de una sola
+ * vez: no tiene sentido dejar una ventana donde la base activa ya está vacía
+ * en memoria pero IndexedDB todavía tiene el snapshot demo viejo.
+ * @returns {Promise<void>}
+ */
+export async function iniciarModoReal() {
+  verificarEscritura();
+
+  ejecutarSQL('BEGIN;');
+  try {
+    db.run('DELETE FROM movimientos;');
+    db.run('DELETE FROM acuerdos;');
+    db.run('DELETE FROM visitas_sin_abono;');
+    db.run('DELETE FROM clientes;');
+    db.run('DELETE FROM categorias;');
+    db.run('DELETE FROM conceptos;');
+    setMetaInterno('modo_demo', '0');
+    db.run('COMMIT;');
+  } catch (e) {
+    db.run('ROLLBACK;');
+    throw crearError('DB_ERROR', 'No se pudo iniciar el modo real.', { original: String(e) });
+  }
+
   await persistirInmediato();
 }
 
@@ -2515,6 +2573,20 @@ export async function generarEnlaceWhatsApp(cliente_id) {
 /** @returns {any} la instancia interna de sql.js (uso exclusivo de verificación en dev). */
 export function _dbInternaParaVerificacion() {
   return db;
+}
+
+/**
+ * URGENTE (30-ago-2026): expone revisarReSembradoAntiCongelamiento() para
+ * verificarla directamente. initDb() solo la invoca una vez por carga de
+ * página (guardada tras `inicializado=true`), así que no hay forma de
+ * ejercitarla de nuevo simulando un "reload" real dentro de la misma corrida
+ * de ?verify=1 — este wrapper de solo-test permite probar, sin recargar la
+ * página, que con modo_demo='0' el re-seed NUNCA dispara aunque la base esté
+ * vacía (el escenario exacto de iniciarModoReal() + una recarga futura).
+ * @returns {Promise<void>}
+ */
+export async function _revisarReSembradoAntiCongelamientoParaVerificacion() {
+  return revisarReSembradoAntiCongelamiento();
 }
 
 /**

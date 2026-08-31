@@ -17,6 +17,7 @@ import {
   mostrarToast, errorCampo, errorGeneral, Iconos, bolitaHtml,
   abrirSheet, cerrarSheet, abrirSheetCategoria, abrirSheetConfiguracion, abrirPanelRapido,
   activarLongPress, activarArrastreOrden, PALETA_COLORES_CATEGORIA,
+  bannerModoDemoHtml, wireBannerModoDemo,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -485,6 +486,7 @@ export async function renderPantallaClientes(contenedor) {
 
   contenedor.innerHTML = `
     <section class="pantalla" data-pantalla="clientes">
+      ${bannerModoDemoHtml()}
       ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
       <div class="encabezado-clientes">
         <h1>Clientes</h1>
@@ -524,6 +526,7 @@ export async function renderPantallaClientes(contenedor) {
   contenedor.querySelector('#btn-config').addEventListener('click', () => {
     abrirSheetConfiguracion({ onCambios: refrescarTodo });
   });
+  wireBannerModoDemo(contenedor);
 
   contenedor.querySelector('#btn-dia-anterior').addEventListener('click', () => {
     fechaVista = sumarDias(fechaVista, -1);

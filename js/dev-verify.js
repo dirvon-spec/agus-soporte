@@ -42,8 +42,11 @@ import {
   exportarRespaldo,
   obtenerUltimoRespaldo,
   importarRespaldo,
+  iniciarModoReal,
+  esModoDemo,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
+  _revisarReSembradoAntiCongelamientoParaVerificacion,
 } from './db.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { generarSeed } from './seed.js';
@@ -1916,6 +1919,7 @@ export async function ejecutarVerificacion() {
     const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 
     await importarRespaldo(arrayBuffer);
+    assert(esModoDemo() === false, 'URGENTE: importarRespaldo() debería seguir marcando modo_demo=0 (no reactiva D1)');
 
     const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V2 Verify', tamanioPagina: 5 });
     assert(clientes.length === 1, 'el cliente del respaldo v2 debería existir tras importar');
@@ -1951,6 +1955,7 @@ export async function ejecutarVerificacion() {
     const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 
     await importarRespaldo(arrayBuffer);
+    assert(esModoDemo() === false, 'URGENTE: importarRespaldo() debería seguir marcando modo_demo=0 (no reactiva D1)');
 
     const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V1 Verify', tamanioPagina: 5 });
     assert(clientes.length === 1, 'el cliente del respaldo v1 debería existir tras importar');
@@ -1980,6 +1985,7 @@ export async function ejecutarVerificacion() {
     const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 
     await importarRespaldo(arrayBuffer);
+    assert(esModoDemo() === false, 'URGENTE: importarRespaldo() debería seguir marcando modo_demo=0 (no reactiva D1)');
 
     const dbInterna = _dbInternaParaVerificacion();
     const filas = dbInterna.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
@@ -2008,6 +2014,134 @@ export async function ejecutarVerificacion() {
     // la tabla nueva ya es funcional de punta a punta tras la migración
     const visita = await registrarVisitaSinAbono({ cliente_id: clienteId, fecha: hoy() });
     assert(visita && visita.id, 'registrarVisitaSinAbono debería funcionar sobre una DB recién migrada v3->v4');
+  });
+
+  // ============================================================
+  // Sección 16 — URGENTE (bloqueante de producción, 30-ago-2026): iniciarModoReal.
+  // DESTRUCTIVA (borra TODA la base activa) — va al final, después de las
+  // migraciones, por la MISMA razón que ellas: nada después de este bloque
+  // puede depender de que la base activa siga teniendo datos (excepto A-002,
+  // que inspecciona la base de DEMO por separado, no la de este ?verify=1).
+  // ============================================================
+
+  await verificar(
+    'iniciarModoReal: borra TODOS los datos, deja esquema v4 vacío, modo_demo=0, y persiste DE INMEDIATO (sin el debounce de 500ms)',
+    async () => {
+      // Precondición forzada explícitamente (NO se asume el estado dejado por tests
+      // anteriores — este bloque corre después de las migraciones destructivas de
+      // arriba, que ya dejan modo_demo=0 por su cuenta): se fuerza modo_demo=1 por SQL
+      // directo para simular honestamente "la base demo real que el gestor viene usando".
+      const dbSetup = _dbInternaParaVerificacion();
+      dbSetup.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      assert(esModoDemo() === true, 'setup del test: se forzó modo_demo=1 y esModoDemo() debería reflejarlo');
+
+      // crearConcepto es idempotente — necesario porque este bloque corre DESPUÉS de
+      // las migraciones destructivas de arriba, cuyas bases candidatas hechas a mano
+      // (DDL_V2/V3_LITERAL) no siembran el catálogo `conceptos` como sí lo hace generarSeed().
+      const conceptoTemp = await crearConcepto({ nombre: 'Agua' });
+      const catTemp = await crearCategoria({ nombre: 'CategoriaModoReal Verify', color: 'amarillo' });
+      const clienteTemp = await crearCliente({ nombre: 'Cliente ModoReal Verify', categoria_id: catTemp.id });
+      await registrarCargo({ cliente_id: clienteTemp.id, monto_centavos: 5000, fecha: hoy(), concepto: conceptoTemp.nombre });
+
+      await iniciarModoReal();
+
+      assert(esModoDemo() === false, 'tras iniciarModoReal, esModoDemo() debería ser false');
+
+      const dbInterna = _dbInternaParaVerificacion();
+      for (const tabla of ['clientes', 'acuerdos', 'movimientos', 'categorias', 'conceptos', 'visitas_sin_abono']) {
+        const stmt = dbInterna.prepare(`SELECT COUNT(*) AS c FROM ${tabla}`);
+        stmt.step();
+        const c = stmt.getAsObject().c;
+        stmt.free();
+        assert(c === 0, `la tabla ${tabla} debería quedar completamente vacía tras iniciarModoReal, tiene ${c} filas`);
+      }
+
+      const filaVersion = dbInterna.exec("SELECT valor FROM meta WHERE clave='schema_version'");
+      assert(
+        filaVersion.length && filaVersion[0].values[0][0] === SCHEMA_VERSION,
+        `schema_version NO debería tocarse por iniciarModoReal, debería seguir siendo ${SCHEMA_VERSION}`
+      );
+
+      const { clientes: clientesTrasBorrar } = await listarClientes({});
+      assert(clientesTrasBorrar.length === 0, 'listarClientes() debería devolver vacío tras iniciarModoReal');
+      const archivadosTrasBorrar = await listarClientesArchivados();
+      assert(archivadosTrasBorrar.length === 0, 'listarClientesArchivados() también debería devolver vacío tras iniciarModoReal');
+
+      // Persistencia INMEDIATA (persistirInmediato, sin debounce): leyendo directo de
+      // IndexedDB justo después de que el await se resuelve, sin esperar nada más, ya
+      // debería reflejar la base vacía — si esto usara el debounce de 500ms de
+      // persistirEnIndexedDB(), este chequeo (sin ningún setTimeout de por medio)
+      // fallaría de forma intermitente/real leyendo el snapshot viejo (con datos).
+      const idb = await new Promise((resolve, reject) => {
+        const req = indexedDB.open('agus-db-verify', 1);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const bytesPersistidos = await new Promise((resolve, reject) => {
+        const tx = idb.transaction('archivos', 'readonly');
+        const req = tx.objectStore('archivos').get('sqlite-principal');
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+      idb.close();
+      assert(bytesPersistidos, 'debería haber bytes ya persistidos en IndexedDB (agus-db-verify) inmediatamente tras el await');
+
+      const DatabaseCtor = dbInterna.constructor;
+      const dbDesdeDisco = new DatabaseCtor(bytesPersistidos);
+      try {
+        const stmtDisco = dbDesdeDisco.prepare('SELECT COUNT(*) AS c FROM clientes');
+        stmtDisco.step();
+        const cDisco = stmtDisco.getAsObject().c;
+        stmtDisco.free();
+        assert(
+          cDisco === 0,
+          `la persistencia debería ser INMEDIATA (sin debounce): el archivo en IndexedDB ya debería reflejar 0 clientes justo después del await, tiene ${cDisco}`
+        );
+        const filaVersionDisco = dbDesdeDisco.exec("SELECT valor FROM meta WHERE clave='modo_demo'");
+        assert(
+          filaVersionDisco.length && filaVersionDisco[0].values[0][0] === '0',
+          'el archivo persistido en IndexedDB también debería tener modo_demo=0 (no solo la copia en memoria)'
+        );
+      } finally {
+        dbDesdeDisco.close();
+      }
+    }
+  );
+
+  await verificar(
+    'URGENTE/D1: con modo_demo=0, el re-seed anti-congelamiento NO dispara — ni con la base vacía (iniciarModoReal) ni con movimientos viejos',
+    async () => {
+      assert(esModoDemo() === false, 'depende del test anterior: iniciarModoReal ya debería haber dejado modo_demo=0');
+
+      // Caso A: base vacía (estado exacto que deja iniciarModoReal). Si el guard de
+      // modo_demo se rompiera, esto la re-sembraría con los 12 clientes de generarSeed().
+      await _revisarReSembradoAntiCongelamientoParaVerificacion();
+      const { clientes: trasVacia } = await listarClientes({});
+      assert(trasVacia.length === 0, 'con base vacía y modo_demo=0 NO debería re-sembrar (el heurístico D1 está condicionado a modo_demo=1)');
+
+      // Caso B: movimientos VIEJOS (fecha muy vencida) — el heurístico D1 solo mira
+      // MAX(fecha) < ayer, que acá SÍ se cumple; lo único que debe bloquearlo es modo_demo=0.
+      // iniciarModoReal() (test anterior) también vació `conceptos` — hay que re-crearlo.
+      const conceptoViejo = await crearConcepto({ nombre: 'Agua' });
+      const clienteViejo = await crearCliente({ nombre: 'Cliente D1 MovimientoViejo Verify' });
+      await registrarCargo({ cliente_id: clienteViejo.id, monto_centavos: 1000, fecha: '2020-01-01', concepto: conceptoViejo.nombre });
+      assert(esModoDemo() === false, 'modo_demo debería seguir en 0 (nada en este flujo lo vuelve a setear en 1)');
+
+      await _revisarReSembradoAntiCongelamientoParaVerificacion();
+
+      const { clientes: trasViejo } = await listarClientes({ busqueda: 'Cliente D1 MovimientoViejo Verify' });
+      assert(
+        trasViejo.length === 1,
+        'con modo_demo=0, un movimiento viejo NO debería disparar el re-seed (el cliente real de prueba debería seguir existiendo intacto)'
+      );
+    }
+  );
+
+  await verificar('exportarRespaldo() funciona sobre una base real recién vaciada por iniciarModoReal', async () => {
+    const { blob, nombreArchivo } = await exportarRespaldo();
+    assert(blob instanceof Blob, 'exportarRespaldo() debería devolver un Blob incluso con la base sin datos de negocio');
+    assert(blob.size > 0, 'el blob exportado no debería estar vacío (sigue siendo un sqlite válido: esquema + meta)');
+    assert(typeof nombreArchivo === 'string' && nombreArchivo.endsWith('.sqlite'), 'debería devolver un nombre de archivo .sqlite');
   });
 
   // ============================================================

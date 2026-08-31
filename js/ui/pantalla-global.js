@@ -9,13 +9,14 @@
 
 import {
   obtenerCalendarioGlobalMovimientos, obtenerUltimoRespaldo, listarClientesArchivados,
-  exportarRespaldo, importarRespaldo, estaSoloLectura, listarMovimientos,
+  exportarRespaldo, importarRespaldo, estaSoloLectura, listarMovimientos, esModoDemo,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, formatearMesAnio, formatearFechaLegible, formatearFechaCorta,
   escapeHtml, mostrarToast, errorGeneral, bolitaHtml, Iconos,
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
+  bannerModoDemoHtml, wireBannerModoDemo, abrirSheetIniciarModoReal,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -27,6 +28,16 @@ const MICROCOPY = `
   con cada movimiento y a qué cliente pertenece — tocando una fila del
   desglose vas directo a ese cliente.</p>
 `;
+
+// Bloqueante de producción: el respaldo es responsabilidad del gestor —
+// nada se sube a ningún servidor. Con datos reales (no de ejemplo) esto
+// importa más que nunca: si se pierde el dispositivo sin haber exportado,
+// se pierde la única copia del negocio.
+const MICROCOPY_AJUSTES_RESPALDO = `Exportar/importar un archivo .sqlite es la única forma de mover tus datos
+  entre dispositivos o de tener un respaldo fuera del navegador — <strong>es tu responsabilidad
+  hacerlo seguido</strong>, nada se guarda en ningún servidor. Con clientes y movimientos reales
+  (no de ejemplo), esto importa más que nunca: si perdés el dispositivo sin haber exportado, no hay
+  forma de recuperar esa información.`;
 
 const DIAS_SEMANA_LUNES = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
 
@@ -149,6 +160,7 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
 
     contenedor.innerHTML = `
       <section class="pantalla pantalla-global" data-pantalla="global">
+        ${bannerModoDemoHtml()}
         ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
         <h1>${Iconos.globo()} Global</h1>
 
@@ -234,9 +246,13 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
 
         <details class="panel-colapsable panel-ajustes" open>
           <summary>Ajustes / Respaldo</summary>
+          ${esModoDemo() ? `
+            <div class="zona-modo-real">
+              <button type="button" class="btn btn-peligro btn-ancho" id="btn-empezar-modo-real" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>Empezar a trabajar con mis datos reales</button>
+              <p class="texto-secundario">Borra los clientes y movimientos de EJEMPLO y deja la app lista para tus datos reales. Es definitivo.</p>
+            </div>` : ''}
           <p id="estado-persistencia" class="estado-persistencia"></p>
-          <p class="texto-secundario">Exportar/importar un archivo .sqlite es, en esta demo, la única forma de
-            mover tus datos entre dispositivos o de tener un respaldo fuera del navegador.</p>
+          <p class="texto-secundario">${MICROCOPY_AJUSTES_RESPALDO}</p>
           <div class="acciones-respaldo">
             <button type="button" class="btn btn-secundario" id="btn-exportar-respaldo">Exportar respaldo</button>
             <label class="btn btn-secundario btn-archivo" ${soloLectura ? 'aria-disabled="true"' : ''}>
@@ -285,8 +301,13 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
   }
 
   function wireEvents() {
+    wireBannerModoDemo(contenedor);
+
     const btnExportarAhora = contenedor.querySelector('#btn-exportar-ahora');
     if (btnExportarAhora) btnExportarAhora.addEventListener('click', realizarExportar);
+
+    const btnEmpezarModoReal = contenedor.querySelector('#btn-empezar-modo-real');
+    if (btnEmpezarModoReal) btnEmpezarModoReal.addEventListener('click', () => abrirSheetIniciarModoReal());
 
     const btnAgregarMovimiento = contenedor.querySelector('#btn-agregar-movimiento-dia');
     if (btnAgregarMovimiento) {
