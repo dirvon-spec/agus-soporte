@@ -527,15 +527,9 @@ export async function ejecutarVerificacion() {
     assert(lanzo);
   });
 
-  await verificar('registrarCargo con fecha futura lanza VALIDATION_ERROR', async () => {
-    let lanzo = false;
-    try {
-      await registrarCargo({ cliente_id: clienteMovimientosId, monto_centavos: 5000, fecha: sumarDias(hoy(), 1), concepto: 'Agua' });
-    } catch (e) {
-      lanzo = true;
-      assert(e.code === 'VALIDATION_ERROR');
-    }
-    assert(lanzo);
+  await verificar('§2.12 (ROUND 5): registrarCargo con fecha futura YA NO lanza — cambio de spec intencional (antes rechazaba, ver Sección 17 para el contrato nuevo completo)', async () => {
+    const cargoFuturo = await registrarCargo({ cliente_id: clienteMovimientosId, monto_centavos: 5000, fecha: sumarDias(hoy(), 1), concepto: 'Agua' });
+    assert(cargoFuturo.fecha === sumarDias(hoy(), 1), 'debería aceptar y guardar la fecha futura tal cual (adelantos, §2.12)');
   });
 
   await verificar('registrarCargo con cliente inexistente lanza NOT_FOUND', async () => {
@@ -1243,19 +1237,32 @@ export async function ejecutarVerificacion() {
     }
   );
 
-  await verificar('obtenerCalendarioGlobalMovimientos: un mes íntegramente futuro da un resultado vacío', async () => {
-    const anioMes = hoy().slice(0, 7);
-    const anio = Number(anioMes.slice(0, 4));
-    const mes = Number(anioMes.slice(5, 7));
-    const anioMesFuturo = mes === 12 ? `${anio + 1}-01` : `${anio}-${String(mes + 1).padStart(2, '0')}`;
+  await verificar(
+    '§2.12 (ROUND 5): obtenerCalendarioGlobalMovimientos — un mes futuro SIN movimientos registrados da dias vacío y abonos/cargos del mes en 0, pero carteraPendienteCentavos SIGUE siendo el saldo pendiente real (cambio de spec: antes esta función devolvía un shortcut hardcodeado a 0 para CUALQUIER mes futuro, sin llamar a resumenMensual)',
+    async () => {
+      const anioMes = hoy().slice(0, 7);
+      const anio = Number(anioMes.slice(0, 4));
+      const mes = Number(anioMes.slice(5, 7));
+      const anioMesFuturo = mes === 12 ? `${anio + 1}-01` : `${anio}-${String(mes + 1).padStart(2, '0')}`;
 
-    const { dias, totalesMes } = await obtenerCalendarioGlobalMovimientos(anioMesFuturo);
-    assert(dias.size === 0, `un mes futuro debería dar un mapa vacío, tiene ${dias.size} claves`);
-    assert(
-      totalesMes.abonosCentavos === 0 && totalesMes.cargosCentavos === 0 && totalesMes.carteraPendienteCentavos === 0,
-      'totalesMes de un mes futuro debería ser todo 0'
-    );
-  });
+      const { dias, totalesMes } = await obtenerCalendarioGlobalMovimientos(anioMesFuturo);
+      assert(dias.size === 0, `sin movimientos registrados ese mes, el mapa de días debería quedar vacío, tiene ${dias.size} claves`);
+      assert(totalesMes.abonosCentavos === 0, 'abonosCentavos de un mes futuro sin abonos registrados debería ser 0');
+      assert(totalesMes.cargosCentavos === 0, 'cargosCentavos de un mes futuro sin cargos registrados debería ser 0');
+
+      // carteraPendienteCentavos NO es "actividad de este mes": es el saldo pendiente
+      // acumulado de TODA la historia hasta el fin de ese mes (calcularSaldoInterno,
+      // sin corte de fecha) — con clientes de deuda franca en el seed, es real y
+      // esperablemente > 0 incluso para un mes futuro sin movimientos propios.
+      // Lo que hay que proteger acá es que siga coincidiendo con resumenMensual
+      // (misma fuente de verdad), NO que sea cero por un atajo hardcodeado.
+      const resumenCruzado = await resumenMensual(anioMesFuturo);
+      assert(
+        totalesMes.carteraPendienteCentavos === resumenCruzado.carteraPendienteCentavos,
+        `carteraPendienteCentavos de un mes futuro debería coincidir con resumenMensual (${resumenCruzado.carteraPendienteCentavos}), obtuvo ${totalesMes.carteraPendienteCentavos}`
+      );
+    }
+  );
 
   await verificar('§2.10: exportarRespaldo() registra ultimo_respaldo en meta', async () => {
     const antes = await obtenerUltimoRespaldo();
@@ -1901,6 +1908,155 @@ export async function ejecutarVerificacion() {
   // mantenerlo no protege historia ni migración, solo prueba código muerto
   // por probarlo. resumenDia() sigue funcional y cubierto por la Sección 6b
   // (BUG arrastreInicial), que sí protege integridad histórica real.
+
+  // ============================================================
+  // Sección 17 — §2.12 (ROUND 5, gate del dueño 30-ago-2026): registros a
+  // futuro (adelantos). Va DESPUÉS de las secciones LEGACY que iteran TODOS
+  // los clientes activos (para no ensuciar sus conteos con clientes de
+  // prueba) y ANTES de las migraciones/iniciarModoReal (destructivas, no debe
+  // depender de nada de acá).
+  // ============================================================
+
+  const conceptoFuturo = await crearConcepto({ nombre: 'Agua' }); // idempotente
+  const futuroCorto = sumarDias(hoy(), 3); // puede caer en el mes siguiente, a propósito
+  const futuroLejano = sumarDias(hoy(), 10);
+
+  await verificar('§2.12: registrarCargo y registrarAbono ACEPTAN fecha futura (adelantos)', async () => {
+    const cliente = await crearCliente({ nombre: 'Cliente Futuro Acepta Verify' });
+    const cargo = await registrarCargo({ cliente_id: cliente.id, monto_centavos: 4000, fecha: futuroCorto, concepto: conceptoFuturo.nombre });
+    assert(cargo.fecha === futuroCorto, 'el CARGO a futuro debería guardarse con la fecha futura exacta, sin rechazo');
+
+    const abono = await registrarAbono({ cliente_id: cliente.id, monto_centavos: 2500, fecha: futuroLejano });
+    assert(abono.fecha === futuroLejano, 'el ABONO a futuro debería guardarse con la fecha futura exacta, sin rechazo');
+  });
+
+  await verificar('§2.12: registrarVisitaSinAbono SIGUE bloqueando fecha futura (guard sin cambios — no es dinero)', async () => {
+    const cliente = await crearCliente({ nombre: 'Cliente Futuro VisitaBloqueada Verify' });
+    let lanzo = false;
+    try {
+      await registrarVisitaSinAbono({ cliente_id: cliente.id, fecha: futuroCorto });
+    } catch (e) {
+      lanzo = true;
+      assert(e.code === 'VALIDATION_ERROR', `code esperado VALIDATION_ERROR, recibido ${e.code}`);
+    }
+    assert(lanzo, 'registrarVisitaSinAbono debería seguir rechazando fecha futura tras §2.12 (solo se desbloqueó dinero, no visitas)');
+  });
+
+  await verificar('§2.12: obtenerCalendarioMovimientos incluye el día futuro con movimientos, y saldoAcumuladoCentavos sigue acumulando a través de él', async () => {
+    const cliente = await crearCliente({ nombre: 'Cliente Futuro Calendario Persona Verify' });
+    await registrarCargo({ cliente_id: cliente.id, monto_centavos: 10000, fecha: hoy(), concepto: conceptoFuturo.nombre });
+    const saldoAntesDelFuturo = await calcularSaldo(cliente.id, hoy());
+
+    const anioMesFuturo = futuroLejano.slice(0, 7);
+    await registrarAbono({ cliente_id: cliente.id, monto_centavos: 3000, fecha: futuroLejano });
+
+    const { dias } = await obtenerCalendarioMovimientos(cliente.id, anioMesFuturo);
+    const diaFuturo = dias.get(futuroLejano);
+    assert(diaFuturo, `el día futuro ${futuroLejano} debería estar presente en el mapa (tiene un ABONO)`);
+    assert(diaFuturo.abonosCentavos === 3000, `abonosCentavos del día futuro debería ser 3000, es ${diaFuturo.abonosCentavos}`);
+    assert(
+      diaFuturo.saldoAcumuladoCentavos === saldoAntesDelFuturo - 3000,
+      `saldoAcumuladoCentavos del día futuro debería seguir la cronología (restar el abono futuro): esperado ${saldoAntesDelFuturo - 3000}, obtenido ${diaFuturo.saldoAcumuladoCentavos}`
+    );
+  });
+
+  await verificar('§2.12: obtenerCalendarioGlobalMovimientos incluye días futuros CON movimientos en dias y en totalesMes; futuro vacío se omite del mapa', async () => {
+    const cliente = await crearCliente({ nombre: 'Cliente Futuro Calendario Global Verify' });
+    const anioMesFuturo = futuroLejano.slice(0, 7);
+    await registrarAbono({ cliente_id: cliente.id, monto_centavos: 7500, fecha: futuroLejano });
+
+    const { dias, totalesMes } = await obtenerCalendarioGlobalMovimientos(anioMesFuturo);
+    const diaFuturo = dias.get(futuroLejano);
+    assert(diaFuturo, `el día futuro ${futuroLejano} con movimientos debería estar en el mapa global`);
+    assert(
+      diaFuturo.movimientos.some((m) => m.cliente_id === cliente.id && m.tipo === 'ABONO' && m.montoCentavos === 7500),
+      'el ABONO futuro del cliente de prueba debería aparecer en el desglose de ese día'
+    );
+
+    const resumenCruzado = await resumenMensual(anioMesFuturo);
+    assert(
+      totalesMes.abonosCentavos === resumenCruzado.totalAbonosCentavos,
+      'totalesMes.abonosCentavos (con futuro incluido) debería seguir coincidiendo con resumenMensual'
+    );
+
+    // día futuro SIN movimientos: distinto día del mismo mes futuro, no debería ensuciar el mapa
+    let otroDiaFuturoVacio = sumarDias(futuroLejano, -1);
+    if (otroDiaFuturoVacio.slice(0, 7) !== anioMesFuturo) otroDiaFuturoVacio = sumarDias(futuroLejano, 1);
+    if (otroDiaFuturoVacio.slice(0, 7) === anioMesFuturo && otroDiaFuturoVacio !== futuroLejano) {
+      assert(!dias.has(otroDiaFuturoVacio), `un día futuro SIN movimientos (${otroDiaFuturoVacio}) no debería entrar al mapa`);
+    }
+  });
+
+  await verificar(
+    '§2.12: saldo_centavos es TOTAL (incluye futuro) en listarClientesAgrupados, listarClientes Y listarClientesArchivados — bug encontrado y corregido en las 3 (las 3 recortaban a "hoy", contradiciendo "saldo incluye TODOS los movimientos")',
+    async () => {
+      const cliente = await crearCliente({ nombre: 'Cliente Futuro SaldoTotal Verify' });
+      await registrarCargo({ cliente_id: cliente.id, monto_centavos: 8800, fecha: futuroLejano, concepto: conceptoFuturo.nombre });
+
+      const saldoHastaHoy = await calcularSaldo(cliente.id, hoy());
+      assert(saldoHastaHoy === 0, 'calcularSaldo(hoy) NO debería contar un cargo fechado a futuro (respeta el corte que se le pide explícitamente)');
+
+      const { grupos } = await listarClientesAgrupados({ busqueda: 'Cliente Futuro SaldoTotal Verify' });
+      const filaAgrupados = grupos.flatMap((g) => g.clientes).find((c) => c.id === cliente.id);
+      assert(filaAgrupados, 'debería encontrar al cliente de prueba en listarClientesAgrupados');
+      assert(
+        filaAgrupados.saldo_centavos === 8800,
+        `saldo_centavos de listarClientesAgrupados debería ser el TOTAL incluyendo el cargo futuro (8800), es ${filaAgrupados.saldo_centavos}`
+      );
+
+      const { clientes: listaPlana } = await listarClientes({ busqueda: 'Cliente Futuro SaldoTotal Verify' });
+      assert(listaPlana.length === 1, 'debería encontrar al cliente de prueba en listarClientes');
+      assert(
+        listaPlana[0].saldo_centavos === 8800,
+        `saldo_centavos de listarClientes debería ser el TOTAL incluyendo el cargo futuro (8800), es ${listaPlana[0].saldo_centavos}`
+      );
+
+      await borrarClienteLogico(cliente.id, { forzar: true });
+      const archivados = await listarClientesArchivados();
+      const filaArchivada = archivados.find((a) => a.id === cliente.id);
+      assert(filaArchivada, 'debería encontrar al cliente de prueba (ya archivado) en listarClientesArchivados');
+      assert(
+        filaArchivada.saldo_centavos === 8800,
+        `saldo_centavos de listarClientesArchivados debería ser el TOTAL incluyendo el cargo futuro (8800), es ${filaArchivada.saldo_centavos}`
+      );
+    }
+  );
+
+  await verificar('§2.12: listarClientesAgrupados({fecha futura}) — estado_dia=FUTURO si no hay registro, ABONO si sí; resumenDia con conteos null + esFuturo:true', async () => {
+    const clienteConAbono = await crearCliente({ nombre: 'Cliente FuturoDia ConAbono Verify' });
+    const clienteSinNada = await crearCliente({ nombre: 'Cliente FuturoDia SinNada Verify' });
+    await registrarAbono({ cliente_id: clienteConAbono.id, monto_centavos: 1500, fecha: futuroCorto });
+
+    const { grupos, resumenDia } = await listarClientesAgrupados({ fecha: futuroCorto, busqueda: 'Cliente FuturoDia' });
+    const todos = grupos.flatMap((g) => g.clientes);
+    const filaConAbono = todos.find((c) => c.id === clienteConAbono.id);
+    const filaSinNada = todos.find((c) => c.id === clienteSinNada.id);
+
+    assert(filaConAbono, 'debería encontrar al cliente con abono futuro');
+    assert(filaSinNada, 'debería encontrar al cliente sin nada ese día futuro');
+    assert(filaConAbono.estado_dia === 'ABONO', `un abono futuro SÍ registrado debería dar estado_dia=ABONO, dio ${filaConAbono.estado_dia}`);
+    assert(
+      filaSinNada.estado_dia === 'FUTURO',
+      `sin registro en un día futuro, estado_dia debería ser el valor neutro 'FUTURO' (NO 'SIN_VISITA' — ese semáforo no aplica a futuro), dio ${filaSinNada.estado_dia}`
+    );
+
+    assert(resumenDia.esFuturo === true, 'resumenDia.esFuturo debería ser true para una fecha futura');
+    assert(resumenDia.abonaron === null, 'resumenDia.abonaron debería ser null (null honesto) para fecha futura');
+    assert(resumenDia.dijeronNo === null, 'resumenDia.dijeronNo debería ser null para fecha futura');
+    assert(resumenDia.sinVisitar === null, 'resumenDia.sinVisitar debería ser null para fecha futura');
+    assert(
+      resumenDia.cobradoCentavos === 1500,
+      `resumenDia.cobradoCentavos SÍ debería reflejar lo registrado (1500) incluso a futuro, es ${resumenDia.cobradoCentavos}`
+    );
+  });
+
+  await verificar('§2.12: listarClientesAgrupados({fecha: hoy}) conserva esFuturo:false y conteos numéricos reales (no rompe el contrato de Round 4)', async () => {
+    const { resumenDia } = await listarClientesAgrupados({ fecha: hoy() });
+    assert(resumenDia.esFuturo === false, 'resumenDia.esFuturo debería ser false para hoy');
+    assert(typeof resumenDia.abonaron === 'number', 'resumenDia.abonaron debería seguir siendo un número para hoy (no null)');
+    assert(typeof resumenDia.dijeronNo === 'number', 'resumenDia.dijeronNo debería seguir siendo un número para hoy');
+    assert(typeof resumenDia.sinVisitar === 'number', 'resumenDia.sinVisitar debería seguir siendo un número para hoy');
+  });
 
   // ============================================================
   // Migraciones de esquema (VIGENTES — no son legacy: siguen siendo la única

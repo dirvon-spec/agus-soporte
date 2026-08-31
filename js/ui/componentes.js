@@ -724,6 +724,11 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado, fecha
 
   function render() {
     capturarValoresActuales();
+    // §2.12: registros a futuro (adelantos) — solo para ABONO/CARGO. La
+    // fecha ya no tiene tope, así que "Hoy no abona" (marca de ruta del día,
+    // no un movimiento de dinero) se oculta apenas la fecha elegida es
+    // futura — registrarVisitaSinAbono sigue rechazándola del lado de datos.
+    const fechaEsFutura = esFutura(valorFecha);
     host.innerHTML = `
       <form id="form-panel-rapido" class="formulario formulario-panel-rapido" novalidate>
         <div class="keypad-monto">
@@ -752,17 +757,20 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado, fecha
         ${keypadGridHtml()}
 
         <div class="campo">
-          <label for="pr-fecha">Fecha</label>
-          <input id="pr-fecha" name="fecha" type="date" max="${hoy()}" value="${escapeHtml(valorFecha)}" />
+          <label for="pr-fecha">Fecha ${fechaEsFutura ? '<span class="badge-futuro-chico">Adelanto</span>' : ''}</label>
+          <input id="pr-fecha" name="fecha" type="date" value="${escapeHtml(valorFecha)}" />
           ${errorCampo(error.fecha)}
         </div>
         ${errorGeneral(error.general)}
-        ${tipo === 'ABONO' ? `
+        ${tipo === 'ABONO' && !fechaEsFutura ? `
           <button type="button" class="btn btn-secundario btn-ancho" id="pr-btn-hoy-no-abona">Hoy no abona ($0)</button>
         ` : ''}
       </form>`;
 
     wireKeypadTeclas(host, manejarTeclaKeypad);
+
+    const campoFecha = host.querySelector('#pr-fecha');
+    if (campoFecha) campoFecha.addEventListener('change', () => render());
 
     const btnHoyNoAbona = host.querySelector('#pr-btn-hoy-no-abona');
     if (btnHoyNoAbona) {
@@ -845,7 +853,8 @@ async function renderPanelRapidoInterno(host, tipo, clienteId, onGuardado, fecha
       const fechaTexto = host.querySelector('#pr-fecha').value;
       if (!fechaTexto) error.fecha = 'La fecha es obligatoria.';
       else if (!esFechaIsoValida(fechaTexto)) error.fecha = 'La fecha no es válida.';
-      else if (esFutura(fechaTexto)) error.fecha = 'La fecha no puede ser futura.';
+      // §2.12: sin tope de fecha futura para ABONO/CARGO (adelantos) — el
+      // rechazo de futuro sigue vivo solo en registrarVisitaSinAbono.
 
       if (tipo === 'CARGO' && !conceptoElegido) error.concepto = 'Elegí (o creá) un concepto.';
 

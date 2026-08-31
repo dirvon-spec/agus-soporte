@@ -28,10 +28,26 @@ const MICROCOPY_PERSONA = `
   <p>Tocá <strong>+Abonos</strong> o <strong>+Cargos</strong> para registrar
   un movimiento, o <strong>✎ Editar</strong> para cambiar sus datos o
   archivarlo. Tocá cualquier día del calendario para ver el detalle completo
-  de ese día; debajo tenés la lista completa de movimientos del mes.</p>
+  de ese día (incluidos los días futuros: podés registrar <strong>adelantos</strong>,
+  pagos que cubren una fecha que todavía no llega — se marcan punteados hasta
+  que llegue el día); debajo tenés la lista completa de movimientos del mes.</p>
 `;
 
 const DIAS_SEMANA_LUNES = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+
+// §2.12 — decisión del orquestador: calcularSaldo(cliente_id, hastaFecha)
+// acota deliberadamente por fecha (default hoy(), protegido por un test de
+// dev-verify), y ESO ESTÁ BIEN — la función parametrizada no se toca. Pero la
+// TARJETA "Saldo total" de Persona debe leerse como el saldo_centavos de las
+// listas (§2.12: "el saldo incluye TODOS los movimientos", futuros incluidos)
+// para no mostrarle al gestor un número que ignora un adelanto que ya cobró.
+// El contrato de calcularSaldo permite justamente esto: pedirle un corte a
+// propósito lejano en el futuro para que no recorte nada. Se usa SOLO en el
+// call site de la tarjeta — el resto de los usos de calcularSaldo(id) en esta
+// pantalla (confirmación de archivar, saldo final del estado de cuenta
+// imprimible) siguen siendo el corte a HOY, que es lo que corresponde ahí.
+const FECHA_SIN_TOPE = '9999-12-31';
+
 const CLAVE_PREF_SALDO_DIARIO = 'agus-mostrar-saldo-diario';
 
 function leerPreferenciaSaldoDiario() {
@@ -156,7 +172,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     const categorias = await listarCategorias();
     const categoria = cliente.categoria_id ? categorias.find((c) => c.id === cliente.categoria_id) : null;
 
-    const saldoTotal = await calcularSaldo(id);
+    const saldoTotal = await calcularSaldo(id, FECHA_SIN_TOPE);
     const { total: totalMovimientos } = await listarMovimientos({ cliente_id: id, pagina: 1, tamanioPagina: 1 });
     const sinMovimientos = totalMovimientos === 0;
 
@@ -223,11 +239,20 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
                 const numeroDia = i + 1;
                 const fechaDia = `${mesVisible}-${String(numeroDia).padStart(2, '0')}`;
                 const diaInfo = dias.get(fechaDia);
+                // §2.12: registros a futuro (adelantos) — la celda futura
+                // vuelve a ser tocable (popover con +Abono/+Cargo); si YA
+                // tiene movimientos (un adelanto ya asentado) se pinta con el
+                // mismo color semántico de siempre pero atenuado/punteado
+                // ("pactado, aún no ocurre") — .celda-futura, compartida con
+                // el calendario de Global. El saldo acumulado sigue el
+                // contrato: ya viene cronológico desde db.js.
                 const futura = esFutura(fechaDia);
-                return `<button type="button" class="mes-celda ${claseColorCelda(diaInfo)}" data-fecha="${fechaDia}" ${futura ? 'disabled' : ''}>
+                const tieneMovimientos = !!(diaInfo && (diaInfo.abonosCentavos > 0 || diaInfo.cargosCentavos > 0));
+                const claseFutura = futura && tieneMovimientos ? 'celda-futura' : '';
+                return `<button type="button" class="mes-celda ${claseColorCelda(diaInfo)} ${claseFutura}" data-fecha="${fechaDia}">
                   <span class="mes-celda-numero">${numeroDia}</span>
-                  <span class="mes-celda-datos">${futura ? '' : lineasCelda(diaInfo)}</span>
-                  ${mostrarSaldoDiario && !futura ? `<span class="mes-celda-saldo">= ${montoCortoOGuion(diaInfo.saldoAcumuladoCentavos)}</span>` : ''}
+                  <span class="mes-celda-datos">${lineasCelda(diaInfo)}</span>
+                  ${mostrarSaldoDiario ? `<span class="mes-celda-saldo">= ${montoCortoOGuion(diaInfo.saldoAcumuladoCentavos)}</span>` : ''}
                 </button>`;
               }).join('')}
               ${Array.from({ length: celdasFinales - totalCeldas }, () => '<div class="mes-celda mes-celda-vacia"></div>').join('')}
@@ -407,7 +432,7 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
       renderTodo();
     });
 
-    contenedor.querySelectorAll('.mes-celda[data-fecha]:not([disabled])').forEach((btn) => {
+    contenedor.querySelectorAll('.mes-celda[data-fecha]').forEach((btn) => {
       btn.addEventListener('click', () => {
         fechaSeleccionada = fechaSeleccionada === btn.dataset.fecha ? null : btn.dataset.fecha;
         renderTodo();

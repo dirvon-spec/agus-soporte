@@ -1217,7 +1217,7 @@ export async function listarClientes({ busqueda = '', pagina = 1, tamanioPagina 
                  WHEN m.tipo='ABONO' THEN -m.monto_centavos
                  WHEN m.tipo='AJUSTE' THEN m.monto_centavos
                  ELSE 0 END)
-          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL AND m.fecha <= ?), 0) AS saldo_centavos,
+          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL), 0) AS saldo_centavos,
         (SELECT a.monto_cuota_centavos FROM acuerdos a
           WHERE a.cliente_id = c.id AND a.deleted_at IS NULL
             AND a.vigente_desde <= ? AND (a.vigente_hasta IS NULL OR a.vigente_hasta >= ?)
@@ -1227,7 +1227,9 @@ export async function listarClientes({ busqueda = '', pagina = 1, tamanioPagina 
      WHERE c.deleted_at IS NULL ${filtroBusqueda}
      ORDER BY c.nombre ASC
      LIMIT ? OFFSET ?`,
-    [hoyStr, hoyStr, hoyStr, ...paramsBusqueda, tamanioPagina, offset]
+    /* §2.12: saldo_centavos ya no se acota a hoyStr (saldo TOTAL, incluye futuro) —
+       los dos hoyStr restantes son del acuerdo VIGENTE hoy, algo distinto (R-XXX). */
+    [hoyStr, hoyStr, ...paramsBusqueda, tamanioPagina, offset]
   );
   // sql.js/SQLite no tiene tipo boolean nativo: EXISTS(...) vuelve 0/1 entero.
   const clientes = filas.map((c) => ({ ...c, tiene_movimientos: !!c.tiene_movimientos }));
@@ -1306,7 +1308,7 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
                  WHEN m.tipo='ABONO' THEN -m.monto_centavos
                  WHEN m.tipo='AJUSTE' THEN m.monto_centavos
                  ELSE 0 END)
-          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL AND m.fecha <= ?), 0) AS saldo_centavos,
+          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL), 0) AS saldo_centavos,
         COALESCE((SELECT SUM(m.monto_centavos) FROM movimientos m
           WHERE m.cliente_id = c.id AND m.tipo='ABONO' AND m.deleted_at IS NULL AND m.fecha BETWEEN ? AND ?), 0) AS abonos_mes_centavos,
         COALESCE((SELECT SUM(m.monto_centavos) FROM movimientos m
@@ -1316,7 +1318,7 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
      FROM clientes c
      WHERE c.deleted_at IS NULL ${filtroBusqueda}
      ORDER BY c.orden ASC`,
-    [hoyStr, fechaInicioPeriodo, fechaFinPeriodo, fechaInicioPeriodo, fechaFinPeriodo, ...paramsEstadoDia, ...paramsBusqueda]
+    [fechaInicioPeriodo, fechaFinPeriodo, fechaInicioPeriodo, fechaFinPeriodo, ...paramsEstadoDia, ...paramsBusqueda]
   );
 
   const SIN_CATEGORIA = '__sin_categoria__';
@@ -1325,6 +1327,12 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
   for (const cat of categorias) {
     balde.set(cat.id, { categoria_id: cat.id, categoria_nombre: cat.nombre, categoria_color: cat.color, clientes: [] });
   }
+
+  // §2.12: fecha futura → los conteos de "visita" (abonó/dijo-que-no/sin-visitar)
+  // no significan nada (nadie "visitó" un día que no pasó) — el semáforo de 3
+  // estados se apaga para ese día. Solo lo REGISTRADO (abonos reales, si el
+  // gestor ya asentó un adelanto) sigue siendo información real.
+  const esFuturo = modoDia && esFutura(fecha);
 
   let cobradoCentavos = 0;
   let abonaron = 0;
@@ -1346,9 +1354,13 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
 
     if (modoDia) {
       if (fila.tiene_abono_dia) {
+        // "Registrado" es real incluso a futuro (adelanto ya asentado) — CUENTA siempre.
         clienteAgregado.estado_dia = 'ABONO';
         abonaron += 1;
         cobradoCentavos += fila.abonos_mes_centavos;
+      } else if (esFuturo) {
+        // Neutro: la UI lo pinta SIN semáforo (no es "sin visitar", es "todavía no llega ese día").
+        clienteAgregado.estado_dia = 'FUTURO';
       } else if (fila.tiene_visita_cero_dia) {
         clienteAgregado.estado_dia = 'CERO';
         dijeronNo += 1;
@@ -1383,7 +1395,18 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
     return a.categoria_nombre < b.categoria_nombre ? -1 : a.categoria_nombre > b.categoria_nombre ? 1 : 0;
   });
 
-  return modoDia ? { grupos, resumenDia: { cobradoCentavos, abonaron, dijeronNo, sinVisitar } } : { grupos };
+  // §2.12: contrato de resumenDia para fecha FUTURA — "null honesto" (STORY.md:
+  // sin dato real = null, jamás un conteo inventado) MÁS un flag `esFuturo`
+  // explícito para que la UI no tenga que inferir el motivo del null. Se
+  // documenta acá como el contrato final: {cobradoCentavos, abonaron: null,
+  // dijeronNo: null, sinVisitar: null, esFuturo: true}. Para hoy/pasado, forma
+  // idéntica pero con los conteos reales y esFuturo: false (shape ESTABLE en
+  // ambos casos, ninguna clave aparece/desaparece según la fecha).
+  const resumenDiaFinal = esFuturo
+    ? { cobradoCentavos, abonaron: null, dijeronNo: null, sinVisitar: null, esFuturo: true }
+    : { cobradoCentavos, abonaron, dijeronNo, sinVisitar, esFuturo: false };
+
+  return modoDia ? { grupos, resumenDia: resumenDiaFinal } : { grupos };
 }
 
 /**
@@ -1598,7 +1621,6 @@ export async function restaurarCliente(id) {
  * @returns {Promise<Array<{id:string, nombre:string, categoria: {id:string,nombre:string,color:string}|null, saldo_centavos:number}>>}
  */
 export async function listarClientesArchivados() {
-  const hoyStr = hoy();
   const filas = todasLasFilas(
     `SELECT c.id, c.nombre, c.categoria_id,
         cat.nombre AS cat_nombre, cat.color AS cat_color,
@@ -1607,12 +1629,11 @@ export async function listarClientesArchivados() {
                  WHEN m.tipo='ABONO' THEN -m.monto_centavos
                  WHEN m.tipo='AJUSTE' THEN m.monto_centavos
                  ELSE 0 END)
-          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL AND m.fecha <= ?), 0) AS saldo_centavos
+          FROM movimientos m WHERE m.cliente_id = c.id AND m.deleted_at IS NULL), 0) AS saldo_centavos
      FROM clientes c
      LEFT JOIN categorias cat ON cat.id = c.categoria_id AND cat.deleted_at IS NULL
      WHERE c.deleted_at IS NOT NULL
-     ORDER BY c.nombre ASC`,
-    [hoyStr]
+     ORDER BY c.nombre ASC`
   );
 
   return filas.map((f) => ({
@@ -1772,9 +1793,12 @@ export async function registrarCargo({ cliente_id, monto_centavos, fecha, concep
   if (!esFechaIsoValida(fecha)) {
     throw crearError('VALIDATION_ERROR', 'La fecha no es una fecha válida.', { campo: 'fecha' });
   }
-  if (esFutura(fecha)) {
-    throw crearError('VALIDATION_ERROR', 'No se permiten cargos a futuro.', { campo: 'fecha' });
-  }
+  // §2.12 (ROUND 5, gate del dueño 30-ago-2026): se desbloquea el futuro para
+  // MOVIMIENTOS DE DINERO (adelantos que el cliente paga por anticipado y el
+  // gestor asienta en la fecha futura que cubren) — cualquier fecha ISO
+  // válida es aceptada, pasada, hoy o futura. Contraste deliberado con
+  // registrarVisitaSinAbono, que SIGUE bloqueando futuro (es una marca de
+  // ruta del día — "hoy no abonó" no tiene sentido para un día que no pasó).
 
   const id = uuidV7();
   const ts = ahoraIso();
@@ -1809,9 +1833,8 @@ export async function registrarAbono({ cliente_id, monto_centavos, fecha, nota }
   if (!esFechaIsoValida(fecha)) {
     throw crearError('VALIDATION_ERROR', 'La fecha no es una fecha válida.', { campo: 'fecha' });
   }
-  if (esFutura(fecha)) {
-    throw crearError('VALIDATION_ERROR', 'No se permiten abonos a futuro.', { campo: 'fecha' });
-  }
+  // §2.12: ver comentario equivalente en registrarCargo — el futuro se
+  // desbloquea acá (adelantos), pero NO en registrarVisitaSinAbono.
 
   const id = uuidV7();
   const ts = ahoraIso();
@@ -2365,17 +2388,21 @@ export async function obtenerCalendarioGlobalMovimientos(anioMes) {
   const primerDia = `${anioStr}-${mesStr}-01`;
   const ultimoDiaMes = `${anioStr}-${mesStr}-${pad2(new Date(anio, mes, 0).getDate())}`;
 
+  // §2.12 (ROUND 5, gate del dueño 30-ago-2026): se desbloquea el futuro para
+  // adelantos. Los días pasados/hoy se siguen pre-poblando SIEMPRE (vacíos o
+  // no, como antes de §2.12) para que la UI arme esa parte de la grilla sin
+  // sorpresas; los días FUTUROS solo entran al mapa si de verdad tienen
+  // movimientos (un futuro vacío no aporta nada — la UI arma esa parte de la
+  // grilla igual, ahora "tocable" para capturar). La CONSULTA, en cambio,
+  // siempre cubre el mes completo (nunca se acota a hoy): antes de §2.12 esto
+  // era un no-op porque un movimiento futuro no podía existir; ahora si puede.
   const hoyStr = hoy();
-  const fechaHastaEfectiva = ultimoDiaMes > hoyStr ? hoyStr : ultimoDiaMes;
-  const diasVisibles = rango(primerDia, fechaHastaEfectiva); // [] si TODO el mes es futuro
+  const fechaHastaBase = ultimoDiaMes > hoyStr ? hoyStr : ultimoDiaMes;
+  const diasBase = fechaHastaBase < primerDia ? [] : rango(primerDia, fechaHastaBase);
 
   const dias = new Map();
-  for (const fecha of diasVisibles) {
+  for (const fecha of diasBase) {
     dias.set(fecha, { abonosCentavos: 0, cargosCentavos: 0, movimientos: [] });
-  }
-
-  if (diasVisibles.length === 0) {
-    return { dias, totalesMes: { abonosCentavos: 0, cargosCentavos: 0, carteraPendienteCentavos: 0 } };
   }
 
   const filas = todasLasFilas(
@@ -2384,12 +2411,15 @@ export async function obtenerCalendarioGlobalMovimientos(anioMes) {
      JOIN clientes c ON c.id = m.cliente_id
      WHERE m.deleted_at IS NULL AND m.tipo IN ('CARGO','ABONO','AJUSTE') AND m.fecha BETWEEN ? AND ?
      ORDER BY m.fecha ASC, m.created_at ASC`,
-    [primerDia, fechaHastaEfectiva]
+    [primerDia, ultimoDiaMes]
   );
 
   for (const fila of filas) {
+    if (!dias.has(fila.fecha)) {
+      // Día futuro con movimientos (adelanto): entra al mapa recién acá, on-demand.
+      dias.set(fila.fecha, { abonosCentavos: 0, cargosCentavos: 0, movimientos: [] });
+    }
     const diaAgg = dias.get(fila.fecha);
-    if (!diaAgg) continue; // no debería pasar (la query ya está acotada al rango visible)
     diaAgg.movimientos.push({
       cliente_id: fila.cliente_id,
       cliente_nombre: fila.cliente_nombre,
@@ -2402,6 +2432,9 @@ export async function obtenerCalendarioGlobalMovimientos(anioMes) {
     if (fila.tipo === 'CARGO') diaAgg.cargosCentavos += fila.monto_centavos;
   }
 
+  // resumenMensual() nunca acotó su rango a hoy (fecha BETWEEN primerDia AND
+  // ultimoDia del mes completo) — ya era future-inclusive antes de §2.12, así
+  // que no necesitó cambios para que totalesMes refleje también los adelantos.
   const resumen = await resumenMensual(anioMes);
   const totalesMes = {
     abonosCentavos: resumen.totalAbonosCentavos,

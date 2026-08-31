@@ -131,8 +131,12 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
     }
   }
 
-  function claseCeldaGlobal(fecha, diaInfo, hoyStr) {
-    if (fecha > hoyStr) return 'global-celda-futura';
+  // §2.12: registros a futuro (adelantos) — un día futuro sin movimientos
+  // queda "limpio" igual que siempre (ahora tocable, para capturar); un día
+  // futuro CON movimientos (adelanto ya asentado) suma la clase compartida
+  // .celda-futura (mismo color semántico, atenuado + borde punteado —
+  // "pactado, aún no ocurre").
+  function claseCeldaGlobal(diaInfo) {
     if (!diaInfo || (diaInfo.abonosCentavos === 0 && diaInfo.cargosCentavos === 0)) return 'global-celda-limpia';
     return 'global-celda-con-movimientos';
   }
@@ -207,11 +211,12 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
                 const fechaDia = `${mesVisible}-${String(numeroDia).padStart(2, '0')}`;
                 const diaInfo = dias.get(fechaDia);
                 const esFutura = fechaDia > hoyStr;
-                const clase = claseCeldaGlobal(fechaDia, diaInfo, hoyStr);
-                return `<button type="button" class="mes-celda global-celda ${clase} ${diaSeleccionado === fechaDia ? 'global-celda-seleccionada' : ''}" data-fecha="${fechaDia}" ${esFutura ? 'disabled' : ''}>
+                const tieneMovimientos = !!(diaInfo && (diaInfo.abonosCentavos > 0 || diaInfo.cargosCentavos > 0));
+                const clase = `${claseCeldaGlobal(diaInfo)} ${esFutura && tieneMovimientos ? 'celda-futura' : ''}`;
+                return `<button type="button" class="mes-celda global-celda ${clase} ${diaSeleccionado === fechaDia ? 'global-celda-seleccionada' : ''}" data-fecha="${fechaDia}">
                   <span class="mes-celda-numero">${numeroDia}</span>
-                  ${!esFutura && diaInfo && diaInfo.abonosCentavos > 0 ? `<span class="global-dato-abono">+${montoOGuion(diaInfo.abonosCentavos)}</span>` : ''}
-                  ${!esFutura && diaInfo && diaInfo.cargosCentavos > 0 ? `<span class="global-dato-cargo">+${montoOGuion(diaInfo.cargosCentavos)}</span>` : ''}
+                  ${diaInfo && diaInfo.abonosCentavos > 0 ? `<span class="global-dato-abono">+${montoOGuion(diaInfo.abonosCentavos)}</span>` : ''}
+                  ${diaInfo && diaInfo.cargosCentavos > 0 ? `<span class="global-dato-cargo">+${montoOGuion(diaInfo.cargosCentavos)}</span>` : ''}
                 </button>`;
               }).join('')}
               ${Array.from({ length: celdasFinales - totalCeldas }, () => '<div class="mes-celda mes-celda-vacia"></div>').join('')}
@@ -331,7 +336,7 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
       renderTodo();
     });
 
-    contenedor.querySelectorAll('.global-celda[data-fecha]:not([disabled])').forEach((btn) => {
+    contenedor.querySelectorAll('.global-celda[data-fecha]').forEach((btn) => {
       btn.addEventListener('click', () => {
         diaSeleccionado = diaSeleccionado === btn.dataset.fecha ? null : btn.dataset.fecha;
         renderTodo();

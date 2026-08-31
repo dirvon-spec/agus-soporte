@@ -11,7 +11,7 @@ import {
   listarCategorias, crearCliente, crearCategoria, actualizarOrdenClientes, estaSoloLectura,
 } from '../db.js';
 import { formatearCompacto, formatearCentavos } from '../utils/money.js';
-import { hoy, sumarDias, esFutura, esFechaIsoValida } from '../utils/date.js';
+import { hoy, sumarDias, esFechaIsoValida } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, escapeHtml, debounce,
   mostrarToast, errorCampo, errorGeneral, Iconos, bolitaHtml,
@@ -31,6 +31,9 @@ const MICROCOPY = `
   uno para editarla o eliminarla. Mantené presionado el agarre ⋮⋮ para
   reordenar dentro de un grupo. Tocá el encabezado "Cargos" para ocultar esa
   columna si no la necesitás.</p>
+  <p>También podés avanzar la fecha hacia adelante (›) para registrar
+  <strong>adelantos</strong>: pagos que tu cliente te hace hoy pero que cubren
+  un día futuro. Esos días se marcan punteados hasta que llegue la fecha.</p>
 `;
 
 // §2.10 A-201: a partir de $100,000 el monto se muestra en notación
@@ -89,13 +92,20 @@ function tituloNav(fechaVista) {
   return fechaVista === hoy() ? `Hoy · ${fechaFormateada}` : fechaFormateada;
 }
 
-/** Celda de la columna ABONOS en modo-día: semáforo de 3 estados (§2.11). */
+/** Celda de la columna ABONOS en modo-día: semáforo de 3 estados (§2.11),
+ * más el estado neutro 'FUTURO' (§2.12: día que todavía no llega — no hay
+ * semáforo posible porque nadie "visitó" un día que no pasó; si YA hay un
+ * abono registrado a esa fecha futura — un adelanto — el estado real es
+ * 'ABONO', no 'FUTURO', así que ese caso se pinta normal más arriba). */
 function celdaAbonoDiaHtml(c) {
   if (c.estado_dia === 'ABONO') {
     return `<button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" title="${escapeHtml(montoOGuion(c.abonos_mes_centavos))}">${montoSpan(montoListaOGuion(c.abonos_mes_centavos))}</button>`;
   }
   if (c.estado_dia === 'CERO') {
     return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Dijo que hoy no abona">${montoSpan('$0')}</button>`;
+  }
+  if (c.estado_dia === 'FUTURO') {
+    return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Día futuro — tocá para registrar un adelanto">${montoSpan('+')}</button>`;
   }
   return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Todavía sin visitar">${montoSpan('—')}</button>`;
 }
@@ -333,16 +343,28 @@ export async function renderPantallaClientes(contenedor) {
 
   function renderNav() {
     const elTitulo = contenedor.querySelector('#nav-fecha-titulo');
-    const elSiguiente = contenedor.querySelector('#btn-dia-siguiente');
     if (elTitulo) elTitulo.textContent = tituloNav(fechaVista);
-    if (elSiguiente) elSiguiente.disabled = fechaVista === hoy();
     const inputFecha = contenedor.querySelector('#input-fecha-vista');
     if (inputFecha) inputFecha.value = fechaVista;
+    // §2.12: la navegación hacia adelante ya no tiene tope — "Hoy" da una
+    // vuelta sin fricción cuando el gestor se fue lejos a cargar adelantos.
+    const btnHoy = contenedor.querySelector('#btn-volver-hoy');
+    if (btnHoy) btnHoy.classList.toggle('chip-hoy-oculto', fechaVista === hoy());
   }
 
   function renderFranja(resumenDia) {
     const el = contenedor.querySelector('#franja-resumen-dia');
     if (!el || !resumenDia) return;
+    // §2.12: día futuro — los conteos (abonaron/dijeron-no/sin-visitar) no
+    // significan nada (nadie "visitó" un día que no pasó), vienen null desde
+    // db.js — solo se muestra lo REGISTRADO de verdad (adelantos ya asentados).
+    if (resumenDia.esFuturo) {
+      el.innerHTML = `
+        <span class="franja-dato-cobrado">Registrado: <strong>${formatearCentavos(resumenDia.cobradoCentavos)}</strong></span>
+        <span class="franja-badge-futuro">FUTURO</span>
+      `;
+      return;
+    }
     const etiquetaDia = fechaVista === hoy() ? 'hoy' : formatearFechaNav(fechaVista);
     el.innerHTML = `
       <span class="franja-dato-cobrado">Cobrado ${escapeHtml(etiquetaDia)}: <strong>${formatearCentavos(resumenDia.cobradoCentavos)}</strong></span>
@@ -498,8 +520,9 @@ export async function renderPantallaClientes(contenedor) {
         <button type="button" class="nav-fecha-titulo-btn" id="btn-elegir-fecha" aria-label="Elegir fecha">
           <span id="nav-fecha-titulo"></span> ▾
         </button>
-        <input type="date" id="input-fecha-vista" class="input-fecha-oculto" max="${hoy()}" aria-hidden="true" tabindex="-1" />
+        <input type="date" id="input-fecha-vista" class="input-fecha-oculto" aria-hidden="true" tabindex="-1" />
         <button type="button" class="btn-icono" id="btn-dia-siguiente" aria-label="Día siguiente">${Iconos.chevronDerecha()}</button>
+        <button type="button" class="chip-hoy chip-hoy-oculto" id="btn-volver-hoy">Hoy</button>
       </div>
 
       <div id="franja-resumen-dia" class="franja-resumen-dia" aria-live="polite"></div>
@@ -533,8 +556,12 @@ export async function renderPantallaClientes(contenedor) {
     refrescarLista();
   });
   contenedor.querySelector('#btn-dia-siguiente').addEventListener('click', () => {
-    if (fechaVista === hoy()) return;
+    // §2.12: navegación hacia adelante desbloqueada (adelantos) — sin tope.
     fechaVista = sumarDias(fechaVista, 1);
+    refrescarLista();
+  });
+  contenedor.querySelector('#btn-volver-hoy').addEventListener('click', () => {
+    fechaVista = hoy();
     refrescarLista();
   });
   const inputFecha = contenedor.querySelector('#input-fecha-vista');
@@ -544,7 +571,7 @@ export async function renderPantallaClientes(contenedor) {
   });
   inputFecha.addEventListener('change', () => {
     const valor = inputFecha.value;
-    if (!valor || !esFechaIsoValida(valor) || esFutura(valor)) return;
+    if (!valor || !esFechaIsoValida(valor)) return;
     fechaVista = valor;
     refrescarLista();
   });

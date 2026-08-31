@@ -1182,11 +1182,6 @@ button.fila-excel-monto:focus-visible {
   gap: 0;
 }
 
-.global-celda-futura {
-  cursor: default;
-  opacity: 0.4;
-}
-
 .global-celda-limpia {
   background: var(--color-fondo);
 }
@@ -1476,6 +1471,17 @@ button.fila-excel-monto:focus-visible {
 .mes-celda-rojo { background: var(--color-error-bg); }
 .mes-celda-mixto { background: linear-gradient(135deg, var(--color-exito-bg) 0%, var(--color-exito-bg) 48%, var(--color-error-bg) 52%, var(--color-error-bg) 100%); }
 .mes-celda-neutro { background: var(--color-fondo); }
+
+/* §2.12 (registros a futuro / adelantos): celda de un día que todavía no
+   llega pero que YA tiene un movimiento asentado — "pactado, aún no ocurre".
+   Mismo color semántico que un día ya ocurrido (verde/rojo/mixto), solo que
+   atenuado y con borde punteado para distinguirlo de un cobro/cargo real.
+   Compartida entre el calendario de Persona (.mes-celda) y el de Global
+   (.global-celda, que también es un .mes-celda). */
+.celda-futura {
+  opacity: 0.62;
+  border-style: dashed !important;
+}
 
 /* ============================================================
    Switch (preferencia persistente: saldo diario)
@@ -1769,6 +1775,51 @@ button.fila-excel-monto:focus-visible {
 
 .franja-dato-sin-visitar {
   color: var(--color-texto-secundario);
+}
+
+/* §2.12 — badge discreto "FUTURO" en la franja resumen cuando la vista-día
+   está sobre una fecha que todavía no llega (sin conteos, son null). */
+.franja-badge-futuro {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--color-texto-secundario);
+  border: 1px dashed var(--color-borde);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+/* Pastilla "Hoy" del navegador de fecha de Clientes: vuelve a la fecha
+   actual sin fricción cuando el gestor navegó lejos hacia adelante a cargar
+   adelantos. Oculta cuando ya se está viendo hoy. */
+.chip-hoy {
+  border: 1px solid var(--color-primario);
+  color: var(--color-primario);
+  background: var(--color-fondo);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chip-hoy-oculto {
+  display: none;
+}
+
+/* Badge chico en el label "Fecha" del panel rápido cuando la fecha elegida
+   es futura (adelanto). */
+.badge-futuro-chico {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: var(--color-primario);
+  border: 1px dashed var(--color-primario);
+  border-radius: 999px;
+  padding: 1px 6px;
+  margin-left: 4px;
+  vertical-align: middle;
 }
 
 /* ============================================================

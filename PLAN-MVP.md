@@ -450,6 +450,18 @@ Solicitado por el dueño tras probar la demo publicada. Decisión de negocio con
 
 **Verificación mínima:** captura en día pasado cae en ese día; los 3 estados se muestran y cuentan bien en la franja; visita-$0 se registra/deshace y NO afecta saldo; corrección cambia el monto visible y el saldo, y el original queda con deleted_at (verificable en DB); eliminar+deshacer restaura exacto; Σ del día cuadra a mano; columna cargos oculta/reaparece y persiste; sin ".00" en barrido de todas las pantallas (y "$1,250.50" conserva centavos); migración v3→v4 preserva todo; suite completa verde con tests actualizados al nuevo formato de dinero.
 
+### 2.12 REGISTROS A FUTURO — gate del dueño 30-ago-2026 (necesidad de negocio de Agustín: adelantos)
+
+Clientes pagan por adelantado y el gestor asienta esos pagos en las fechas futuras que cubren. Se desbloquea el futuro para MOVIMIENTOS DE DINERO (no para visitas-$0, que son marcas de ruta del día — "dijo que hoy no" no aplica a futuro):
+
+- `registrarAbono`/`registrarCargo` (y por extensión captura desde lista, panel, popover de Persona y desglose de Global): aceptan fecha futura. `registrarVisitaSinAbono` SIGUE bloqueando futuro.
+- Vista-día de Clientes: navegación hacia adelante desbloqueada; en días futuros la franja muestra solo "Registrado: $X" (los conteos abonaron/dijeron-no/sin-visitar no aplican a futuro — mostrar "—" o omitirlos, null honesto).
+- Calendarios (Persona y Global): las celdas futuras se activan (popover + captura) y los movimientos futuros se PINTAN con distintivo visual sutil (celda con borde punteado/atenuado: "pactado, aún no ocurre"); días futuros sin movimientos quedan como hasta ahora (vacíos, pero ahora tocables para capturar). `obtenerCalendarioMovimientos`/`obtenerCalendarioGlobalMovimientos` incluyen días futuros CON movimientos (los vacíos futuros pueden omitirse del mapa; la UI arma la grilla).
+- Saldo: incluye TODOS los movimientos (pasados y futuros) — modelo simple estilo Excel, decisión del dueño implícita en el caso de uso.
+- Selector de fecha del panel: sin tope max=hoy para abonos/cargos.
+
+Verificación mínima: abono con fecha +7 días aparece en celda futura distintiva de Persona y Global, en el saldo, y en la vista-día navegando adelante; Deshacer lo revierte; visita-$0 a futuro sigue rechazada; franja de día futuro sin conteos falsos; suite completa verde.
+
 ---
 
 ## 3. Análisis de riesgo
