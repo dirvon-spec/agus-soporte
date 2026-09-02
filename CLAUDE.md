@@ -2,7 +2,7 @@
 
 App de cobro diario a crédito: un gestor paga servicios (agua/luz/internet) de sus clientes y les cobra una cuota fija diaria. MVP en HTML/JS vanilla + SQLite (sql.js), 100% offline. Fase siguiente: empaquetar con Capacitor (Android/iOS) reutilizando este mismo código.
 
-**Lectura #1 obligatoria para cualquier agente nuevo: [STORY.md](STORY.md).** El contrato completo de diseño está en [PLAN-MVP.md](PLAN-MVP.md) (incluye decisiones cerradas del gate en §3.5 y backlog con IDs B-xxx en §6).
+**Lectura #1 obligatoria para cualquier agente nuevo: [STORY.md](STORY.md).** El contrato completo de diseño está en [PLAN-MVP.md](PLAN-MVP.md) (incluye decisiones cerradas del gate en §3.5 y backlog con IDs B-xxx en §6). El flujo de trabajo completo que construyó este proyecto está destilado como skill reutilizable en [.claude/skills/proyecto-chico/SKILL.md](.claude/skills/proyecto-chico/SKILL.md) — base para nuevos proyectos chicos.
 
 ## Comandos
 
