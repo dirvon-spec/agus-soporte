@@ -601,18 +601,8 @@ button {
   flex-shrink: 0;
 }
 
-/* Chips más chicos SOLO en el carril de filtro de Clientes (el resto de los
-   usos de .chip — conceptos, categorías en sheets — no cambian) — siguen
-   táctiles (min-height 32px cumple el mínimo recomendado). */
-#wrap-chips-categoria .chip {
-  padding: 5px 10px;
-  min-height: 32px;
-  font-size: 0.78rem;
-  gap: 4px;
-}
-
-/* Bloques compactos (filtro + buscador de Clientes): sin label visible, así
-   que no necesitan el gap/margen pensado para "label + campo". */
+/* Bloques compactos (ej. el buscador del sheet "Elegir cliente"): sin label
+   visible, así que no necesitan el gap/margen pensado para "label + campo". */
 .campo-compacto {
   margin-bottom: var(--espaciado-sm);
   gap: 0;
@@ -881,8 +871,10 @@ button {
 .fila-excel {
   /* A-201: el nombre tiene un piso digno (no puede colapsar a ~0 cuando los
      montos son grandes) y las columnas de monto tienen un techo (no crecen
-     sin límite) — la notación compacta (money.js: formatearCompacto) evita
-     que un monto gigante fuerce el techo de todas formas. */
+     sin límite) — §2.13 retiró la notación compacta (formatearCompacto) de
+     esta lista; la red de seguridad ahora es .v-chico (font-size por
+     longitud del texto formateado, ver pantalla-clientes.js) para que un
+     monto de 7+ dígitos no fuerce el techo ni invada la columna del nombre. */
   display: grid;
   grid-template-columns: 20px 12px minmax(90px, 1fr) minmax(50px, 86px) minmax(50px, 86px) minmax(50px, 86px);
   align-items: center;
@@ -954,6 +946,16 @@ button {
   max-width: 100%;
 }
 
+/* §2.13: red anti-A-201 — un monto formateado largo (más de ~8 caracteres,
+   ej. "$1,834,560") baja un paso de tamaño ANTES de invadir la columna del
+   nombre (que conserva su min-width + elipsis propios, sin cambios). Clase
+   por longitud (ver claseLongitudMonto en pantalla-clientes.js), reutilizable
+   en cualquier monto de esta pantalla — em, no rem, para escalar proporcional
+   al tamaño del contexto en el que se use (fila de lista o tarjeta de resumen). */
+.v-chico {
+  font-size: 0.8em;
+}
+
 button.fila-excel-monto {
   cursor: pointer;
   border-radius: var(--radio-borde-chico);
@@ -962,6 +964,26 @@ button.fila-excel-monto {
 button.fila-excel-monto:hover,
 button.fila-excel-monto:focus-visible {
   background: var(--color-fondo-secundario);
+}
+
+/* §2.13 (ROUND 5, punto 5): letra un paso más grande, SOLO en la lista de
+   Clientes — .fila-excel-monto y .fila-excel-nombre se reutilizan también en
+   la Historia de archivados de Global, que NO debe verse afectada; de ahí el
+   scope por pantalla en vez de subir el tamaño base de esas clases. */
+[data-pantalla="clientes"] .fila-excel-nombre {
+  font-size: 0.95rem;
+}
+
+[data-pantalla="clientes"] .fila-excel-monto {
+  font-size: 0.9rem;
+}
+
+[data-pantalla="clientes"] .fila-suma-etiqueta {
+  font-size: 0.9rem;
+}
+
+[data-pantalla="clientes"] .cabecera-columnas-excel {
+  font-size: 0.72rem;
 }
 
 /* ============================================================
@@ -1703,7 +1725,7 @@ button.fila-excel-monto:focus-visible {
 }
 
 /* ============================================================
-   §2.11 (ROUND 4) — navegador de fecha + franja resumen del día en Clientes
+   §2.11/§2.13 — navegador de fecha + resumen del día en Clientes
    ============================================================ */
 
 .nav-fecha-clientes {
@@ -1743,38 +1765,65 @@ button.fila-excel-monto:focus-visible {
   pointer-events: none;
 }
 
-.franja-resumen-dia {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px var(--espaciado-sm);
-  font-size: 0.8rem;
+/* §2.13 (ROUND 5): reemplaza la franja de una línea por 3 tarjetas — Abonos
+   del día / Cargos del día / Neto del día — bajo el navegador de fecha, con
+   una sublínea discreta de conteos de visita (o el badge FUTURO) debajo.
+   Grid de 3 columnas SIEMPRE (incluso a 375px) — a diferencia de
+   .tarjetas-resumen (Global), que apila en mobile: acá el vistazo rápido de
+   los 3 números lado a lado es el punto del rediseño. */
+.tarjetas-resumen-dia {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.tarjeta-resumen-dia {
+  min-width: 0;
   background: var(--color-fondo);
   border: 1px solid var(--color-borde);
   border-radius: var(--radio-borde);
-  padding: var(--espaciado-sm);
-  margin-bottom: var(--espaciado-md);
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
 }
 
-.franja-dato-cobrado {
-  font-weight: 600;
-  color: var(--color-texto);
-  flex-basis: 100%;
-}
-
-.franja-dato-abonaron {
-  color: var(--color-exito);
-  font-weight: 600;
-}
-
-/* M/K con estilos discretos pero diferenciados entre sí (feedback del dueño):
-   "dijeron hoy no" en tono de advertencia atenuado, "sin visitar" en gris
-   neutro — ninguno de los dos debe competir visualmente con "abonaron". */
-.franja-dato-no {
-  color: var(--color-advertencia);
-}
-
-.franja-dato-sin-visitar {
+.tarjeta-resumen-dia-etiqueta {
+  font-size: 0.62rem;
   color: var(--color-texto-secundario);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.tarjeta-resumen-dia-monto {
+  font-size: 1rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* §2.13: mockup confirmado por Agustín — una línea discreta, centrada y en
+   gris neutro, con SOLO "sin visitar" destacado (es lo que queda por hacer
+   hoy) vía .sublinea-destacado. Sin día futuro: se ve el badge FUTURO en su
+   lugar (los conteos no significan nada — vienen null desde db.js). */
+.linea-extra-resumen-dia {
+  text-align: center;
+  font-size: 0.76rem;
+  color: var(--color-texto-secundario);
+  margin-bottom: var(--espaciado-md);
+  min-height: 1.1em; /* evita el salto de layout entre "con conteos" y "solo badge" */
+}
+
+.sublinea-destacado {
+  color: var(--color-advertencia);
+  font-weight: 600;
 }
 
 /* §2.12 — badge discreto "FUTURO" en la franja resumen cuando la vista-día

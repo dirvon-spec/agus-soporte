@@ -1069,41 +1069,65 @@ export async function ejecutarVerificacion() {
   });
 
   // --- obtenerCalendarioMovimientos: saldoAcumulado por fecha == calcularSaldo(cliente, fecha) ---
-  await verificar('obtenerCalendarioMovimientos: saldoAcumuladoCentavos coincide con calcularSaldo para 3 fechas', async () => {
-    const anioMes = hoy().slice(0, 7);
-    const d1 = sumarDias(hoy(), -3);
-    const d2 = sumarDias(hoy(), -2);
-    const d3 = hoy();
+  await verificar(
+    'obtenerCalendarioMovimientos: saldoAcumuladoCentavos coincide con calcularSaldo para 3 fechas (blindado contra el borde de mes — bug reportado 1-sep-2026)',
+    async () => {
+      const d1 = sumarDias(hoy(), -3);
+      const d2 = sumarDias(hoy(), -2);
+      const d3 = hoy(); // registrarAjuste() SIEMPRE fecha con el hoy() real (no toma `fecha` como parámetro) — d3 no puede reemplazarse por un valor sintético.
 
-    const cliente = await crearCliente({ nombre: 'Cliente CalendarioMovimientos Verify' });
-    const cargo = await registrarCargo({ cliente_id: cliente.id, monto_centavos: 8000, fecha: d1, concepto: 'Internet' });
-    await registrarAbono({ cliente_id: cliente.id, monto_centavos: 5000, fecha: d2 });
-    await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: -1000, nota: 'ajuste de prueba' }); // fecha = hoy() = d3
+      const cliente = await crearCliente({ nombre: 'Cliente CalendarioMovimientos Verify' });
+      const cargo = await registrarCargo({ cliente_id: cliente.id, monto_centavos: 8000, fecha: d1, concepto: 'Internet' });
+      await registrarAbono({ cliente_id: cliente.id, monto_centavos: 5000, fecha: d2 });
+      await registrarAjuste({ movimiento_original_id: cargo.id, delta_centavos: -1000, nota: 'ajuste de prueba' }); // fecha = hoy() = d3
 
-    const { saldoInicialCentavos, dias } = await obtenerCalendarioMovimientos(cliente.id, anioMes);
-    assert(saldoInicialCentavos === 0, `saldoInicialCentavos de un cliente nuevo debería ser 0, es ${saldoInicialCentavos}`);
+      // BLINDAJE (bug reportado 1-sep-2026, detectado por el otro builder): la
+      // versión vieja de este test asumía que d1/d2 (hoy-3/hoy-2) caen SIEMPRE
+      // en el mismo mes calendario que d3=hoy(), y consultaba un único
+      // anioMes=hoy().slice(0,7). Eso es falso los primeros días de cualquier
+      // mes (ej. hoy=1-sep-2026: d1=29-ago, d2=30-ago quedan en agosto,
+      // d3=1-sep en septiembre) — dias.get(d1)/dias.get(d2) daban undefined y
+      // saldoInicialCentavos ya no era 0. obtenerCalendarioMovimientos solo
+      // cubre UN mes por llamada, así que acá se agrupan las 3 fechas por su
+      // propio anioMes real (mes.slice(0,7)) y se llama una vez por cada mes
+      // DISTINTO que realmente aparezca (1 llamada la mayoría de los días del
+      // año, 2 llamadas en el borde) — determinista los 365/366 días del año,
+      // sin asumir en qué mes cae nada.
+      const mesesInvolucrados = [...new Set([d1, d2, d3].map((f) => f.slice(0, 7)))];
 
-    for (const fecha of [d1, d2, d3]) {
-      const saldoManual = await calcularSaldo(cliente.id, fecha);
-      const diaAgg = dias.get(fecha);
-      assert(diaAgg, `debería existir una entrada para el día ${fecha}`);
+      const diasPorFecha = new Map();
+      for (const anioMes of mesesInvolucrados) {
+        const { saldoInicialCentavos, dias } = await obtenerCalendarioMovimientos(cliente.id, anioMes);
+        const saldoManualInicial = await calcularSaldo(cliente.id, sumarDias(`${anioMes}-01`, -1));
+        assert(
+          saldoInicialCentavos === saldoManualInicial,
+          `saldoInicialCentavos de ${anioMes} debería coincidir con calcularSaldo justo antes del mes (${saldoManualInicial}), es ${saldoInicialCentavos}`
+        );
+        for (const [fecha, agg] of dias) diasPorFecha.set(fecha, agg);
+      }
+
+      for (const fecha of [d1, d2, d3]) {
+        const saldoManual = await calcularSaldo(cliente.id, fecha);
+        const diaAgg = diasPorFecha.get(fecha);
+        assert(diaAgg, `debería existir una entrada para el día ${fecha} (mes consultado: ${fecha.slice(0, 7)})`);
+        assert(
+          diaAgg.saldoAcumuladoCentavos === saldoManual,
+          `día ${fecha}: saldoAcumuladoCentavos=${diaAgg.saldoAcumuladoCentavos}, calcularSaldo=${saldoManual}`
+        );
+      }
+
+      assert(diasPorFecha.get(d1).cargosCentavos === 8000, 'cargosCentavos del día 1 debería ser 8000');
       assert(
-        diaAgg.saldoAcumuladoCentavos === saldoManual,
-        `día ${fecha}: saldoAcumuladoCentavos=${diaAgg.saldoAcumuladoCentavos}, calcularSaldo=${saldoManual}`
+        diasPorFecha.get(d1).movimientos.some((m) => m.tipo === 'CARGO' && m.concepto === 'Internet' && m.montoCentavos === 8000),
+        'el día 1 debería listar el CARGO con su concepto'
+      );
+      assert(diasPorFecha.get(d2).abonosCentavos === 5000, 'abonosCentavos del día 2 debería ser 5000');
+      assert(
+        diasPorFecha.get(d3).movimientos.some((m) => m.tipo === 'AJUSTE' && m.montoCentavos === -1000),
+        'el día 3 debería listar el AJUSTE'
       );
     }
-
-    assert(dias.get(d1).cargosCentavos === 8000, 'cargosCentavos del día 1 debería ser 8000');
-    assert(
-      dias.get(d1).movimientos.some((m) => m.tipo === 'CARGO' && m.concepto === 'Internet' && m.montoCentavos === 8000),
-      'el día 1 debería listar el CARGO con su concepto'
-    );
-    assert(dias.get(d2).abonosCentavos === 5000, 'abonosCentavos del día 2 debería ser 5000');
-    assert(
-      dias.get(d3).movimientos.some((m) => m.tipo === 'AJUSTE' && m.montoCentavos === -1000),
-      'el día 3 debería listar el AJUSTE'
-    );
-  });
+  );
 
   // ============================================================
   // Sección 14 — §2.10 (ITERACIÓN V3 "EXCEL", gate del dueño 28-ago-2026):

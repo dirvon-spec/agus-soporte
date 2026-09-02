@@ -462,6 +462,19 @@ Clientes pagan por adelantado y el gestor asienta esos pagos en las fechas futur
 
 Verificación mínima: abono con fecha +7 días aparece en celda futura distintiva de Persona y Global, en el saldo, y en la vista-día navegando adelante; Deshacer lo revierte; visita-$0 a futuro sigue rechazada; franja de día futuro sin conteos falsos; suite completa verde.
 
+### 2.13 ROUND 5 — retro de Agustín, gate 31-ago-2026 (mockup confirmado por el cliente final). Contexto: DECISIÓN DE CIERRE — la web es el producto final (ver STORY 31-ago).
+
+1. **Números completos SIEMPRE:** se retira la notación compacta ($2k/$1.2M) de la lista de Clientes. Red de seguridad del layout (no reintroducir A-201): si un monto formateado es largo, su fuente baja un paso (clase tipo `.v-chico` aplicada por longitud) ANTES de invadir la columna del nombre; el nombre conserva su min-width con elipsis. `formatearCompacto` queda en money.js sin consumidores (no borrar — historia).
+2. **Se elimina el buscador** de Clientes (el parámetro `busqueda` de la capa de datos queda vivo sin consumidor). Reversible: backlog B-027.
+3. **Se eliminan los chips de filtro de categorías** (los grupos, bolitas, Σ y la gestión en ⚙ SE QUEDAN). Reversible: backlog B-028.
+4. **Resumen del día en Clientes** (reemplaza/absorbe la franja actual): tres tarjetas bajo el navegador de fecha — **Abonos del día** (verde) · **Cargos del día** (rojo) · **Neto del día** = abonos − cargos (color por signo; "Neto" confirmado por el dueño, NO cartera total). Conteos de visita (abonaron · dijeron hoy no · sin visitar) como sublínea discreta debajo. Todo referido al DÍA VISTO (pasado/hoy; en futuro: montos registrados + badge FUTURO, sin conteos). Los cargos del día se suman en UI desde los totales de grupo ya entregados (sin queries nuevas).
+5. **Letra un paso más grande** en la lista de Clientes (nombres ~0.95rem, montos ~0.9rem, Σ proporcional) — iterativo: se afinará con la retro de Agustín en rounds siguientes.
+
+Verificación mínima: monto de 7 dígitos se muestra completo con letra reducida y el nombre no colapsa (caso Guadalupe/A-201 re-verificado); resumen del día cuadra a mano contra las Σ de grupos para hoy y para un día pasado; Neto con color por signo; sin buscador ni chips (y ⚙ sigue gestionando categorías); day-nav y todo lo demás intacto.
+
+| B-027 | Reintroducir buscador de clientes si la cartera crece (retirado en §2.13-2). |
+| B-028 | Reintroducir filtro por categoría si se necesita (retirado en §2.13-3). |
+
 ---
 
 ## 3. Análisis de riesgo
