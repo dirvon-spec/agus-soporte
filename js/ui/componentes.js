@@ -182,6 +182,23 @@ export function claseSaldo(centavos) {
   return 'monto-positivo';
 }
 
+/**
+ * §2.14 (fix de unificación, hallazgo de Agustín): "Balance general" —
+ * cartera total de TODA la cuenta, calculada UNA sola vez acá para que
+ * Clientes y Global jamás vuelvan a divergir. Suma de `saldo_centavos` (ya
+ * histórico total, incluye futuros, excluye archivados) de los grupos que
+ * entrega `listarClientesAgrupados()` — mismo dato, misma fórmula, en
+ * ambas pantallas. NO es `totalesMes.carteraPendienteCentavos` (que sale de
+ * `resumenMensual`: solo saldos positivos, incluye clientes dados de baja,
+ * acotado al mes) — esa es una métrica DISTINTA a propósito y no debe
+ * confundirse con esta.
+ * @param {Array<{totales:{saldo_centavos:number}}>} grupos
+ * @returns {number}
+ */
+export function calcularBalanceGeneral(grupos) {
+  return grupos.reduce((acc, g) => acc + g.totales.saldo_centavos, 0);
+}
+
 const formateadorCorto = new Intl.NumberFormat('es-MX', {
   style: 'currency', currency: 'MXN', minimumFractionDigits: 0, maximumFractionDigits: 0,
 });

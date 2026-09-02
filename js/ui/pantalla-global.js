@@ -9,7 +9,7 @@
 // el acceso directo de Clientes) — el import de respaldo se mantiene igual.
 
 import {
-  obtenerCalendarioGlobalMovimientos, listarClientesArchivados,
+  obtenerCalendarioGlobalMovimientos, listarClientesArchivados, listarClientesAgrupados,
   exportarRespaldo, importarRespaldo, estaSoloLectura, listarMovimientos, esModoDemo,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
@@ -18,6 +18,7 @@ import {
   escapeHtml, mostrarToast, errorGeneral, bolitaHtml, Iconos,
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
   bannerModoDemoHtml, wireBannerModoDemo, abrirSheetIniciarModoReal,
+  calcularBalanceGeneral,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -139,10 +140,21 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
   async function renderTodo() {
     const hoyStr = hoy();
     const { primerDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesVisible);
-    const [{ dias, totalesMes }, archivados] = await Promise.all([
+    // §2.14 (fix de unificación): "Balance general" se calcula EXACTO igual
+    // que en Clientes — mismo helper compartido sobre los mismos grupos de
+    // listarClientesAgrupados() SIN fecha (una llamada extra, aceptable) —
+    // para que las dos pantallas nunca vuelvan a divergir (hallazgo de
+    // Agustín: "el Global no me da"). Ya NO se usa
+    // totalesMes.carteraPendienteCentavos para esta tarjeta (esa es la
+    // fórmula vieja de resumenMensual: solo saldos positivos, incluye
+    // dados de baja, acotada al mes — una métrica distinta a propósito,
+    // que ahora sabemos confundía al gestor).
+    const [{ dias, totalesMes }, archivados, { grupos: gruposBalance }] = await Promise.all([
       obtenerCalendarioGlobalMovimientos(mesVisible),
       listarClientesArchivados(),
+      listarClientesAgrupados({}),
     ]);
+    const balanceGeneralCentavos = calcularBalanceGeneral(gruposBalance);
 
     const primerDiaSemana = diaSemanaLunes(primerDia);
     const totalCeldas = primerDiaSemana + ultimoDiaNum;
@@ -174,8 +186,8 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
             <span class="tarjeta-resumen-monto monto-negativo">${montoOGuion(totalesMes.cargosCentavos)}</span>
           </div>
           <div class="tarjeta-resumen">
-            <span class="tarjeta-resumen-etiqueta">Cartera pendiente</span>
-            <span class="tarjeta-resumen-monto ${claseSaldo(totalesMes.carteraPendienteCentavos)}">${montoOGuion(totalesMes.carteraPendienteCentavos)}</span>
+            <span class="tarjeta-resumen-etiqueta">Balance general</span>
+            <span class="tarjeta-resumen-monto ${claseSaldo(balanceGeneralCentavos)}">${montoOGuion(balanceGeneralCentavos)}</span>
           </div>
         </div>
 

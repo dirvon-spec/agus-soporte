@@ -26,6 +26,7 @@ import {
   activarArrastreOrden, PALETA_COLORES_CATEGORIA,
   bannerModoDemoHtml, wireBannerModoDemo,
   iconoTemaHtml, alternarTema, temaActivo, wireCambioTemaSistema,
+  calcularBalanceGeneral,
 } from './componentes.js';
 
 // §2.13: se retira la notación compacta (A-201 queda resuelto de otra forma)
@@ -335,19 +336,14 @@ export async function renderPantallaClientes(contenedor) {
     return grupos.reduce((acc, g) => acc + g.totales.cargos_mes_centavos, 0);
   }
 
-  /** §2.14: cartera total de TODA la cuenta — suma de saldo_centavos (ya
-   * histórico total, sin tope de fecha) de las Σ de grupo. A propósito NO
-   * depende de `fecha`/`resumenDia`: por eso "Balance general" no cambia al
-   * navegar de día (corrección de Agustín — antes era "Neto del día"). */
-  function sumarBalanceGeneral(grupos) {
-    return grupos.reduce((acc, g) => acc + g.totales.saldo_centavos, 0);
-  }
-
   /** §2.13/§2.14: 3 tarjetas — Abonos del día (verde) · Cargos del día (rojo)
    * · Balance general (color semántico de saldo, TODA la cartera, estable
-   * entre días). Sublínea de conteos de visita debajo, SALVO en día futuro
-   * (esos conteos no significan nada — vienen null desde db.js — se muestra
-   * el badge FUTURO en su lugar). */
+   * entre días — calculado con el helper COMPARTIDO de componentes.js, el
+   * mismo que usa Global, para que las dos pantallas jamás vuelvan a
+   * divergir — hallazgo de Agustín: "el Global no me da"). Sublínea de
+   * conteos de visita debajo, SALVO en día futuro (esos conteos no
+   * significan nada — vienen null desde db.js — se muestra el badge FUTURO
+   * en su lugar). */
   function renderResumenDia(grupos, resumenDia) {
     const elTarjetas = contenedor.querySelector('#tarjetas-resumen-dia');
     const elExtra = contenedor.querySelector('#linea-extra-resumen-dia');
@@ -355,7 +351,7 @@ export async function renderPantallaClientes(contenedor) {
 
     const cargosDiaCentavos = sumarCargosDelDia(grupos);
     const abonosDiaCentavos = resumenDia.cobradoCentavos;
-    const balanceGeneralCentavos = sumarBalanceGeneral(grupos);
+    const balanceGeneralCentavos = calcularBalanceGeneral(grupos);
     const textoAbonos = formatearCentavos(abonosDiaCentavos);
     const textoCargos = formatearCentavos(cargosDiaCentavos);
     const textoBalance = montoOGuion(balanceGeneralCentavos);
