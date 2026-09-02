@@ -2,6 +2,18 @@
 <html lang="es-MX">
 <head>
   <meta charset="UTF-8" />
+  <!-- §2.14: aplica la elección de tema (si existe) ANTES del primer render/
+       pintado, para evitar el flash de tema equivocado. La clave 'agus-tema'
+       debe coincidir EXACTO con CLAVE_TEMA en js/ui/componentes.js — un
+       <script> plano no puede compartir una constante de módulo. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('agus-tema');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch (e) { /* localStorage no disponible: sigue al sistema, sin romper nada */ }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Agus Soporte — Cobro diario a crédito</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%2316a34a'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='17' font-weight='bold' text-anchor='middle' fill='white'%3E%24%3C/text%3E%3C/svg%3E" />

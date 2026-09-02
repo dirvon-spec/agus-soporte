@@ -475,6 +475,17 @@ Verificación mínima: monto de 7 dígitos se muestra completo con letra reducid
 | B-027 | Reintroducir buscador de clientes si la cartera crece (retirado en §2.13-2). |
 | B-028 | Reintroducir filtro por categoría si se necesita (retirado en §2.13-3). |
 
+### 2.14 ROUND 6 — retro de Agustín, gate 1-sep-2026 (aprobado directo; tamaño de letra confirmado "perfecto" — esa iteración CIERRA)
+
+1. **Tercera tarjeta del resumen = "Balance general"** (NO neto del día — corrección de Agustín): la cartera total de toda la cuenta (suma de saldos de clientes activos, ya disponible como suma de las Σ de grupos), color semántico. Las dos primeras tarjetas siguen siendo del día visto.
+2. **Toggle claro/oscuro junto al engranaje** (☀/🌙 del set SVG): elección manual persistente (localStorage try/catch) que LE GANA al sistema; sin elección guardada, sigue al sistema como hoy. Requiere reorganizar los tokens CSS: `:root` = claro, `@media (prefers-color-scheme: dark)` con guard `:root:not([data-theme="light"])`, y `[data-theme="dark"]` override — ningún color definido solo dentro del media query.
+3. **Encabezado fijo en Clientes:** título+toggle+engranaje, navegador de día, tarjetas de resumen y cabecera de columnas quedan sticky; SOLO la lista de clientes corre. Sin saltos al colapsar cargos ni al cambiar de día.
+4. **Acceso directo de respaldo** en lugar de la microcopy "¿Para qué sirve esta pantalla?" de Clientes: línea compacta "💾 Respaldar · último: hace N días" (o "nunca") — un tap ejecuta exportarRespaldo() ahí mismo (misma descarga que en Global) y refresca la fecha. La fecha se pinta ámbar discreto cuando N>7 (dato con color, NO banner).
+5. **Se ELIMINA el banner/advertencia ámbar de respaldo** (el de Global que mandaba a respaldar) — sustituido por el acceso directo del punto 4. La sección Ajustes/Respaldo de Global se conserva (import vive ahí).
+6. Tamaño de letra: SIN CAMBIOS — confirmado al gusto del cliente final.
+
+Verificación mínima: Balance general == suma manual de Σ de grupos y no cambia al navegar de día; toggle persiste tras F5 y le gana al sistema (probar las 4 combinaciones sistema×elección), contraste AA en ambos; header sticky con lista larga (con y sin columna cargos); respaldar desde Clientes descarga el archivo, actualiza "hace N días" y el aviso de Global ya no existe; import sigue en Global.
+
 ---
 
 ## 3. Análisis de riesgo

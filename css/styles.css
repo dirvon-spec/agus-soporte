@@ -39,8 +39,18 @@
   --sombra-elevada: 0 4px 12px rgba(27, 31, 36, 0.18);
 }
 
+/* §2.14: toggle claro/oscuro — refactor de tokens obligatorio. `:root` (arriba)
+   define la paleta CLARA completa, sin excepciones. Los valores oscuros viven
+   en DOS lugares que deben mantenerse idénticos entre sí:
+   1) el media query de abajo, con guard `:root:not([data-theme="light"])`
+      (sigue al sistema, SALVO que el gestor haya elegido "claro" a mano);
+   2) `:root[data-theme="dark"]` (elección manual "oscuro", gana sin importar
+      el sistema).
+   Ningún color queda definido SOLO dentro del media query — si el sistema
+   está en claro pero el gestor eligió "oscuro", el bloque 2 sigue aplicando
+   los valores oscuros aunque el media query no matchee. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --color-fondo: #161b22;
     --color-fondo-secundario: #0d1117;
     --color-borde: #30363d;
@@ -60,7 +70,37 @@
 
     --sombra: 0 1px 3px rgba(0, 0, 0, 0.5);
     --sombra-elevada: 0 4px 14px rgba(0, 0, 0, 0.65);
+
+    color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --color-fondo: #161b22;
+  --color-fondo-secundario: #0d1117;
+  --color-borde: #30363d;
+  --color-texto: #e6edf3;
+  --color-texto-secundario: #9198a1;
+
+  --color-primario: #4c9aff;
+  --color-primario-oscuro: #79bfff;
+  --color-primario-texto: #051222;
+
+  --color-error: #ff7b72;
+  --color-error-bg: #3c1618;
+  --color-exito: #56d364;
+  --color-exito-bg: #0f2e1b;
+  --color-advertencia: #e3b341;
+  --color-advertencia-bg: #2d2200;
+
+  --sombra: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --sombra-elevada: 0 4px 14px rgba(0, 0, 0, 0.65);
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 * {
@@ -1059,6 +1099,62 @@ button.fila-excel-monto:focus-visible {
   margin: 0;
 }
 
+.encabezado-clientes-acciones {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ============================================================
+   §2.14 — Encabezado fijo (sticky) de Clientes: título+toggle+engrane, nav
+   de día, tarjetas de resumen, sublínea de conteos, cabecera de columnas y
+   línea de respaldo quedan quietos; solo la lista de abajo corre. Fondo
+   sólido (token, NO transparente) para que ninguna fila de la lista se vea
+   "a través" al scrollear por debajo. z-index bajo a propósito: sheets (500)
+   y toasts (400) SIEMPRE deben quedar por encima.
+   ============================================================ */
+.encabezado-sticky-clientes {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--color-fondo-secundario);
+  border-bottom: 1px solid var(--color-borde);
+  padding-top: var(--espaciado-md);
+  margin: 0 calc(-1 * var(--espaciado-md));
+  padding-left: var(--espaciado-md);
+  padding-right: var(--espaciado-md);
+}
+
+/* ============================================================
+   §2.14 — Acceso directo de respaldo en Clientes (reemplaza la microcopy
+   "¿Para qué sirve esta pantalla?"). Línea compacta, tap ejecuta el export
+   ahí mismo. La fecha se destaca en ámbar SOLO cuando hace más de 7 días
+   (o nunca se exportó) — un dato con color, no un banner de advertencia.
+   ============================================================ */
+.linea-respaldo-clientes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: var(--espaciado-sm) 0;
+  font-size: 0.8rem;
+  color: var(--color-texto-secundario);
+  cursor: pointer;
+  text-align: left;
+}
+
+.linea-respaldo-clientes:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.linea-respaldo-destacado {
+  color: var(--color-advertencia);
+  font-weight: 600;
+}
+
 /* ============================================================
    §2.10 (B-024) — Teclado numérico integrado del panel rápido: el monto se
    captura con este keypad, NUNCA con un <input> real (así el teclado del
@@ -1184,21 +1280,6 @@ button.fila-excel-monto:focus-visible {
 /* ============================================================
    §2.10 — Pestaña Global: calendario compacto de totales por día
    ============================================================ */
-
-.aviso-recordatorio-respaldo {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--espaciado-sm);
-  flex-wrap: wrap;
-  background: var(--color-advertencia-bg);
-  color: var(--color-advertencia);
-  border: 1px solid var(--color-advertencia);
-  border-radius: var(--radio-borde);
-  padding: var(--espaciado-sm);
-  margin-bottom: var(--espaciado-md);
-  position: static;
-}
 
 .global-celda {
   gap: 0;

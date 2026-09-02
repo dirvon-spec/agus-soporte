@@ -1,43 +1,32 @@
-// Pantalla "Clientes" (inicio) — contrato vigente §2.13 (PLAN-MVP.md, ROUND
-// 5, retro de Agustín/mockup confirmado — decisión de cierre, la web es el
-// producto final): Clientes es el trabajo del DÍA — navegador de fecha
-// arriba, 3 tarjetas de resumen del día (Abonos/Cargos/Neto) con sublínea de
-// conteos de visita, columnas ABONOS/CARGOS del día visto, semáforo de 3
-// estados por cliente-día. SALDO sigue siendo histórico total, SIEMPRE en
-// números completos (sin notación compacta — §2.13 retira A-201). Sin
-// buscador ni chips de filtro por categoría (B-027/B-028, reversibles); los
-// grupos, bolitas, Σ y la gestión de categorías en ⚙ Configuración se
-// mantienen intactos. Filas de una sola línea (monto-es-botón), orden manual
-// por arrastre, fila Σ por grupo, columna CARGOS colapsable, y sección
+// Pantalla "Clientes" (inicio) — contrato vigente §2.14 (PLAN-MVP.md, ROUND
+// 6, retro de Agustín): Clientes es el trabajo del DÍA — encabezado FIJO
+// (título+toggle claro/oscuro+engrane, navegador de día, 3 tarjetas de
+// resumen —Abonos del día / Cargos del día / Balance general de TODA la
+// cartera, este último NO cambia al navegar de día—, sublínea de conteos,
+// cabecera de columnas, acceso directo de respaldo) — solo la lista de
+// clientes corre debajo. SALDO de cada fila sigue siendo histórico total,
+// SIEMPRE en números completos (sin notación compacta — §2.13). Sin buscador
+// ni chips de filtro por categoría (B-027/B-028, reversibles); los grupos,
+// bolitas, Σ y la gestión de categorías en ⚙ Configuración se mantienen
+// intactos. Filas de una sola línea (monto-es-botón), orden manual por
+// arrastre, fila Σ por grupo, columna CARGOS colapsable, y sección
 // colapsable de clientes archivados.
 
 import {
   listarClientesAgrupados, listarClientesArchivados, restaurarCliente,
   listarCategorias, crearCliente, crearCategoria, actualizarOrdenClientes, estaSoloLectura,
+  obtenerUltimoRespaldo, exportarRespaldo,
 } from '../db.js';
 import { formatearCentavos } from '../utils/money.js';
 import { hoy, sumarDias, esFechaIsoValida } from '../utils/date.js';
 import {
-  microcopy, estadoVacio, montoOGuion, claseSaldo, escapeHtml,
+  estadoVacio, montoOGuion, claseSaldo, escapeHtml,
   mostrarToast, errorCampo, errorGeneral, Iconos, bolitaHtml,
   abrirSheet, cerrarSheet, abrirSheetConfiguracion, abrirPanelRapido,
   activarArrastreOrden, PALETA_COLORES_CATEGORIA,
   bannerModoDemoHtml, wireBannerModoDemo,
+  iconoTemaHtml, alternarTema, temaActivo, wireCambioTemaSistema,
 } from './componentes.js';
-
-const MICROCOPY = `
-  <p>Acá ves el trabajo de HOY (o del día que elijas con ▾): quién abonó, quién
-  te dijo que hoy no, y a quién todavía no visitaste. Los cobros son como tú
-  los acuerdes con cada quien — no hay cuotas fijas.</p>
-  <p><strong>El monto ES el botón:</strong> tocá el verde para registrar un
-  abono, el rojo para un cargo (ambos quedan en el día que estás viendo), o el
-  nombre para ver el calendario completo de ese cliente. Mantené presionado el
-  agarre ⋮⋮ para reordenar dentro de un grupo. Tocá el encabezado "Cargos"
-  para ocultar esa columna si no la necesitás.</p>
-  <p>También podés avanzar la fecha hacia adelante (›) para registrar
-  <strong>adelantos</strong>: pagos que tu cliente te hace hoy pero que cubren
-  un día futuro. Esos días se marcan punteados hasta que llegue la fecha.</p>
-`;
 
 // §2.13: se retira la notación compacta (A-201 queda resuelto de otra forma)
 // — SIEMPRE número completo. Red de seguridad anti-A-201: si el texto
@@ -91,6 +80,27 @@ function formatearFechaNav(fechaIso) {
 function tituloNav(fechaVista) {
   const fechaFormateada = formatearFechaNav(fechaVista);
   return fechaVista === hoy() ? `Hoy · ${fechaFormateada}` : fechaFormateada;
+}
+
+/** §2.14: días transcurridos entre dos fechas ISO — mismo cálculo que usaba
+ * el aviso de respaldo de Global (retirado ahí, ver punto 5), ahora vive acá
+ * para el acceso directo de respaldo de Clientes. */
+function diasEntre(fechaIsoDesde, fechaIsoHasta) {
+  const [a1, m1, d1] = fechaIsoDesde.split('-').map(Number);
+  const [a2, m2, d2] = fechaIsoHasta.split('-').map(Number);
+  const ms = new Date(a2, m2 - 1, d2).getTime() - new Date(a1, m1 - 1, d1).getTime();
+  return Math.round(ms / 86400000);
+}
+
+/** R-005 aplicado acá: `ultimo_respaldo` se guarda como timestamp UTC
+ * (`ahoraIso()` en db.js), pero `hoy()` es fecha LOCAL — comparar el slice(0,10)
+ * del ISO crudo contra hoy() puede dar "hace -1 día(s)" apenas después de un
+ * respaldo, en cualquier huso horario detrás de UTC (la fecha UTC ya rodó al
+ * día siguiente aunque localmente todavía sea "hoy"). Se convierte primero a
+ * fecha LOCAL antes de diffear. */
+function fechaLocalDeIso(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 /** Celda de la columna ABONOS en modo-día: semáforo de 3 estados (§2.11),
@@ -325,13 +335,19 @@ export async function renderPantallaClientes(contenedor) {
     return grupos.reduce((acc, g) => acc + g.totales.cargos_mes_centavos, 0);
   }
 
-  /** §2.13: reemplaza la franja de una línea por 3 tarjetas — Abonos del día
-   * (verde) · Cargos del día (rojo) · Neto del día = abonos−cargos (color
-   * por signo directo, NO claseSaldo: acá "positivo" es llanamente más
-   * dinero entrando que saliendo, confirmado por el dueño — no es la
-   * semántica invertida de saldo/deuda). Sublínea de conteos de visita
-   * debajo, SALVO en día futuro (esos conteos no significan nada — vienen
-   * null desde db.js — se muestra el badge FUTURO en su lugar). */
+  /** §2.14: cartera total de TODA la cuenta — suma de saldo_centavos (ya
+   * histórico total, sin tope de fecha) de las Σ de grupo. A propósito NO
+   * depende de `fecha`/`resumenDia`: por eso "Balance general" no cambia al
+   * navegar de día (corrección de Agustín — antes era "Neto del día"). */
+  function sumarBalanceGeneral(grupos) {
+    return grupos.reduce((acc, g) => acc + g.totales.saldo_centavos, 0);
+  }
+
+  /** §2.13/§2.14: 3 tarjetas — Abonos del día (verde) · Cargos del día (rojo)
+   * · Balance general (color semántico de saldo, TODA la cartera, estable
+   * entre días). Sublínea de conteos de visita debajo, SALVO en día futuro
+   * (esos conteos no significan nada — vienen null desde db.js — se muestra
+   * el badge FUTURO en su lugar). */
   function renderResumenDia(grupos, resumenDia) {
     const elTarjetas = contenedor.querySelector('#tarjetas-resumen-dia');
     const elExtra = contenedor.querySelector('#linea-extra-resumen-dia');
@@ -339,10 +355,10 @@ export async function renderPantallaClientes(contenedor) {
 
     const cargosDiaCentavos = sumarCargosDelDia(grupos);
     const abonosDiaCentavos = resumenDia.cobradoCentavos;
-    const netoCentavos = abonosDiaCentavos - cargosDiaCentavos;
+    const balanceGeneralCentavos = sumarBalanceGeneral(grupos);
     const textoAbonos = formatearCentavos(abonosDiaCentavos);
     const textoCargos = formatearCentavos(cargosDiaCentavos);
-    const textoNeto = formatearCentavos(netoCentavos);
+    const textoBalance = montoOGuion(balanceGeneralCentavos);
 
     elTarjetas.innerHTML = `
       <div class="tarjeta-resumen-dia">
@@ -354,8 +370,8 @@ export async function renderPantallaClientes(contenedor) {
         <span class="tarjeta-resumen-dia-monto monto-negativo ${claseLongitudMonto(textoCargos)}">${escapeHtml(textoCargos)}</span>
       </div>
       <div class="tarjeta-resumen-dia">
-        <span class="tarjeta-resumen-dia-etiqueta">Neto del día</span>
-        <span class="tarjeta-resumen-dia-monto ${netoCentavos >= 0 ? 'monto-positivo' : 'monto-negativo'} ${claseLongitudMonto(textoNeto)}">${escapeHtml(textoNeto)}</span>
+        <span class="tarjeta-resumen-dia-etiqueta">Balance general</span>
+        <span class="tarjeta-resumen-dia-monto ${claseSaldo(balanceGeneralCentavos)} ${claseLongitudMonto(textoBalance)}">${escapeHtml(textoBalance)}</span>
       </div>
     `;
 
@@ -370,6 +386,48 @@ export async function renderPantallaClientes(contenedor) {
       ${resumenDia.abonaron} abonaron · ${resumenDia.dijeronNo} dijeron hoy no ·
       <span class="sublinea-destacado">${resumenDia.sinVisitar} sin visitar</span>
     `;
+  }
+
+  /** §2.14: acceso directo de respaldo — reemplaza la microcopy "¿Para qué
+   * sirve esta pantalla?" de Clientes. Tap ejecuta exportarRespaldo() (misma
+   * descarga que en Global), toast de éxito y refresco de "hace N días". La
+   * fecha se pinta ámbar SOLO cuando N>7 o nunca se exportó — dato con
+   * color, no un banner (el banner de Global se retira, punto 5). No se
+   * recalcula en cada refrescarLista(): la fecha de último respaldo no
+   * cambia solo por mirar otro día. */
+  async function renderLineaRespaldo() {
+    const el = contenedor.querySelector('#linea-respaldo-clientes');
+    if (!el) return;
+    const ultimoRespaldoIso = await obtenerUltimoRespaldo();
+    const diasDesde = ultimoRespaldoIso ? Math.max(0, diasEntre(fechaLocalDeIso(ultimoRespaldoIso), hoy())) : null;
+    const destacar = diasDesde === null || diasDesde > 7;
+    const textoFecha = diasDesde === null ? 'nunca' : `hace ${diasDesde} día(s)`;
+    el.innerHTML = `
+      <button type="button" class="linea-respaldo-clientes" id="btn-respaldar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
+        ${Iconos.respaldo()}
+        <span>Respaldar · último: ${destacar ? `<span class="linea-respaldo-destacado">${escapeHtml(textoFecha)}</span>` : escapeHtml(textoFecha)}</span>
+      </button>
+    `;
+    const btn = el.querySelector('#btn-respaldar-clientes');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        try {
+          const { blob, nombreArchivo } = await exportarRespaldo();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = nombreArchivo;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          mostrarToast('Respaldo exportado.', 'exito');
+          await renderLineaRespaldo();
+        } catch (e) {
+          mostrarToast(e.message || 'No se pudo exportar el respaldo.', 'error');
+        }
+      });
+    }
   }
 
   function renderCabeceraColumnas() {
@@ -405,9 +463,19 @@ export async function renderPantallaClientes(contenedor) {
     if (elLista) elLista.classList.toggle('cargos-ocultos', cargosOcultos);
   }
 
+  /** §2.14: refresca el icono/aria-label del toggle claro/oscuro con el
+   * tema realmente activo ahora (elección manual, o sistema si no hay). */
+  function renderBotonTema() {
+    const btn = contenedor.querySelector('#btn-toggle-tema');
+    if (!btn) return;
+    btn.innerHTML = iconoTemaHtml();
+    btn.setAttribute('aria-label', temaActivo() === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro');
+  }
+
   async function refrescarTodo() {
     await refrescarLista();
     await refrescarArchivados();
+    await renderLineaRespaldo();
   }
 
   async function refrescarLista() {
@@ -497,26 +565,33 @@ export async function renderPantallaClientes(contenedor) {
   contenedor.innerHTML = `
     <section class="pantalla" data-pantalla="clientes">
       ${bannerModoDemoHtml()}
-      ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
-      <div class="encabezado-clientes">
-        <h1>Clientes</h1>
-        <button type="button" class="btn-icono" id="btn-config" aria-label="Configuración de categorías y conceptos">${Iconos.engrane()}</button>
+      <div class="encabezado-sticky-clientes">
+        <div class="encabezado-clientes">
+          <h1>Clientes</h1>
+          <div class="encabezado-clientes-acciones">
+            <button type="button" class="btn-icono" id="btn-toggle-tema" aria-label="Cambiar de tema">${iconoTemaHtml()}</button>
+            <button type="button" class="btn-icono" id="btn-config" aria-label="Configuración de categorías y conceptos">${Iconos.engrane()}</button>
+          </div>
+        </div>
+
+        <div class="nav-fecha-clientes">
+          <button type="button" class="btn-icono" id="btn-dia-anterior" aria-label="Día anterior">${Iconos.chevronIzquierda()}</button>
+          <button type="button" class="nav-fecha-titulo-btn" id="btn-elegir-fecha" aria-label="Elegir fecha">
+            <span id="nav-fecha-titulo"></span> ▾
+          </button>
+          <input type="date" id="input-fecha-vista" class="input-fecha-oculto" aria-hidden="true" tabindex="-1" />
+          <button type="button" class="btn-icono" id="btn-dia-siguiente" aria-label="Día siguiente">${Iconos.chevronDerecha()}</button>
+          <button type="button" class="chip-hoy chip-hoy-oculto" id="btn-volver-hoy">Hoy</button>
+        </div>
+
+        <div id="tarjetas-resumen-dia" class="tarjetas-resumen-dia" aria-live="polite"></div>
+        <div id="linea-extra-resumen-dia" class="linea-extra-resumen-dia" aria-live="polite"></div>
+
+        <div class="cabecera-columnas cabecera-columnas-excel" id="cabecera-columnas-clientes"></div>
+
+        <div id="linea-respaldo-clientes"></div>
       </div>
 
-      <div class="nav-fecha-clientes">
-        <button type="button" class="btn-icono" id="btn-dia-anterior" aria-label="Día anterior">${Iconos.chevronIzquierda()}</button>
-        <button type="button" class="nav-fecha-titulo-btn" id="btn-elegir-fecha" aria-label="Elegir fecha">
-          <span id="nav-fecha-titulo"></span> ▾
-        </button>
-        <input type="date" id="input-fecha-vista" class="input-fecha-oculto" aria-hidden="true" tabindex="-1" />
-        <button type="button" class="btn-icono" id="btn-dia-siguiente" aria-label="Día siguiente">${Iconos.chevronDerecha()}</button>
-        <button type="button" class="chip-hoy chip-hoy-oculto" id="btn-volver-hoy">Hoy</button>
-      </div>
-
-      <div id="tarjetas-resumen-dia" class="tarjetas-resumen-dia" aria-live="polite"></div>
-      <div id="linea-extra-resumen-dia" class="linea-extra-resumen-dia" aria-live="polite"></div>
-
-      <div class="cabecera-columnas cabecera-columnas-excel" id="cabecera-columnas-clientes"></div>
       <div id="lista-clientes-agrupados" aria-live="polite"></div>
 
       <details class="panel-colapsable panel-archivados" id="seccion-archivados">
@@ -532,6 +607,14 @@ export async function renderPantallaClientes(contenedor) {
   contenedor.querySelector('#btn-config').addEventListener('click', () => {
     abrirSheetConfiguracion({ onCambios: refrescarTodo });
   });
+  contenedor.querySelector('#btn-toggle-tema').addEventListener('click', () => {
+    alternarTema();
+    renderBotonTema();
+  });
+  // §2.14: si el gestor NO tiene una elección manual guardada, el toggle
+  // sigue al sistema — este listener mantiene el icono correcto si el
+  // sistema cambia de tema mientras la pantalla está abierta.
+  wireCambioTemaSistema(renderBotonTema);
   wireBannerModoDemo(contenedor);
 
   contenedor.querySelector('#btn-dia-anterior').addEventListener('click', () => {

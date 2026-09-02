@@ -83,7 +83,84 @@ export const Iconos = {
   cajaArchivo: (o) => svgIcono('<rect x="3" y="7" width="18" height="13" rx="1"/><path d="M3 7l2-4h14l2 4"/><line x1="9" y1="12" x2="15" y2="12"/>', o),
   restaurar: (o) => svgIcono('<path d="M9 14l-5-5 5-5"/><path d="M4 9h10a6 6 0 016 6v1"/>', o),
   alerta: (o) => svgIcono('<path d="M12 3l10 18H2z"/><line x1="12" y1="9" x2="12" y2="13.5"/><circle cx="12" cy="16.5" r="0.6" fill="currentColor" stroke="none"/>', o),
+  // §2.14: toggle claro/oscuro junto al engrane de Clientes.
+  sol: (o) => svgIcono(
+    '<circle cx="12" cy="12" r="4.3"/>' +
+    '<line x1="12" y1="2.3" x2="12" y2="4.8"/><line x1="12" y1="19.2" x2="12" y2="21.7"/>' +
+    '<line x1="2.3" y1="12" x2="4.8" y2="12"/><line x1="19.2" y1="12" x2="21.7" y2="12"/>' +
+    '<line x1="5.1" y1="5.1" x2="6.9" y2="6.9"/><line x1="17.1" y1="17.1" x2="18.9" y2="18.9"/>' +
+    '<line x1="5.1" y1="18.9" x2="6.9" y2="17.1"/><line x1="17.1" y1="6.9" x2="18.9" y2="5.1"/>', o),
+  luna: (o) => svgIcono('<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>', o),
+  // §2.14: acceso directo de respaldo en Clientes (reemplaza la microcopy).
+  respaldo: (o) => svgIcono('<path d="M4.5 4h13l3 3v13h-16z"/><path d="M8 4v5h7V4"/><rect x="8" y="13.5" width="8" height="6"/>', o),
 };
+
+// ============================================================
+// §2.14 — Toggle claro/oscuro: elección manual persistente que le gana al
+// sistema; sin elección guardada, sigue prefers-color-scheme como siempre.
+// La CLAVE debe coincidir EXACTO con el script inline de index.html (aplica
+// el atributo en <html> antes del primer render, para evitar flash) — no se
+// puede compartir una constante JS entre un <script> plano y un módulo, así
+// que el valor literal está documentado en los dos lugares.
+// ============================================================
+
+const CLAVE_TEMA = 'agus-tema'; // ver también el script inline en index.html
+
+function temaGuardado() {
+  try {
+    const v = localStorage.getItem(CLAVE_TEMA);
+    return v === 'light' || v === 'dark' ? v : null;
+  } catch (e) {
+    return null; // localStorage puede fallar (modo privado, cuota llena) — cae a sistema
+  }
+}
+
+function guardarTema(tema) {
+  try {
+    localStorage.setItem(CLAVE_TEMA, tema);
+  } catch (e) {
+    // Sin persistencia disponible: el toggle sigue funcionando en memoria
+    // para esta sesión (aplicarTema ya corrió), simplemente no sobrevive un F5.
+  }
+}
+
+function temaSistema() {
+  return (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    ? 'dark' : 'light';
+}
+
+/** Tema realmente activo ahora mismo: elección manual si existe, si no el del sistema. */
+export function temaActivo() {
+  return (typeof document !== 'undefined' && document.documentElement.dataset.theme) || temaSistema();
+}
+
+function aplicarTema(tema) {
+  document.documentElement.dataset.theme = tema;
+}
+
+/** Invierte el tema activo, lo persiste y lo aplica. Devuelve el nuevo tema. */
+export function alternarTema() {
+  const nuevo = temaActivo() === 'dark' ? 'light' : 'dark';
+  aplicarTema(nuevo);
+  guardarTema(nuevo);
+  return nuevo;
+}
+
+/** Icono que representa el tema ACTIVO ahora mismo (sol=claro, luna=oscuro). */
+export function iconoTemaHtml() {
+  return temaActivo() === 'dark' ? Iconos.luna() : Iconos.sol();
+}
+
+/** Se llama una vez desde donde viva el botón toggle (§2.14: junto al
+ * engrane de Clientes) — vuelve a pintar el icono/aria-label cuando el
+ * SISTEMA cambia de tema y el gestor NO tiene una elección manual guardada
+ * (si ya eligió manualmente, el sistema deja de importar, por diseño). */
+export function wireCambioTemaSistema(actualizarUi) {
+  if (typeof window === 'undefined' || !window.matchMedia) return;
+  const mql = window.matchMedia('(prefers-color-scheme: dark)');
+  const onChange = () => { if (!temaGuardado()) actualizarUi(); };
+  mql.addEventListener ? mql.addEventListener('change', onChange) : mql.addListener(onChange);
+}
 
 // ============================================================
 // Dinero: null honesto (sin dato = "—", jamás $0.00 inventado)

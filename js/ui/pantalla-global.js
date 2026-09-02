@@ -1,14 +1,15 @@
-// Pantalla "Global" (reemplaza "Resumen") — contrato vigente §2.10
-// (PLAN-MVP.md, iteración v3 "Excel"): el mes del negocio POR FECHA
-// (complemento de Clientes, que es por persona). Navegación de mes + 3
-// totales a color + calendario compacto con SOLO totales por día (verde
-// arriba/rojo abajo, sin conceptos) + desglose del día tocado (cada
-// movimiento con cliente, concepto si es cargo, y monto — navega al
-// cliente) + recordatorio de respaldo + Ajustes/Respaldo (igual que antes) +
-// Historia de archivados. SIN tabla por cliente (esa vive en Clientes).
+// Pantalla "Global" (reemplaza "Resumen") — contrato vigente §2.10/§2.14
+// (PLAN-MVP.md): el mes del negocio POR FECHA (complemento de Clientes, que
+// es por persona). Navegación de mes + 3 totales a color + calendario
+// compacto con SOLO totales por día (verde arriba/rojo abajo, sin conceptos)
+// + desglose del día tocado (cada movimiento con cliente, concepto si es
+// cargo, y monto — navega al cliente) + Ajustes/Respaldo (import vive acá) +
+// Historia de archivados. SIN tabla por cliente (esa vive en Clientes). §2.14
+// retira el banner/aviso ámbar de recordatorio de respaldo (sustituido por
+// el acceso directo de Clientes) — el import de respaldo se mantiene igual.
 
 import {
-  obtenerCalendarioGlobalMovimientos, obtenerUltimoRespaldo, listarClientesArchivados,
+  obtenerCalendarioGlobalMovimientos, listarClientesArchivados,
   exportarRespaldo, importarRespaldo, estaSoloLectura, listarMovimientos, esModoDemo,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
@@ -62,12 +63,6 @@ function diaSemanaLunes(fechaIso) {
   const [anio, mes, dia] = fechaIso.split('-').map(Number);
   const d = new Date(anio, mes - 1, dia, 12, 0, 0);
   return (d.getDay() + 6) % 7;
-}
-function diasEntre(fechaIsoDesde, fechaIsoHasta) {
-  const [a1, m1, d1] = fechaIsoDesde.split('-').map(Number);
-  const [a2, m2, d2] = fechaIsoHasta.split('-').map(Number);
-  const ms = new Date(a2, m2 - 1, d2).getTime() - new Date(a1, m1 - 1, d1).getTime();
-  return Math.round(ms / 86400000);
 }
 
 /**
@@ -144,14 +139,10 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
   async function renderTodo() {
     const hoyStr = hoy();
     const { primerDia, ultimoDiaNum } = primerYUltimoDiaDeMes(mesVisible);
-    const [{ dias, totalesMes }, ultimoRespaldoIso, archivados] = await Promise.all([
+    const [{ dias, totalesMes }, archivados] = await Promise.all([
       obtenerCalendarioGlobalMovimientos(mesVisible),
-      obtenerUltimoRespaldo(),
       listarClientesArchivados(),
     ]);
-
-    const diasDesdeRespaldo = ultimoRespaldoIso ? diasEntre(ultimoRespaldoIso.slice(0, 10), hoyStr) : null;
-    const mostrarRecordatorio = diasDesdeRespaldo === null || diasDesdeRespaldo > 7;
 
     const primerDiaSemana = diaSemanaLunes(primerDia);
     const totalCeldas = primerDiaSemana + ultimoDiaNum;
@@ -167,12 +158,6 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
         ${bannerModoDemoHtml()}
         ${microcopy('¿Para qué sirve esta pantalla?', MICROCOPY)}
         <h1>${Iconos.globo()} Global</h1>
-
-        ${mostrarRecordatorio ? `
-          <div class="aviso-banner aviso-recordatorio-respaldo" role="alert">
-            <span>${Iconos.alerta()} ${ultimoRespaldoIso === null ? 'Nunca has exportado un respaldo.' : `Tu último respaldo fue hace ${diasDesdeRespaldo} día(s).`}</span>
-            <button type="button" class="btn btn-secundario btn-pequeno" id="btn-exportar-ahora" ${soloLectura ? 'disabled' : ''}>Exportar ahora</button>
-          </div>` : ''}
 
         <div class="campo">
           <label for="selector-mes-global">Mes</label>
@@ -307,9 +292,6 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
 
   function wireEvents() {
     wireBannerModoDemo(contenedor);
-
-    const btnExportarAhora = contenedor.querySelector('#btn-exportar-ahora');
-    if (btnExportarAhora) btnExportarAhora.addEventListener('click', realizarExportar);
 
     const btnEmpezarModoReal = contenedor.querySelector('#btn-empezar-modo-real');
     if (btnEmpezarModoReal) btnEmpezarModoReal.addEventListener('click', () => abrirSheetIniciarModoReal());
