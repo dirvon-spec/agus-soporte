@@ -10,15 +10,15 @@
 
 import {
   obtenerCalendarioGlobalMovimientos, listarClientesArchivados, listarClientesAgrupados,
-  exportarRespaldo, importarRespaldo, estaSoloLectura, listarMovimientos, esModoDemo,
+  exportarRespaldo, estaSoloLectura, listarMovimientos, esModoDemo,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, formatearMesAnio, formatearFechaLegible, formatearFechaCorta,
-  escapeHtml, mostrarToast, errorGeneral, bolitaHtml, Iconos,
+  escapeHtml, mostrarToast, bolitaHtml, Iconos,
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
   bannerModoDemoHtml, wireBannerModoDemo, abrirSheetIniciarModoReal,
-  calcularBalanceGeneral,
+  calcularBalanceGeneral, dispararImportarRespaldo,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -257,10 +257,7 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
           <p class="texto-secundario">${MICROCOPY_AJUSTES_RESPALDO}</p>
           <div class="acciones-respaldo">
             <button type="button" class="btn btn-secundario" id="btn-exportar-respaldo">Exportar respaldo</button>
-            <label class="btn btn-secundario btn-archivo" ${soloLectura ? 'aria-disabled="true"' : ''}>
-              Importar respaldo
-              <input type="file" id="input-importar-respaldo" accept=".sqlite,application/x-sqlite3" hidden ${soloLectura ? 'disabled' : ''} />
-            </label>
+            <button type="button" class="btn btn-secundario" id="btn-importar-respaldo-global" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>Importar respaldo</button>
           </div>
           <div id="slot-error-importar"></div>
         </details>
@@ -372,29 +369,12 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
 
     contenedor.querySelector('#btn-exportar-respaldo').addEventListener('click', realizarExportar);
 
-    const inputImportar = contenedor.querySelector('#input-importar-respaldo');
-    inputImportar.addEventListener('change', async () => {
-      const slot = contenedor.querySelector('#slot-error-importar');
-      slot.innerHTML = '';
-      const archivo = inputImportar.files && inputImportar.files[0];
-      if (!archivo) return;
-
-      const confirmado = window.confirm('Esto reemplaza todos los datos actuales por los del archivo. ¿Continuar?');
-      if (!confirmado) {
-        inputImportar.value = '';
-        return;
-      }
-
-      try {
-        const arrayBuffer = await archivo.arrayBuffer();
-        await importarRespaldo(arrayBuffer);
-        mostrarToast('Respaldo importado. Recargando…', 'exito');
-        setTimeout(() => window.location.reload(), 800);
-      } catch (e) {
-        slot.innerHTML = errorGeneral(e.message || 'El archivo no es un respaldo válido de esta app.');
-        inputImportar.value = '';
-      }
-    });
+    const btnImportar = contenedor.querySelector('#btn-importar-respaldo-global');
+    if (btnImportar) {
+      btnImportar.addEventListener('click', () => {
+        dispararImportarRespaldo({ mostrarErrorEn: contenedor.querySelector('#slot-error-importar') });
+      });
+    }
   }
 
   await renderTodo();

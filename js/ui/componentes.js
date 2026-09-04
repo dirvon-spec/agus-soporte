@@ -16,7 +16,7 @@ import {
   listarConceptos, crearConcepto, borrarConceptoLogico, registrarCargo, registrarAbono,
   listarClientesAgrupados, registrarVisitaSinAbono, eliminarVisitaSinAbono,
   corregirMontoMovimiento, borrarMovimientoLogico, restaurarMovimiento,
-  esModoDemo, iniciarModoReal,
+  esModoDemo, iniciarModoReal, importarRespaldo, estaSoloLectura,
 } from '../db.js';
 
 // ============================================================
@@ -1168,6 +1168,68 @@ export function abrirSheetSeleccionarCliente({ fecha, onGuardado }) {
 }
 
 // ============================================================
+// Emergencia de producción: un gestor perdió sus datos reales (re-sembrado
+// automático de la demo los borró). Tiene un .sqlite de respaldo pero no
+// encontraba cómo importarlo — estaba enterrado en un panel plegado. Este
+// helper centraliza el flujo de "importar respaldo" (selector de archivo +
+// confirmación + importarRespaldo() + toast/recarga o error claro) para que
+// viva en un solo lugar y se pueda ofrecer desde tres puntos de entrada: el
+// banner de modo demo, el acceso directo de Clientes y el panel Ajustes/
+// Respaldo de Global — sin duplicar la lógica en los tres.
+//
+// Sin `accept` en el <input type="file">: en iOS/Safari, accept=".sqlite,
+// application/x-sqlite3" puede dejar el archivo GRIS/no-seleccionable en la
+// app Archivos (el sistema no siempre reconoce esa extensión/MIME) — eso
+// dejaba al gestor sin poder ni siquiera elegir su respaldo. La validación
+// real de que el archivo sea un .sqlite válido de esta app sigue viviendo
+// enteramente en `importarRespaldo()` (db.js), que rechaza archivos
+// inválidos con VALIDATION_ERROR y NUNCA toca la base activa.
+// ============================================================
+
+/**
+ * Dispara el selector de archivo nativo y corre el flujo completo de
+ * importación de respaldo: confirmación destructiva → importarRespaldo() →
+ * toast + recarga en éxito, o mensaje de error claro en fallo (sin tocar la
+ * base activa). El error se muestra inline en `mostrarErrorEn` si se pasa un
+ * elemento (ej. el slot de error de Global); si no, como toast (banner y
+ * Clientes, que no tienen un slot inline dedicado).
+ * @param {{mostrarErrorEn?: HTMLElement}} [opciones]
+ */
+export function dispararImportarRespaldo({ mostrarErrorEn } = {}) {
+  if (estaSoloLectura()) {
+    mostrarToast('Modo solo lectura: no se puede importar un respaldo.', 'error');
+    return;
+  }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.hidden = true;
+  document.body.appendChild(input);
+
+  input.addEventListener('change', async () => {
+    if (mostrarErrorEn) mostrarErrorEn.innerHTML = '';
+    const archivo = input.files && input.files[0];
+    input.remove();
+    if (!archivo) return;
+
+    const confirmado = window.confirm('Esto reemplaza todos los datos actuales por los del archivo. ¿Continuar?');
+    if (!confirmado) return;
+
+    try {
+      const arrayBuffer = await archivo.arrayBuffer();
+      await importarRespaldo(arrayBuffer);
+      mostrarToast('Respaldo importado. Recargando…', 'exito');
+      setTimeout(() => window.location.reload(), 800);
+    } catch (e) {
+      const mensaje = e.message || 'El archivo no es un respaldo válido de esta app.';
+      if (mostrarErrorEn) mostrarErrorEn.innerHTML = errorGeneral(mensaje);
+      else mostrarToast(mensaje, 'error');
+    }
+  });
+
+  input.click();
+}
+
+// ============================================================
 // Bloqueante de producción: banner de modo demo + flujo "Empezar a trabajar
 // con mis datos reales" (iniciarModoReal). Un solo lugar para no repetir la
 // lógica en Clientes y Global.
@@ -1176,19 +1238,28 @@ export function abrirSheetSeleccionarCliente({ fecha, onGuardado }) {
 /**
  * Banner NO descartable, visible arriba de Clientes y Global mientras
  * `esModoDemo()` sea true. Devuelve '' en modo real (cero rastro).
+ * Emergencia de producción: segunda acción igual de visible para el gestor
+ * que perdió sus datos y necesita restaurar SIN buscar en menús.
  */
 export function bannerModoDemoHtml() {
   if (!esModoDemo()) return '';
   return `
-    <button type="button" class="banner-modo-demo" id="btn-banner-modo-demo">
-      Estás viendo datos de EJEMPLO. Antes de registrar tus clientes reales, tocá acá para empezar de cero.
-    </button>`;
+    <div class="banner-modo-demo-wrap">
+      <button type="button" class="banner-modo-demo" id="btn-banner-modo-demo">
+        Estás viendo datos de EJEMPLO. Antes de registrar tus clientes reales, tocá acá para empezar de cero.
+      </button>
+      <button type="button" class="banner-modo-demo banner-modo-demo-importar" id="btn-banner-importar-respaldo">
+        ¿Ya tenías datos? Importar respaldo
+      </button>
+    </div>`;
 }
 
-/** Wire del click del banner — no-op si no está presente (modo real). */
+/** Wire de los clicks del banner — no-op si no está presente (modo real). */
 export function wireBannerModoDemo(contenedor) {
   const btn = contenedor.querySelector('#btn-banner-modo-demo');
   if (btn) btn.addEventListener('click', () => abrirSheetIniciarModoReal());
+  const btnImportar = contenedor.querySelector('#btn-banner-importar-respaldo');
+  if (btnImportar) btnImportar.addEventListener('click', () => dispararImportarRespaldo());
 }
 
 /**

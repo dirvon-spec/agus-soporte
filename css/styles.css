@@ -1131,6 +1131,12 @@ button.fila-excel-monto:focus-visible {
    ahí mismo. La fecha se destaca en ámbar SOLO cuando hace más de 7 días
    (o nunca se exportó) — un dato con color, no un banner de advertencia.
    ============================================================ */
+.fila-linea-respaldo-clientes {
+  display: flex;
+  align-items: center;
+  gap: var(--espaciado-sm);
+}
+
 .linea-respaldo-clientes {
   display: flex;
   align-items: center;
@@ -1153,6 +1159,15 @@ button.fila-excel-monto:focus-visible {
 .linea-respaldo-destacado {
   color: var(--color-advertencia);
   font-weight: 600;
+}
+
+/* Emergencia de producción: acción de "Restaurar" discreta pero presente
+   junto al acceso directo de respaldo — mismo estilo chico, ancho propio (no
+   flex:1) para no competir visualmente con "Respaldar · último: …". */
+.linea-restaurar-clientes {
+  width: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* ============================================================
@@ -2015,7 +2030,16 @@ button.fila-excel-monto:focus-visible {
    ============================================================ */
 
 /* NO descartable a propósito: sin botón de cerrar. Ocupa todo el ancho,
-   funciona como botón completo (toda la franja es tocable). */
+   funciona como botón completo (toda la franja es tocable). El wrap agrupa
+   las dos acciones (empezar de cero / importar respaldo) — la negativa de
+   margen que antes vivía en .banner-modo-demo pasa al wrap para que el
+   conjunto siga pegado a los bordes del contenedor padre. */
+.banner-modo-demo-wrap {
+  display: flex;
+  flex-direction: column;
+  margin: calc(-1 * var(--espaciado-md)) calc(-1 * var(--espaciado-md)) var(--espaciado-sm);
+}
+
 .banner-modo-demo {
   display: block;
   width: 100%;
@@ -2029,7 +2053,17 @@ button.fila-excel-monto:focus-visible {
   font-weight: 600;
   line-height: 1.3;
   cursor: pointer;
-  margin: calc(-1 * var(--espaciado-md)) calc(-1 * var(--espaciado-md)) var(--espaciado-sm);
+  margin: 0;
+}
+
+/* Emergencia de producción: un gestor que perdió sus datos necesita esta
+   acción TAN visible como "empezar de cero" — mismo tratamiento de franja
+   completa, color distinto (primario, no advertencia) porque es una acción
+   de restaurar, no una decisión destructiva. */
+.banner-modo-demo-importar {
+  background: var(--color-primario);
+  color: var(--color-primario-texto);
+  border-bottom: 2px solid var(--color-primario-oscuro);
 }
 
 .zona-modo-real {

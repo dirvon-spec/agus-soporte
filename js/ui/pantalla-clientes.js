@@ -24,7 +24,7 @@ import {
   mostrarToast, errorCampo, errorGeneral, Iconos, bolitaHtml,
   abrirSheet, cerrarSheet, abrirSheetConfiguracion, abrirPanelRapido,
   activarArrastreOrden, PALETA_COLORES_CATEGORIA,
-  bannerModoDemoHtml, wireBannerModoDemo,
+  bannerModoDemoHtml, wireBannerModoDemo, dispararImportarRespaldo,
   iconoTemaHtml, alternarTema, temaActivo, wireCambioTemaSistema,
   calcularBalanceGeneral,
 } from './componentes.js';
@@ -399,10 +399,16 @@ export async function renderPantallaClientes(contenedor) {
     const destacar = diasDesde === null || diasDesde > 7;
     const textoFecha = diasDesde === null ? 'nunca' : `hace ${diasDesde} día(s)`;
     el.innerHTML = `
-      <button type="button" class="linea-respaldo-clientes" id="btn-respaldar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
-        ${Iconos.respaldo()}
-        <span>Respaldar · último: ${destacar ? `<span class="linea-respaldo-destacado">${escapeHtml(textoFecha)}</span>` : escapeHtml(textoFecha)}</span>
-      </button>
+      <div class="fila-linea-respaldo-clientes">
+        <button type="button" class="linea-respaldo-clientes" id="btn-respaldar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
+          ${Iconos.respaldo()}
+          <span>Respaldar · último: ${destacar ? `<span class="linea-respaldo-destacado">${escapeHtml(textoFecha)}</span>` : escapeHtml(textoFecha)}</span>
+        </button>
+        <button type="button" class="linea-respaldo-clientes linea-restaurar-clientes" id="btn-restaurar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
+          ${Iconos.restaurar()}
+          <span>Restaurar</span>
+        </button>
+      </div>
     `;
     const btn = el.querySelector('#btn-respaldar-clientes');
     if (btn) {
@@ -424,6 +430,11 @@ export async function renderPantallaClientes(contenedor) {
         }
       });
     }
+    // Emergencia de producción: acceso discreto pero presente para restaurar
+    // un .sqlite sin tener que ir a Global — mismo flujo compartido que el
+    // banner de modo demo y el panel Ajustes/Respaldo de Global.
+    const btnRestaurar = el.querySelector('#btn-restaurar-clientes');
+    if (btnRestaurar) btnRestaurar.addEventListener('click', () => dispararImportarRespaldo());
   }
 
   function renderCabeceraColumnas() {
