@@ -11,6 +11,13 @@
 // try/catch; una excepción no capturada muestra un estado de error
 // recuperable ("Algo salió mal. [Volver a Clientes]") con el detalle técnico
 // en un <details> colapsado — nunca una pantalla en blanco.
+//
+// Pedido del dueño (avisos amarillos ocupan demasiado espacio): el banner de
+// ancho completo "almacenamiento persistente denegado" que vivía acá se
+// retiró — su información ahora vive COMPACTA como ícono de advertencia
+// junto a la línea "Respaldar · último: …" de Clientes (misma señal, sin
+// renglón propio; ver almacenamientoPersistenteDenegado() en
+// ui/componentes.js) y en el texto de Ajustes/Respaldo de Global.
 
 import { estaSoloLectura } from './db.js';
 import { escapeHtml, cerrarSheet, Iconos } from './ui/componentes.js';
@@ -52,7 +59,6 @@ function iconoTab(tab) {
 function armarShell() {
   elApp.innerHTML = `
     <div id="aviso-solo-lectura" class="aviso-banner aviso-solo-lectura" hidden role="alert"></div>
-    <div id="aviso-persist" class="aviso-banner aviso-discreto" hidden></div>
     <main id="pantalla-contenido" class="pantalla-contenido" aria-live="polite"></main>
     <nav id="nav-inferior" class="nav-inferior" aria-label="Navegación principal">
       <a href="#/clientes" data-tab="clientes" class="nav-item">
@@ -88,32 +94,6 @@ function armarShell() {
     const aviso = document.getElementById('aviso-solo-lectura');
     aviso.hidden = false;
     aviso.textContent = 'La app ya está abierta en otra pestaña; cerrala para editar aquí. Esta pestaña quedó en modo solo lectura.';
-  }
-
-  actualizarAvisoPersistencia();
-}
-
-async function actualizarAvisoPersistencia() {
-  const aviso = document.getElementById('aviso-persist');
-  if (!aviso) return;
-  try {
-    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persisted) {
-      const persistido = await navigator.storage.persisted();
-      if (!persistido) {
-        aviso.hidden = false;
-        aviso.innerHTML =
-          'El navegador podría liberar espacio si el dispositivo anda justo de memoria; ' +
-          'te recomendamos exportar un respaldo seguido. ' +
-          '<a href="#/global">Ir a Global y respaldos</a>' +
-          ' <button type="button" class="btn-cerrar-aviso" aria-label="Cerrar aviso">×</button>';
-        aviso.querySelector('.btn-cerrar-aviso').addEventListener('click', () => {
-          aviso.hidden = true;
-        });
-      }
-    }
-  } catch (e) {
-    // No bloqueante: si la API no está disponible, simplemente no se muestra el aviso.
-    console.warn('[router] No se pudo consultar navigator.storage.persisted():', e);
   }
 }
 

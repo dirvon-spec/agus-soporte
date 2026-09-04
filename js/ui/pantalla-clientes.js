@@ -26,7 +26,7 @@ import {
   activarArrastreOrden, PALETA_COLORES_CATEGORIA,
   bannerModoDemoHtml, wireBannerModoDemo, dispararImportarRespaldo,
   iconoTemaHtml, alternarTema, temaActivo, wireCambioTemaSistema,
-  calcularBalanceGeneral,
+  calcularBalanceGeneral, almacenamientoPersistenteDenegado,
 } from './componentes.js';
 
 // §2.13: se retira la notación compacta (A-201 queda resuelto de otra forma)
@@ -390,20 +390,33 @@ export async function renderPantallaClientes(contenedor) {
    * fecha se pinta ámbar SOLO cuando N>7 o nunca se exportó — dato con
    * color, no un banner (el banner de Global se retira, punto 5). No se
    * recalcula en cada refrescarLista(): la fecha de último respaldo no
-   * cambia solo por mirar otro día. */
+   * cambia solo por mirar otro día.
+   *
+   * Pedido del dueño (avisos amarillos ocupan demasiado espacio): el banner
+   * amarillo de ancho completo "almacenamiento persistente denegado" se
+   * retiró del shell (router.js). Su información NO se pierde: si
+   * navigator.storage.persisted() devuelve false, esta misma línea suma un
+   * ícono de advertencia discreto (sin renglón propio) con title/aria-label
+   * explicando el riesgo — cero pérdida de información, espacio mínimo. */
   async function renderLineaRespaldo() {
     const el = contenedor.querySelector('#linea-respaldo-clientes');
     if (!el) return;
-    const ultimoRespaldoIso = await obtenerUltimoRespaldo();
+    const [ultimoRespaldoIso, persistenciaDenegada] = await Promise.all([
+      obtenerUltimoRespaldo(),
+      almacenamientoPersistenteDenegado(),
+    ]);
     const diasDesde = ultimoRespaldoIso ? Math.max(0, diasEntre(fechaLocalDeIso(ultimoRespaldoIso), hoy())) : null;
     const destacar = diasDesde === null || diasDesde > 7;
     const textoFecha = diasDesde === null ? 'nunca' : `hace ${diasDesde} día(s)`;
+    const textoAvisoPersistencia = 'Almacenamiento persistente denegado: el navegador podría liberar espacio ' +
+      'si el dispositivo anda justo de memoria. Te recomendamos exportar un respaldo seguido.';
     el.innerHTML = `
       <div class="fila-linea-respaldo-clientes">
         <button type="button" class="linea-respaldo-clientes" id="btn-respaldar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
           ${Iconos.respaldo()}
           <span>Respaldar · último: ${destacar ? `<span class="linea-respaldo-destacado">${escapeHtml(textoFecha)}</span>` : escapeHtml(textoFecha)}</span>
         </button>
+        ${persistenciaDenegada ? `<span class="icono-aviso-persistencia" role="img" aria-label="${escapeHtml(textoAvisoPersistencia)}" title="${escapeHtml(textoAvisoPersistencia)}">${Iconos.alerta()}</span>` : ''}
         <button type="button" class="linea-respaldo-clientes linea-restaurar-clientes" id="btn-restaurar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
           ${Iconos.restaurar()}
           <span>Restaurar</span>

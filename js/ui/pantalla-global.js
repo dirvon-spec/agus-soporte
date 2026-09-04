@@ -19,6 +19,7 @@ import {
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
   bannerModoDemoHtml, wireBannerModoDemo, abrirSheetIniciarModoReal,
   calcularBalanceGeneral, dispararImportarRespaldo,
+  panelCopiasAutomaticasHtml, renderCopiasAutomaticas,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -260,6 +261,7 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
             <button type="button" class="btn btn-secundario" id="btn-importar-respaldo-global" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>Importar respaldo</button>
           </div>
           <div id="slot-error-importar"></div>
+          ${panelCopiasAutomaticasHtml()}
         </details>
 
         <details class="panel-colapsable panel-archivados-historia">
@@ -279,6 +281,7 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
 
     wireEvents();
     renderAvisoPersistencia();
+    renderCopiasAutomaticas(contenedor);
   }
 
   async function renderAvisoPersistencia() {

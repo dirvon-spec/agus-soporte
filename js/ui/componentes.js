@@ -17,6 +17,7 @@ import {
   listarClientesAgrupados, registrarVisitaSinAbono, eliminarVisitaSinAbono,
   corregirMontoMovimiento, borrarMovimientoLogico, restaurarMovimiento,
   esModoDemo, iniciarModoReal, importarRespaldo, estaSoloLectura,
+  listarSnapshots, restaurarSnapshot,
 } from '../db.js';
 
 // ============================================================
@@ -243,6 +244,46 @@ export function formatearMesAnio(anioMes) {
   const d = new Date(anio, mes - 1, 1, 12, 0, 0);
   const texto = new Intl.DateTimeFormat('es-MX', { month: 'long', year: 'numeric' }).format(d);
   return texto.charAt(0).toUpperCase() + texto.slice(1);
+}
+
+const FORMATEADOR_FECHA_HORA_SNAPSHOT = new Intl.DateTimeFormat('es-MX', {
+  day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+});
+
+/** Ej: "4 sep 2026, 14:32", para timestamps de INSTANTE (created_at, snapshots) —
+ * distinto de formatearFecha*, que son para fechas de NEGOCIO 'YYYY-MM-DD'. */
+export function formatearFechaHoraInstante(fechaIso) {
+  try {
+    return FORMATEADOR_FECHA_HORA_SNAPSHOT.format(new Date(fechaIso));
+  } catch (e) {
+    return fechaIso;
+  }
+}
+
+// ============================================================
+// Almacenamiento persistente (navigator.storage.persisted()) — compartido
+// entre el ícono discreto junto a "Respaldar" en Clientes y el texto de
+// Ajustes/Respaldo en Global. Antes vivía además como banner de ancho
+// completo en el shell del router; se retiró por pedido del dueño (ocupaba
+// media pantalla en iPhone apilado con el banner de modo demo) — la MISMA
+// información ahora vive compacta, sin renglón propio.
+// ============================================================
+
+/**
+ * @returns {Promise<boolean>} true si el navegador denegó (o no concedió
+ *   todavía) almacenamiento persistente. false también cuando la API no
+ *   existe o no se pudo consultar — no es un "denegado" confirmado, así que
+ *   no corresponde alarmar.
+ */
+export async function almacenamientoPersistenteDenegado() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persisted) {
+      return !(await navigator.storage.persisted());
+    }
+  } catch (e) {
+    console.warn('[ui] No se pudo consultar navigator.storage.persisted():', e);
+  }
+  return false;
 }
 
 // ============================================================
@@ -1240,17 +1281,20 @@ export function dispararImportarRespaldo({ mostrarErrorEn } = {}) {
  * `esModoDemo()` sea true. Devuelve '' en modo real (cero rastro).
  * Emergencia de producción: segunda acción igual de visible para el gestor
  * que perdió sus datos y necesita restaurar SIN buscar en menús.
+ * Compactado (pedido del dueño): una sola línea con las dos acciones como
+ * enlaces chicos en línea — antes eran dos botones de ancho completo
+ * apilados que se comían media pantalla en un iPhone. Sigue siendo
+ * imposible de ignorar (fondo de advertencia, sin botón de cerrar), pero
+ * ocupa ~1/3 del alto anterior.
  */
 export function bannerModoDemoHtml() {
   if (!esModoDemo()) return '';
   return `
-    <div class="banner-modo-demo-wrap">
-      <button type="button" class="banner-modo-demo" id="btn-banner-modo-demo">
-        Estás viendo datos de EJEMPLO. Antes de registrar tus clientes reales, tocá acá para empezar de cero.
-      </button>
-      <button type="button" class="banner-modo-demo banner-modo-demo-importar" id="btn-banner-importar-respaldo">
-        ¿Ya tenías datos? Importar respaldo
-      </button>
+    <div class="banner-modo-demo-compacto" role="note">
+      <span class="banner-modo-demo-texto">${Iconos.alerta()} Estás viendo datos de EJEMPLO</span>
+      <button type="button" class="banner-modo-demo-accion" id="btn-banner-modo-demo">Empezar de cero</button>
+      <span class="banner-modo-demo-separador" aria-hidden="true">·</span>
+      <button type="button" class="banner-modo-demo-accion banner-modo-demo-accion-importar" id="btn-banner-importar-respaldo">Importar respaldo</button>
     </div>`;
 }
 
@@ -1343,6 +1387,93 @@ export function abrirSheetIniciarModoReal() {
     }
     render();
   }, { titulo: 'Empezar a trabajar con mis datos reales' });
+}
+
+// ============================================================
+// Copias automáticas (snapshots de seguridad, item 3 del incidente
+// 2-sep-2026): la capa de datos (db.js) ya guarda snapshots solos —
+// listarSnapshots()/obtenerBytesSnapshot()/restaurarSnapshot(), contrato
+// documentado ahí — pero hasta ahora no había forma de VERLOS ni de
+// restaurarlos desde la interfaz. Vive en Global → Ajustes/Respaldo, debajo
+// de exportar/importar (que sigue siendo la protección PRINCIPAL: estas
+// copias viven dentro del navegador, no sobreviven un "borrar datos del
+// sitio").
+// ============================================================
+
+/** HTML del bloque completo (título + slot de lista); el slot se puebla
+ * async con renderCopiasAutomaticas() después de insertar este HTML en el
+ * DOM (mismo patrón que #estado-persistencia en pantalla-global.js). */
+export function panelCopiasAutomaticasHtml() {
+  return `
+    <div class="panel-copias-automaticas">
+      <p class="subtitulo-copias-automaticas">Copias automáticas</p>
+      <p class="texto-secundario">Estas copias viven DENTRO de este navegador — si se borran los
+        datos del sitio, se van con ellas. El respaldo exportado a un archivo (arriba) sigue siendo
+        tu protección principal.</p>
+      <div id="lista-copias-automaticas"><p class="cargando">Cargando…</p></div>
+    </div>`;
+}
+
+/**
+ * Puebla #lista-copias-automaticas (debe existir ya en `contenedor`, insertado
+ * por panelCopiasAutomaticasHtml()) y conecta el botón "Restaurar" de cada
+ * fila. Se llama después de insertar el HTML de la pantalla, igual que
+ * renderAvisoPersistencia() en pantalla-global.js.
+ * @param {HTMLElement} contenedor
+ */
+export async function renderCopiasAutomaticas(contenedor) {
+  const el = contenedor.querySelector('#lista-copias-automaticas');
+  if (!el) return;
+
+  let snapshots;
+  try {
+    snapshots = await listarSnapshots();
+  } catch (e) {
+    el.innerHTML = errorGeneral(e.message || 'No se pudieron cargar las copias automáticas.');
+    return;
+  }
+
+  if (snapshots.length === 0) {
+    el.innerHTML = estadoVacio(
+      'Todavía no hay copias automáticas.',
+      'Se crean solas mientras usás la app (una por día, y antes de cualquier operación que reemplace datos) — no hay nada que hacer para activarlas.'
+    );
+    return;
+  }
+
+  el.innerHTML = `<ul class="lista lista-snapshots">${snapshots.map((s) => `
+    <li class="lista-item fila-snapshot" data-clave="${escapeHtml(s.clave)}">
+      <div class="fila-snapshot-info">
+        <span class="fila-snapshot-fecha">${escapeHtml(formatearFechaHoraInstante(s.fechaIso))}</span>
+        <span class="fila-snapshot-motivo">${escapeHtml(s.motivo)}</span>
+      </div>
+      <button type="button" class="btn btn-secundario btn-pequeno" data-accion="restaurar-snapshot" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>Restaurar</button>
+    </li>`).join('')}</ul>`;
+
+  el.querySelectorAll('[data-accion="restaurar-snapshot"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const li = btn.closest('[data-clave]');
+      const clave = li.dataset.clave;
+      const snap = snapshots.find((s) => s.clave === clave);
+      const fechaTexto = snap ? formatearFechaHoraInstante(snap.fechaIso) : '';
+      const motivoTexto = snap ? snap.motivo : 'esta copia';
+      const confirmado = window.confirm(
+        `Esto reemplaza TODOS los datos actuales por la copia "${motivoTexto}" del ${fechaTexto}.\n\n` +
+        'Antes de restaurar se guarda una copia del estado actual — si te arrepentís, también vas a poder volver a ella. ¿Continuar?'
+      );
+      if (!confirmado) return;
+
+      btn.disabled = true;
+      try {
+        await restaurarSnapshot(clave);
+        mostrarToast('Copia restaurada. Recargando…', 'exito');
+        setTimeout(() => window.location.reload(), 800);
+      } catch (e) {
+        mostrarToast(e.message || 'No se pudo restaurar la copia.', 'error');
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 // ============================================================
