@@ -61,6 +61,28 @@ Destilado del proyecto Agus-Soporte (ago-sep 2026): app de cobranza entregada en
 - `CLAUDE.md`: comandos, arquitectura por capas, reglas firmes, y CICATRICES (cada bug no-obvio con cómo cazarlo si vuelve).
 - El plan acumula la historia completa de specs; el backlog nunca pierde una idea.
 
+## Seguridad de los datos del usuario (de un incidente real de pérdida de datos, 2-sep-2026)
+
+Un cliente final perdió su cartera completa en producción. El riesgo estaba IDENTIFICADO y escrito en el plan desde el día uno, y aun así explotó. Estas reglas salen de ahí y no son negociables en cualquier app donde los datos del usuario sean su negocio.
+
+**Sobre las mitigaciones:**
+1. **Ninguna mitigación que dependa de una acción del usuario cuenta como resuelta.** Un botón que debe tocar, un hábito de respaldo, una instrucción de instalación: son *instrucciones*, y las instrucciones fallan. Si no hay más que eso, el riesgo se marca **ACEPTADO**, no APLICADO — y el sistema debe al menos detectar el incumplimiento. En el incidente, el riesgo se "cerró" con un botón que el usuario nunca tocó.
+2. **Nada construido para la demo sobrevive al pase a producción si puede borrar datos.** El día que el producto cambia de horizonte (demo → uso real), se releen TODOS los supuestos del análisis anterior con fecha nueva: los que valían para una demo desechable dejan de valer.
+3. **Una protección que el usuario no puede alcanzar no protege.** Si construyes copias de seguridad, alarmas o modos seguros, entrégalos CON su interfaz en el mismo lote. Un snapshot sin botón de restaurar es tranquilidad falsa para el equipo y cero ayuda para el usuario.
+4. **Ninguna protección puede bloquear el rescate.** Degradación asimétrica: una operación electiva y destructiva (borrar todo para empezar de cero) sí puede abortar si no hay red de seguridad; importar o restaurar un respaldo NUNCA deben bloquearse — son la vía de salida, y bloquearlas anula su razón de existir. Si hay que continuar sin red, se avisa explícitamente ("no habrá vuelta atrás") y decide el usuario.
+5. **Ningún fallo de escritura puede ser silencioso.** Reintenta, no descartes el trabajo pendiente antes de confirmar, y hazlo VISIBLE con una alarma que no se pueda ignorar. El usuario debe poder exportar en el acto, incluso durante el fallo (exportando desde memoria).
+6. **Nunca le digas al usuario que está a salvo sin evidencia.** Si no puedes confirmar que el archivo de respaldo se descargó, pregúntale ("¿lo encontraste?") y hasta entonces muéstralo como *sin confirmar*. Mentir en el indicador de seguridad es el peor pecado posible: destruye la red de recuperación y la percepción de necesitarla.
+7. **Valida antes de comprometerte.** Antes de reemplazar la base activa por un archivo o una copia, prueba la candidata con una consulta real: muchas librerías "abren" cualquier basura y solo fallan después, cuando ya destruiste el estado bueno.
+8. **Un fallo del subsistema de seguridad jamás puede tumbar el arranque.** Degrada con gracia; y si de plano no se puede abrir la base, la pantalla de error debe ofrecer rescate (exportar bytes crudos, listar y restaurar copias), nunca solo un mensaje técnico.
+
+**Sobre los tests (por qué 100+ pruebas verdes no lo atraparon):**
+9. **Cada guard se prueba desde el lado prohibido.** Si la precondición del test es justamente la acción que el usuario podría no hacer, el test certifica el diseño, no el riesgo. Por cada bandera peligrosa, instala deliberadamente la combinación "imposible" (bandera encendida + datos reales).
+10. **La suite debe ejecutar el CICLO DE VIDA, no solo funciones.** En el incidente, el modo de verificación borraba su base al arrancar, así que el arranque siempre tomaba la rama "base nueva" y **la rama donde vivía el código destructivo nunca se ejecutó ni una vez**. Los mutation-checks son ciegos por construcción al código que ningún test alcanza: audita qué ramas nunca corre tu suite.
+
+**Sobre la plataforma (si el producto es web y el usuario está en móvil):**
+11. **Web + datos locales = PWA desde el principio** (manifest + metas de Apple + service worker). Sin eso, en iOS el ícono de pantalla de inicio abre *dentro del navegador* y hereda su contexto — incluido el modo privado, donde nada se guarda. Esa fue la causa de fondo de la segunda pérdida.
+12. **Con service worker, disciplina de versión:** todo despliegue que toque el código debe subir la versión del precache, o el usuario sigue recibiendo la versión vieja. Y si una verificación no cuadra con el código que acabas de leer, **sospecha del service worker antes que del código**.
+
 ## Anti-patrones (aprendidos con sangre)
 
 - Tests de calendario/fechas cuyas ventanas arrancan "desde cero": ciegos a bugs de arrastre. Toda suite de fechas necesita casos a mitad de historial Y correr bien en fronteras de mes.
