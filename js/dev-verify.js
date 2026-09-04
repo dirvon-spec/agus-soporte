@@ -47,11 +47,19 @@ import {
   listarSnapshots,
   obtenerBytesSnapshot,
   restaurarSnapshot,
+  obtenerEstadoPersistencia,
+  alFallarPersistencia,
+  obtenerEstadoModoSeguro,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
   _revisarReSembradoAntiCongelamientoParaVerificacion,
   _simularAperturaBaseExistenteParaVerificacion,
   _borrarTodosLosSnapshotsParaVerificacion,
+  _forzarFallosDeGuardadoParaVerificacion,
+  _guardadoPendienteParaVerificacion,
+  _flushGuardadoInmediatoParaVerificacion,
+  _reemplazarDbActivaParaVerificacion,
+  _resetearModoSeguroParaVerificacion,
 } from './db.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { generarSeed } from './seed.js';
@@ -2551,6 +2559,285 @@ export async function ejecutarVerificacion() {
         `un segundo "arranque" el MISMO día NO debería crear otro snapshot "auto-diaria" (máx. 1 por día), hay ${autoTrasAbrir2.length}`
       );
       assert(autoTrasAbrir2[0].clave === autoTrasAbrir1[0].clave, 'debería seguir siendo el MISMO snapshot (misma clave), no uno nuevo');
+    }
+  );
+
+  // ============================================================
+  // Sección 19 — POST-MORTEM 2-sep-2026, P0 de capa de datos (4-sep-2026):
+  // W-08 (fallo de guardado silencioso), W-12 (snapshot pre-migración) y
+  // W-13 (schema_version desconocido -> modo seguro). Va DESPUÉS de la
+  // Sección 18 (usa iniciarModoReal, ya destructiva ahí) y ANTES de la
+  // Sección 10 (housekeeping final, lee la DB de demo por su cuenta,
+  // independiente de lo que quede en la base activa de esta corrida).
+  // ============================================================
+
+  await verificar(
+    'W-08: un fallo de escritura a IndexedDB reintenta con backoff; si se agotan los reintentos, guardadoPendiente sigue en true (NO se pierde el trabajo) y el fallo queda registrado y notificado — y se recupera solo en cuanto una escritura vuelve a andar',
+    async () => {
+      await crearCliente({ nombre: 'Cliente W08 Debounce Verify' });
+      assert(_guardadoPendienteParaVerificacion() === true, 'precondición: crearCliente debería dejar un guardado pendiente');
+      assert(obtenerEstadoPersistencia().ok === true, 'precondición: sin fallos previos de persistencia');
+
+      const eventosRecibidos = [];
+      const desuscribir = alFallarPersistencia((estado) => eventosRecibidos.push(estado));
+
+      _forzarFallosDeGuardadoParaVerificacion(Infinity); // simula un QuotaExceededError persistente
+      await _flushGuardadoInmediatoParaVerificacion();
+
+      assert(
+        _guardadoPendienteParaVerificacion() === true,
+        'INCIDENTE W-08: tras agotar los reintentos, el guardado pendiente NO debería descartarse — antes del fix se perdía en silencio (2-sep-2026)'
+      );
+      const estadoTrasFallo = obtenerEstadoPersistencia();
+      assert(estadoTrasFallo.ok === false, 'obtenerEstadoPersistencia() debería reportar ok=false tras agotar los reintentos');
+      assert(
+        typeof estadoTrasFallo.ultimoErrorIso === 'string' && estadoTrasFallo.ultimoErrorIso.length > 0,
+        'debería registrar la fecha ISO del último error'
+      );
+      assert(
+        typeof estadoTrasFallo.mensaje === 'string' && estadoTrasFallo.mensaje.length > 0,
+        'debería registrar un mensaje legible del error'
+      );
+      assert(eventosRecibidos.length >= 1, 'alFallarPersistencia() debería haber sido notificado del fallo');
+      assert(eventosRecibidos[eventosRecibidos.length - 1].ok === false, 'el último evento notificado debería reflejar el fallo');
+
+      // Recuperación: al dejar de fallar, el próximo flush guarda de verdad,
+      // limpia guardadoPendiente Y notifica a la UI para que oculte la alarma.
+      _forzarFallosDeGuardadoParaVerificacion(0);
+      await _flushGuardadoInmediatoParaVerificacion();
+
+      assert(_guardadoPendienteParaVerificacion() === false, 'tras un guardado exitoso, guardadoPendiente debería volver a false');
+      const estadoTrasRecuperar = obtenerEstadoPersistencia();
+      assert(estadoTrasRecuperar.ok === true, 'obtenerEstadoPersistencia() debería volver a ok=true tras un guardado exitoso');
+      assert(
+        eventosRecibidos.some((e) => e.ok === true),
+        'alFallarPersistencia() también debería notificar la recuperación (para que la UI pueda ocultar la alarma)'
+      );
+
+      desuscribir();
+    }
+  );
+
+  await verificar(
+    'W-08: si la escritura falla 1 o 2 veces pero después funciona (dentro de los 3 intentos), el reintento con backoff termina en éxito sin perder el pendiente ni disparar la alarma',
+    async () => {
+      await crearCliente({ nombre: 'Cliente W08 Reintento Exitoso Verify' });
+      assert(_guardadoPendienteParaVerificacion() === true, 'precondición: guardado pendiente');
+      assert(obtenerEstadoPersistencia().ok === true, 'precondición: sin fallos previos de persistencia');
+
+      _forzarFallosDeGuardadoParaVerificacion(2); // fallan los primeros 2 intentos; el 3ro (dentro del mismo flush) tiene éxito
+      await _flushGuardadoInmediatoParaVerificacion();
+
+      assert(_guardadoPendienteParaVerificacion() === false, 'debería haber terminado guardando exitosamente dentro de los reintentos disponibles');
+      assert(obtenerEstadoPersistencia().ok === true, 'no debería quedar marcado como fallido: se recuperó dentro del mismo intento de flush, antes de agotar los reintentos');
+    }
+  );
+
+  await verificar(
+    'W-08 (contrato pedido, item 3): persistirInmediato() propaga el error de persistencia en vez de tragarlo — iniciarModoReal() (una escritura crítica) se entera si no se pudo guardar, y el fallo también queda visible en obtenerEstadoPersistencia()',
+    async () => {
+      await crearCliente({ nombre: 'Cliente W08 PersistirInmediato Verify' });
+
+      _forzarFallosDeGuardadoParaVerificacion(Infinity);
+      let lanzo = false;
+      let codigoError = null;
+      try {
+        await iniciarModoReal();
+      } catch (e) {
+        lanzo = true;
+        codigoError = e && e.code;
+      }
+      assert(lanzo, 'iniciarModoReal() debería propagar el error de persistencia (antes de W-08 se tragaba en fire-and-forget)');
+      assert(codigoError === 'DB_ERROR', `código esperado DB_ERROR, obtenido ${codigoError}`);
+      assert(obtenerEstadoPersistencia().ok === false, 'el fallo de persistirInmediato() también debería quedar reflejado en obtenerEstadoPersistencia()');
+
+      // Deja el estado de persistencia limpio para el resto de la suite.
+      _forzarFallosDeGuardadoParaVerificacion(0);
+      await _flushGuardadoInmediatoParaVerificacion();
+      assert(obtenerEstadoPersistencia().ok === true, 'housekeeping: la persistencia debería quedar recuperada tras dejar de forzar fallos');
+    }
+  );
+
+  await verificar(
+    'W-12: el snapshot categoria="pre-migracion" se toma ANTES de aplicar la migración — contiene el estado v1 original (schema_version="1"), no el ya migrado',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+      const bytesActivosPrevios = _dbInternaParaVerificacion().export(); // para restaurar la base activa al final del test
+
+      const clienteId = uuidV7();
+      const acuerdoId = uuidV7();
+      const movimientoId = uuidV7();
+      const dbV1 = crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: sumarDias(hoy(), -5) });
+      _reemplazarDbActivaParaVerificacion(dbV1);
+
+      // try/finally: si CUALQUIER assert de abajo falla, igual hay que
+      // restaurar la base activa original — si no, un test que falla deja el
+      // resto de la suite corriendo sobre una base v1 rota (ver INCIDENTE de
+      // este mismo comentario en el test de W-13 más abajo, que además
+      // depende de que la base activa esté sana).
+      try {
+        await _simularAperturaBaseExistenteParaVerificacion(); // migra v1->v4 sobre la base activa (la v1 recién puesta)
+
+        const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V1 Verify' });
+        assert(clientes.length === 1, 'tras migrar, el cliente v1 debería seguir existiendo en la base activa ya en v4');
+
+        const snapshotPreMigracion = (await listarSnapshots()).find((s) => s.categoria === 'pre-migracion');
+        assert(snapshotPreMigracion, 'debería existir un snapshot categoria="pre-migracion"');
+        assert(snapshotPreMigracion.motivo.includes('pre-migracion'), 'el motivo debería mencionar "pre-migracion"');
+
+        const bytesPre = await obtenerBytesSnapshot(snapshotPreMigracion.clave);
+        const dbInspeccion = new DatabaseCtor(bytesPre);
+        try {
+          const stmt = dbInspeccion.prepare("SELECT valor FROM meta WHERE clave = 'schema_version'");
+          stmt.step();
+          const versionEnSnapshot = stmt.getAsObject().valor;
+          stmt.free();
+          assert(
+            versionEnSnapshot === '1',
+            `INCIDENTE W-12: el snapshot pre-migración debería preservar schema_version="1" (el estado ANTES de migrar), obtenido "${versionEnSnapshot}"`
+          );
+          // Antes del fix, el snapshot se tomaba DESPUÉS de migrar — esta misma
+          // consulta habría devuelto "4" y la tabla de abajo ya habría existido.
+          const stmtTablas = dbInspeccion.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='visitas_sin_abono'");
+          const tieneTablaV4 = stmtTablas.step();
+          stmtTablas.free();
+          assert(!tieneTablaV4, 'el snapshot pre-migración NO debería tener todavía las tablas nuevas de v4 (visitas_sin_abono)');
+        } finally {
+          dbInspeccion.close();
+        }
+      } finally {
+        _reemplazarDbActivaParaVerificacion(new DatabaseCtor(bytesActivosPrevios)); // limpieza, corra o no en rojo
+      }
+    }
+  );
+
+  await verificar(
+    'W-12: si la migración falla a mitad de camino (ej. un ALTER TABLE inesperado), el snapshot pre-migración sigue existiendo y es restaurable al estado original, sin corrupción ni pérdida',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+      const bytesActivosPrevios = _dbInternaParaVerificacion().export();
+
+      const clienteId = uuidV7();
+      const acuerdoId = uuidV7();
+      const movimientoId = uuidV7();
+      const dbV1Rota = crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: sumarDias(hoy(), -5) });
+      // Fuerza que MIGRACION_V1_A_V2 falle de verdad: le agregamos a mano la
+      // MISMA columna que esa migración va a intentar agregar — SQLite
+      // rechaza el ALTER TABLE por columna duplicada, el mismo tipo de fallo
+      // real que describe W-12 para un ALTER TABLE inesperado en un dispositivo.
+      dbV1Rota.run("ALTER TABLE acuerdos ADD COLUMN frecuencia TEXT NOT NULL DEFAULT 'DIARIA'");
+      _reemplazarDbActivaParaVerificacion(dbV1Rota);
+
+      // try/finally: ver el comentario del test anterior — un assert en rojo
+      // acá no puede dejar la base activa en el estado roto para el resto de
+      // la suite.
+      try {
+        let lanzo = false;
+        try {
+          await _simularAperturaBaseExistenteParaVerificacion();
+        } catch (e) {
+          lanzo = true;
+        }
+        assert(lanzo, 'setup: la migración debería haber fallado de verdad (columna duplicada) para ejercitar el escenario de W-12');
+
+        const snapshotPreMigracion = (await listarSnapshots()).find((s) => s.categoria === 'pre-migracion');
+        assert(snapshotPreMigracion, 'INCIDENTE W-12: debería existir un snapshot "pre-migracion" AUNQUE la migración haya fallado a mitad de camino');
+
+        const bytesPre = await obtenerBytesSnapshot(snapshotPreMigracion.clave);
+        const dbRestaurado = new DatabaseCtor(bytesPre);
+        try {
+          const stmt = dbRestaurado.prepare('SELECT nombre FROM clientes WHERE id = ?');
+          stmt.bind([clienteId]);
+          assert(stmt.step(), 'el snapshot pre-migración debería conservar el cliente original');
+          const fila = stmt.getAsObject();
+          stmt.free();
+          assert(fila.nombre === 'Cliente Migracion V1 Verify', 'el snapshot debería preservar los datos originales intactos, sin corrupción');
+        } finally {
+          dbRestaurado.close();
+        }
+      } finally {
+        _reemplazarDbActivaParaVerificacion(new DatabaseCtor(bytesActivosPrevios)); // limpieza, corra o no en rojo
+      }
+    }
+  );
+
+  await verificar(
+    'W-13: reabrir con un schema_version desconocido/futuro NO mata la app — arranca en MODO SEGURO (sin migrar ni borrar nada), bloquea las escrituras normales, y deja exportar + restaurar snapshot como únicos escapes; restaurar un snapshot sano saca del modo seguro',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      const dbInterna = _dbInternaParaVerificacion();
+
+      assert(obtenerEstadoModoSeguro().modoSeguro === false, 'precondición: la app no debería estar en modo seguro todavía');
+
+      await crearCliente({ nombre: 'Cliente W13 ModoSeguro Verify' });
+
+      // Snapshot sano de referencia, tomado ANTES de romper nada (simula que
+      // ya había una red de seguridad previa al día en que aparece el
+      // schema_version raro — p.ej. tras un rollback de deploy).
+      await _simularAperturaBaseExistenteParaVerificacion();
+      const snapshotSano = (await listarSnapshots()).find((s) => s.categoria === 'auto-diaria');
+      assert(snapshotSano, 'precondición: debería existir un snapshot auto-diario sano antes de romper el schema_version');
+
+      // try/finally: si algún assert de acá abajo falla en rojo, igual hay
+      // que sacar a la base activa del schema_version='99'/modo seguro que
+      // este test fuerza a propósito — si no, TODA la suite que corra
+      // después queda bloqueada en modo seguro (mismo motivo que los dos
+      // tests de W-12 de arriba).
+      try {
+        dbInterna.run("UPDATE meta SET valor='99' WHERE clave='schema_version'");
+
+        let lanzoApertura = false;
+        try {
+          await _simularAperturaBaseExistenteParaVerificacion();
+        } catch (e) {
+          lanzoApertura = true;
+        }
+        assert(!lanzoApertura, 'INCIDENTE W-13: reabrir con un schema_version desconocido NO debería lanzar ni matar la app');
+
+        const estado = obtenerEstadoModoSeguro();
+        assert(estado.modoSeguro === true, 'debería quedar en modo seguro tras un schema_version desconocido');
+        assert(typeof estado.motivo === 'string' && estado.motivo.length > 0, 'debería exponer un motivo legible para la UI');
+
+        // Jamás migra ni borra ni escribe a ciegas: cualquier escritura normal se rechaza.
+        let lanzoEscritura = false;
+        let codigoEscritura = null;
+        try {
+          await crearCliente({ nombre: 'Cliente W13 NoDeberiaCrearse Verify' });
+        } catch (e) {
+          lanzoEscritura = true;
+          codigoEscritura = e && e.code;
+        }
+        assert(lanzoEscritura, 'en modo seguro, crearCliente() (y cualquier escritura normal) debería rechazarse');
+        assert(codigoEscritura === 'CONFLICT', `código esperado CONFLICT, obtenido ${codigoEscritura}`);
+
+        // ...pero exportar sigue funcionando (bytes tal cual, sin migrar).
+        const { blob } = await exportarRespaldo();
+        assert(blob && blob.size > 0, 'exportarRespaldo() debería seguir funcionando en modo seguro');
+
+        // ...y listar/restaurar snapshots también.
+        const snapshotsEnModoSeguro = await listarSnapshots();
+        assert(
+          snapshotsEnModoSeguro.some((s) => s.clave === snapshotSano.clave),
+          'listarSnapshots() debería seguir funcionando en modo seguro y ver los snapshots previos'
+        );
+
+        await restaurarSnapshot(snapshotSano.clave); // el único otro escape permitido en modo seguro
+
+        assert(
+          obtenerEstadoModoSeguro().modoSeguro === false,
+          'restaurarSnapshot() a un snapshot con esquema reconocido debería sacar a la app del modo seguro'
+        );
+        const { clientes } = await listarClientes({ busqueda: 'Cliente W13 ModoSeguro Verify' });
+        assert(clientes.length === 1, 'tras restaurar, el cliente creado antes de romper el schema_version debería seguir ahí');
+      } finally {
+        // Idempotente y barato tanto si el test terminó bien (restaurarSnapshot
+        // ya dejó todo sano) como si falló a mitad de camino.
+        _resetearModoSeguroParaVerificacion();
+        const dbFinal = _dbInternaParaVerificacion();
+        if (dbFinal) dbFinal.run("UPDATE meta SET valor=? WHERE clave='schema_version'", [SCHEMA_VERSION]);
+      }
     }
   );
 

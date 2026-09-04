@@ -88,8 +88,15 @@ const NOMBRE_DB_SNAPSHOT_VERIFY = 'agus-db-verify-snapshot';
 const NOMBRE_STORE_SNAPSHOT = 'snapshots';
 const CATEGORIA_SNAPSHOT_DESTRUCTIVA = 'destructiva';
 const CATEGORIA_SNAPSHOT_AUTO_DIARIA = 'auto-diaria';
+// POST-MORTEM 2-sep-2026, W-12: categoría propia para el snapshot tomado
+// SIEMPRE antes de aplicar cualquier migración de esquema (ver
+// migrarEsquemaSiHaceFalta más abajo) — antes de esto, el snapshot diario
+// se tomaba DESPUÉS de migrar, así que una migración que corrompía o fallaba
+// a mitad de camino no tenía ninguna copia previa a la que volver.
+const CATEGORIA_SNAPSHOT_PRE_MIGRACION = 'pre-migracion';
 const MAX_SNAPSHOTS_DESTRUCTIVOS = 2;
 const MAX_SNAPSHOTS_AUTO_DIARIOS = 3;
+const MAX_SNAPSHOTS_PRE_MIGRACION = 3;
 
 /** @type {any} instancia de la clase SQL.Database de sql.js */
 let db = null;
@@ -103,6 +110,18 @@ let modoVerify = false;
 let nombreDbIndexedDbActual = NOMBRE_DB_INDEXEDDB_DEMO;
 let nombreLockActual = NOMBRE_LOCK_DEMO;
 let nombreDbSnapshotActual = NOMBRE_DB_SNAPSHOT_DEMO;
+
+// POST-MORTEM 2-sep-2026, W-13: si migrarEsquemaSiHaceFalta() se topa con un
+// schema_version que no reconoce (más nuevo que este código, o corrupto/ajeno
+// — p.ej. un deploy revertido, o una copia cacheada vieja del JS abriendo una
+// base ya migrada por una versión más nueva), la app NO debe morir ni migrar
+// ni borrar nada a ciegas. Entra en MODO SEGURO: verificarEscritura() rechaza
+// toda escritura normal (CONFLICT), pero exportarRespaldo() y la API de
+// snapshots (listarSnapshots/obtenerBytesSnapshot/restaurarSnapshot) siguen
+// operando sobre los bytes tal cual, porque no dependen de entender el
+// esquema. Ver obtenerEstadoModoSeguro() (contrato para la UI) más abajo.
+let modoSeguro = false;
+let motivoModoSeguro = null;
 
 /** True si la URL actual trae ?verify=1 (modo de verificación en vivo, dev-verify.js). */
 function detectarModoVerify() {
@@ -175,9 +194,26 @@ function normalizarError(e) {
   return crearError('DB_ERROR', (e && e.message) ? e.message : String(e), { original: e });
 }
 
-function verificarEscritura() {
+/**
+ * Gate único de toda escritura (mismo principio que exportarBytesDb() para
+ * export: un solo punto de control auditable). W-13: además del lock de
+ * instancia única, ahora también rechaza CUALQUIER escritura mientras la app
+ * está en MODO SEGURO (schema_version desconocido) — salvo que el propio
+ * caller sea uno de los dos escapes explícitamente permitidos por el
+ * contrato de modo seguro (hoy: restaurarSnapshot), que pasa
+ * `permitirEnModoSeguro: true`.
+ * @param {{permitirEnModoSeguro?: boolean}} [opciones]
+ */
+function verificarEscritura({ permitirEnModoSeguro = false } = {}) {
   if (soloLectura) {
     throw crearError('CONFLICT', 'La app ya está abierta en otra pestaña; cerrala para editar aquí.');
+  }
+  if (modoSeguro && !permitirEnModoSeguro) {
+    throw crearError(
+      'CONFLICT',
+      'La base tiene una versión de esquema no reconocida: la app arrancó en modo seguro y solo permite exportar tu respaldo o restaurar una copia de seguridad.',
+      { motivo: motivoModoSeguro }
+    );
   }
 }
 
@@ -353,7 +389,18 @@ async function leerArchivoDeIndexedDB() {
   }
 }
 
+// SOLO test (W-08): cuántas próximas escrituras a IndexedDB deben fallar
+// artificialmente antes de dejar pasar la real. Ver
+// _forzarFallosDeGuardadoParaVerificacion() más abajo — permite a
+// dev-verify.js reproducir un QuotaExceededError (o cualquier rechazo del
+// put()) sin depender de llenar de verdad el almacenamiento del navegador.
+let _fallosForzadosRestantes = 0;
+
 async function guardarArchivoEnIndexedDB(bytes) {
+  if (_fallosForzadosRestantes > 0) {
+    _fallosForzadosRestantes -= 1;
+    throw crearError('DB_ERROR', 'Fallo de escritura a IndexedDB simulado para verificación (ej. QuotaExceededError).');
+  }
   const idb = await abrirIndexedDB();
   return new Promise((resolve, reject) => {
     const tx = idb.transaction(NOMBRE_STORE, 'readwrite');
@@ -520,7 +567,123 @@ async function respaldarSnapshotDiarioSiHaceFalta() {
 
 // ============================================================
 // Persistencia (debounce 500ms + flush en pagehide/visibilitychange) — mitigación C1
+//
+// POST-MORTEM 2-sep-2026, W-08 (el hallazgo más grave y más probable que el
+// bug que causó el incidente real): antes de esta fecha, flushGuardado() era
+// fire-and-forget puro — si guardarArchivoEnIndexedDB() rechazaba el put()
+// (cuota llena, storage evictado, error de transacción), el error solo iba a
+// console.error (invisible en un iPhone sin consola) Y ADEMÁS
+// `guardadoPendiente` ya se había puesto en `false` ANTES de intentar
+// escribir, así que nunca había reintento: el gestor seguía capturando toda
+// la jornada sobre una copia en memoria que nunca se guardaba, y al reabrir
+// la app no había nada. Contrato nuevo, para el builder de UI:
+//
+// - obtenerEstadoPersistencia(): {ok, ultimoErrorIso, mensaje} — estado
+//   ACTUAL, consultable en cualquier momento (poll). `ok:false` significa
+//   que el último intento de guardar (tras agotar los reintentos) falló y
+//   el trabajo del usuario TODAVÍA no está a salvo en disco.
+// - alFallarPersistencia(cb): suscribe `cb(estado)` a CADA cambio de estado
+//   (falla Y recuperación — así la UI puede mostrar una alarma imposible de
+//   ignorar cuando `ok:false` y ocultarla cuando vuelve `ok:true`). Devuelve
+//   una función para desuscribirse.
+// - persistirInmediato() (uso interno de db.js en operaciones críticas:
+//   migración de esquema, iniciarModoReal, importarRespaldo,
+//   restaurarSnapshot) ahora PROPAGA el error tras agotar los reintentos, en
+//   vez de tragarlo — quien la llama puede reaccionar (y de hecho ninguna de
+//   esas operaciones lo envuelve en try/catch propio: el error sube tal cual
+//   hasta la UI que invocó la acción).
 // ============================================================
+
+const REINTENTOS_GUARDADO = 3;
+const ESPERA_REINTENTO_MS = [300, 900]; // backoff entre los 3 intentos (2 esperas)
+
+function esperarMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const ESTADO_PERSISTENCIA_OK = Object.freeze({ ok: true, ultimoErrorIso: null, mensaje: null });
+let estadoPersistencia = ESTADO_PERSISTENCIA_OK;
+let listenersFalloPersistencia = [];
+
+function notificarListenersPersistencia() {
+  const snapshot = estadoPersistencia;
+  for (const cb of listenersFalloPersistencia.slice()) {
+    try {
+      cb(snapshot);
+    } catch (e) {
+      console.error('[db] Error en un listener de alFallarPersistencia:', e);
+    }
+  }
+}
+
+function marcarPersistenciaOk() {
+  if (estadoPersistencia.ok) return; // ya estaba ok: no generar ruido de notificaciones en cada guardado exitoso normal
+  estadoPersistencia = ESTADO_PERSISTENCIA_OK;
+  notificarListenersPersistencia();
+}
+
+function marcarPersistenciaFallida(error) {
+  estadoPersistencia = {
+    ok: false,
+    ultimoErrorIso: ahoraIso(),
+    mensaje: (error && error.message) || String(error),
+  };
+  notificarListenersPersistencia();
+}
+
+/**
+ * @returns {{ok: boolean, ultimoErrorIso: string|null, mensaje: string|null}}
+ *   Estado ACTUAL de la persistencia a IndexedDB. `ok:false` = el último
+ *   intento de guardar (ya agotados los reintentos) falló: hay trabajo del
+ *   usuario que todavía no está a salvo en disco.
+ */
+export function obtenerEstadoPersistencia() {
+  return estadoPersistencia;
+}
+
+/**
+ * Se suscribe a cada cambio de estado de persistencia (falla Y recuperación
+ * — ver el comentario grande de esta sección para el contrato completo).
+ * @param {(estado: {ok:boolean, ultimoErrorIso:string|null, mensaje:string|null}) => void} cb
+ * @returns {() => void} función para desuscribirse
+ */
+export function alFallarPersistencia(cb) {
+  listenersFalloPersistencia.push(cb);
+  return () => {
+    listenersFalloPersistencia = listenersFalloPersistencia.filter((f) => f !== cb);
+  };
+}
+
+/**
+ * Intenta guardar `bytes` en IndexedDB con reintentos y backoff
+ * (REINTENTOS_GUARDADO intentos en total). Limpia `guardadoPendiente` y
+ * marca la persistencia OK únicamente si algún intento tiene éxito de
+ * verdad. Si los tres fallan, marca el fallo (visible vía
+ * obtenerEstadoPersistencia()/alFallarPersistencia()) y relanza — a
+ * propósito NO limpia `guardadoPendiente`: el trabajo sigue pendiente para
+ * que el próximo flush (debounce, pagehide, o la siguiente escritura) lo
+ * vuelva a intentar en vez de darlo por perdido (W-08).
+ * @param {Uint8Array} bytes
+ */
+async function intentarGuardarConReintentos(bytes) {
+  let ultimoError = null;
+  for (let intento = 1; intento <= REINTENTOS_GUARDADO; intento++) {
+    try {
+      await guardarArchivoEnIndexedDB(bytes);
+      guardadoPendiente = false;
+      marcarPersistenciaOk();
+      return;
+    } catch (e) {
+      ultimoError = e;
+      console.error(`[db] Error al persistir en IndexedDB (intento ${intento}/${REINTENTOS_GUARDADO}):`, e);
+      if (intento < REINTENTOS_GUARDADO) {
+        await esperarMs(ESPERA_REINTENTO_MS[intento - 1]);
+      }
+    }
+  }
+  marcarPersistenciaFallida(ultimoError);
+  throw normalizarError(ultimoError);
+}
 
 function flushGuardado() {
   if (temporizadorGuardado) {
@@ -528,12 +691,13 @@ function flushGuardado() {
     temporizadorGuardado = null;
   }
   if (!guardadoPendiente || !db) return;
-  guardadoPendiente = false;
   const bytes = exportarBytesDb();
   // Fire-and-forget: en pagehide no podemos garantizar esperar la promesa,
-  // pero disparamos la escritura igual (best effort de los navegadores modernos).
-  guardarArchivoEnIndexedDB(bytes).catch((e) => {
-    console.error('[db] Error al persistir en IndexedDB:', e);
+  // pero disparamos el intento (con sus reintentos) igual (best effort).
+  // guardadoPendiente NO se limpia acá — ver intentarGuardarConReintentos().
+  intentarGuardarConReintentos(bytes).catch(() => {
+    // El fallo ya quedó registrado en estadoPersistencia; no hay nadie más
+    // esperando esta promesa desde un flush fire-and-forget.
   });
 }
 
@@ -542,10 +706,10 @@ async function persistirInmediato() {
     clearTimeout(temporizadorGuardado);
     temporizadorGuardado = null;
   }
-  guardadoPendiente = false;
   if (!db) return;
+  guardadoPendiente = true;
   const bytes = exportarBytesDb();
-  await guardarArchivoEnIndexedDB(bytes);
+  await intentarGuardarConReintentos(bytes); // propaga el error tras agotar los reintentos (contrato W-08, item 3)
 }
 
 /**
@@ -786,6 +950,21 @@ function aplicarMigracionV2AV3(dbObjetivo) {
  * Si la base local existente quedó en una schema_version vieja, encadena las
  * migraciones necesarias (v1->v2 de §2.8, v2->v3 de §2.9, v3->v4 de §2.11)
  * SIN TOCAR DATOS y actualiza meta a la versión vigente. No-op si ya está al día.
+ *
+ * POST-MORTEM 2-sep-2026:
+ * - W-12: toma un snapshot categoria='pre-migracion' del estado EXACTO de
+ *   antes de tocar nada — la migración corre después, en su propio
+ *   BEGIN/ROLLBACK (protección de sql.js contra un fallo a mitad de camino),
+ *   pero eso no cubre una migración que "tiene éxito" (COMMIT) y aun así deja
+ *   datos incorrectos: antes de esta fecha, el snapshot diario se tomaba
+ *   DESPUÉS de migrar, así que nunca existía una copia pre-migración a la que
+ *   volver. Si algo sale mal, restaurarSnapshot() con este snapshot vuelve al
+ *   esquema anterior tal cual estaba.
+ * - W-13: si `versionInicial` no es una de las reconocidas ('1'|'2'|'3', o ya
+ *   la vigente), NO se migra ni se borra nada — se lanza un DB_ERROR con
+ *   `detalle.motivo === 'SCHEMA_VERSION_DESCONOCIDA'`, que el caller
+ *   (abrirBaseExistente()/migrarOModoSeguro() más abajo) traduce en MODO
+ *   SEGURO en vez de dejar la app muerta al arrancar.
  */
 async function migrarEsquemaSiHaceFalta() {
   const versionInicial = obtenerMetaInterno('schema_version');
@@ -793,9 +972,16 @@ async function migrarEsquemaSiHaceFalta() {
   if (!['1', '2', '3'].includes(versionInicial)) {
     throw crearError(
       'DB_ERROR',
-      `La base local tiene un schema_version desconocido ("${versionInicial}") y no se puede migrar automáticamente.`
+      `La base local tiene un schema_version desconocido ("${versionInicial}") y no se puede migrar automáticamente.`,
+      { motivo: 'SCHEMA_VERSION_DESCONOCIDA', versionEncontrada: versionInicial }
     );
   }
+
+  await guardarSnapshotInterno(
+    `pre-migracion v${versionInicial}->v${SCHEMA_VERSION}`,
+    CATEGORIA_SNAPSHOT_PRE_MIGRACION,
+    MAX_SNAPSHOTS_PRE_MIGRACION
+  );
 
   ejecutarSQL('BEGIN;');
   try {
@@ -814,6 +1000,53 @@ async function migrarEsquemaSiHaceFalta() {
   }
   await persistirInmediato();
   console.info(`[db] Migración de esquema aplicada: v${versionInicial} -> v${SCHEMA_VERSION}. Datos preservados.`);
+}
+
+/**
+ * Corre migrarEsquemaSiHaceFalta() pero, si el schema_version resulta
+ * desconocido (W-13), en vez de dejar propagar el error fatal entra en MODO
+ * SEGURO: `modoSeguro`/`motivoModoSeguro` quedan seteados (consultables vía
+ * obtenerEstadoModoSeguro()) y NINGUNA escritura normal vuelve a pasar por
+ * verificarEscritura() hasta que se restaure un snapshot con un esquema
+ * reconocido. Usada tanto al abrir una base existente (abrirBaseExistente())
+ * como después de restaurar un snapshot que podría no estar en la versión
+ * vigente (restaurarSnapshot()).
+ * @returns {Promise<boolean>} true si la base terminó en un esquema
+ *   reconocido (ya migrada o al día), false si entró en modo seguro.
+ */
+async function migrarOModoSeguro() {
+  try {
+    await migrarEsquemaSiHaceFalta();
+    if (modoSeguro) {
+      // Estábamos en modo seguro y esta migración tuvo éxito (p.ej. tras
+      // restaurar un snapshot con esquema reconocido): se sale del modo.
+      modoSeguro = false;
+      motivoModoSeguro = null;
+    }
+    return true;
+  } catch (e) {
+    if (e && e.detalle && e.detalle.motivo === 'SCHEMA_VERSION_DESCONOCIDA') {
+      modoSeguro = true;
+      motivoModoSeguro = e.message;
+      console.error(
+        `[db] ${e.message} — arrancando en MODO SEGURO: no se migra ni se borra nada; solo exportar respaldo y restaurar una copia de seguridad quedan disponibles.`
+      );
+      return false;
+    }
+    throw e;
+  }
+}
+
+/**
+ * @returns {{modoSeguro: boolean, motivo: string|null}} contrato para la UI
+ *   (W-13): si `modoSeguro` es true, la base tiene un schema_version que
+ *   este código no reconoce. Ninguna escritura normal va a funcionar
+ *   (lanzan CONFLICT); solo exportarRespaldo() y la API de snapshots
+ *   (listarSnapshots/obtenerBytesSnapshot/restaurarSnapshot) operan. `motivo`
+ *   es texto humano listo para mostrar. Requiere initDb() ya resuelto.
+ */
+export function obtenerEstadoModoSeguro() {
+  return { modoSeguro, motivo: motivoModoSeguro };
 }
 
 /**
@@ -871,6 +1104,25 @@ async function revisarReSembradoAntiCongelamiento() {
   await insertarSeedEnTransaccion();
   await persistirInmediato();
   console.info('[db] Re-sembrado automático anti-congelamiento ejecutado (modo_demo=1, seed vencido).');
+}
+
+/**
+ * Ejecuta la secuencia completa de "abrir una base EXISTENTE" (rama
+ * `!soloLectura` de initDb() cuando la base ya tenía datos guardados): migra
+ * el esquema si hace falta (o entra en MODO SEGURO si el schema_version es
+ * desconocido, W-13) y, solo si el esquema quedó reconocido, dispara el
+ * snapshot diario automático. Único punto de esta lógica: initDb() y
+ * _simularAperturaBaseExistenteParaVerificacion() (test, más abajo) DEBEN
+ * llamar a esta misma función para que ambas rutas se comporten idéntico —
+ * si el día de mañana alguien reintroduce por error un camino destructivo
+ * acá, tiene que agregarlo también en este único lugar para que los tests de
+ * la Sección 16/18/19 de dev-verify.js sigan siendo honestos.
+ */
+async function abrirBaseExistente() {
+  const esquemaReconocido = await migrarOModoSeguro();
+  if (esquemaReconocido) {
+    await respaldarSnapshotDiarioSiHaceFalta();
+  }
 }
 
 /**
@@ -941,13 +1193,13 @@ export async function initDb() {
     await insertarSeedEnTransaccion();
     await persistirInmediato();
   } else if (!soloLectura) {
-    await migrarEsquemaSiHaceFalta();
     // INCIDENTE 2-sep-2026: acá vivía la llamada a
     // revisarReSembradoAntiCongelamiento() (@deprecated, ver su comentario) —
     // borraba la base entera si `modo_demo='1'` y el último movimiento tenía
     // más de un día. NUNCA reintroducir esa llamada. En su lugar, la red de
-    // seguridad real: un snapshot diario automático (item 4 del incidente).
-    await respaldarSnapshotDiarioSiHaceFalta();
+    // seguridad real: un snapshot diario automático (item 4 del incidente) +
+    // el snapshot pre-migración y el modo seguro de abrirBaseExistente() (W-12/W-13).
+    await abrirBaseExistente();
   }
   // persistirInmediato()/respaldarSnapshotDiarioSiHaceFalta() pueden exportar la DB
   // (db.export()), lo que reinicia PRAGMA foreign_keys en sql.js (ver exportarBytesDb)
@@ -1067,6 +1319,26 @@ export async function importarRespaldo(arrayBuffer) {
   db = dbCandidata;
   ejecutarSQL('PRAGMA foreign_keys = ON;');
   setMetaInterno('modo_demo', '0');
+  modoSeguro = false; // el archivo candidato ya se validó contra un schema_version reconocido (v1..v4) más arriba
+  motivoModoSeguro = null;
+  // ¿Puede importarRespaldo() dejar la app inconsistente si falla a mitad de
+  // camino? (pedido explícito del post-mortem, item 4). Ya está blindado en
+  // capas SIN necesitar deshacer el swap de `db` si lo de abajo falla:
+  //   1. El snapshot de arriba ya capturó la base ANTERIOR completa — si el
+  //      usuario se arrepiente o algo salió mal, restaurarSnapshot() vuelve
+  //      exactamente a donde estaba, esté o no persistido lo de acá abajo.
+  //   2. persistirInmediato() ahora reintenta con backoff y, si los tres
+  //      intentos fallan, PROPAGA el error (ver la sección de Persistencia)
+  //      en vez de tragarlo como antes de W-08 — quien llamó a
+  //      importarRespaldo() se entera de que el archivo importado quedó
+  //      activo en memoria pero todavía no se guardó en disco.
+  //   3. `guardadoPendiente` queda en `true` en ese caso (no se descarta), así
+  //      que el próximo flush exitoso (debounce, pagehide, o la próxima
+  //      escritura) termina de persistirlo solo — no hace falta reintentar
+  //      el import a mano. No se deshace el swap de `db` a propósito: los
+  //      datos importados son válidos (ya pasaron la validación de arriba),
+  //      así que descartarlos por un fallo transitorio de IndexedDB sería
+  //      peor que dejarlos en memoria a la espera del próximo guardado.
   await persistirInmediato();
 }
 
@@ -1124,14 +1396,16 @@ export async function iniciarModoReal() {
 // Contratos exactos para el builder de UI:
 //
 // - listarSnapshots(): Promise<Array<{clave, fechaIso, fechaLocal, motivo,
-//   categoria, tamanioBytes}>> — SIN los bytes (para listar barato: hasta 5
-//   entradas como mucho — 2 destructivas + 3 auto-diarias — pero de todos
-//   modos evita cargar blobs completos solo para pintar una lista). Orden
-//   descendente por fechaIso (más reciente primero). `categoria` es
-//   'destructiva' (tomado antes de iniciarModoReal/importarRespaldo/
-//   restaurarSnapshot) o 'auto-diaria' (uno por día, máx. 3). `motivo` es
-//   texto humano listo para mostrar tal cual. `fechaLocal` ('YYYY-MM-DD') es
-//   útil para agrupar/mostrar "de hoy"/"de ayer" sin reparsear fechaIso.
+//   categoria, tamanioBytes}>> — SIN los bytes (para listar barato: hasta 8
+//   entradas como mucho — 2 destructivas + 3 auto-diarias + 3 pre-migración —
+//   pero de todos modos evita cargar blobs completos solo para pintar una
+//   lista). Orden descendente por fechaIso (más reciente primero). `categoria`
+//   es 'destructiva' (tomado antes de iniciarModoReal/importarRespaldo/
+//   restaurarSnapshot), 'auto-diaria' (uno por día, máx. 3) o 'pre-migracion'
+//   (tomado SIEMPRE antes de aplicar una migración de esquema, W-12; máx. 3).
+//   `motivo` es texto humano listo para mostrar tal cual. `fechaLocal`
+//   ('YYYY-MM-DD') es útil para agrupar/mostrar "de hoy"/"de ayer" sin
+//   reparsear fechaIso.
 // - obtenerBytesSnapshot(clave): Promise<Uint8Array|null> — getter de los
 //   bytes de UN snapshot puntual (para ofrecer "descargar este snapshot"
 //   como .sqlite, por ejemplo). null si la clave no existe.
@@ -1142,7 +1416,10 @@ export async function iniciarModoReal() {
 //   aparece en listarSnapshots() y es restaurable como cualquier otro.
 //   Persiste de inmediato (sin debounce), igual que iniciarModoReal/
 //   importarRespaldo. Lanza NOT_FOUND si `clave` no existe, CONFLICT si la
-//   pestaña está en solo-lectura (misma regla que toda escritura).
+//   pestaña está en solo-lectura. A diferencia de toda otra escritura,
+//   restaurarSnapshot() SÍ funciona en MODO SEGURO (W-13, ver
+//   obtenerEstadoModoSeguro() más abajo) — es, junto con exportarRespaldo(),
+//   uno de los dos únicos escapes de ese estado.
 // ============================================================
 
 /**
@@ -1176,11 +1453,22 @@ export async function obtenerBytesSnapshot(clave) {
  * Reemplaza la base ACTIVA por el snapshot `clave`. Antes de tocar nada,
  * guarda un snapshot del estado actual (por si el usuario se arrepiente de
  * restaurar) — ver contrato completo más arriba.
+ *
+ * W-13: es uno de los DOS escapes permitidos del modo seguro (el otro es
+ * exportarRespaldo(), que nunca pasó por verificarEscritura()) — por eso es
+ * la única función de escritura que llama a verificarEscritura() con
+ * `permitirEnModoSeguro: true`. Tras el swap, se vuelve a intentar migrar
+ * (migrarOModoSeguro()): si el snapshot restaurado ya está en un esquema
+ * reconocido, la app sale del modo seguro sola; si el snapshot restaurado
+ * TAMBIÉN tuviera un schema_version desconocido (no debería pasar con
+ * snapshots propios, pero es la misma cautela que el resto de esta capa),
+ * la app se queda en modo seguro en vez de asumir que ahora sí es seguro
+ * escribir.
  * @param {string} clave
  * @returns {Promise<void>}
  */
 export async function restaurarSnapshot(clave) {
-  verificarEscritura();
+  verificarEscritura({ permitirEnModoSeguro: true });
 
   const entrada = await obtenerEntradaSnapshot(clave);
   if (!entrada) {
@@ -1199,6 +1487,7 @@ export async function restaurarSnapshot(clave) {
   if (db) db.close();
   db = dbRestaurada;
   ejecutarSQL('PRAGMA foreign_keys = ON;');
+  await migrarOModoSeguro(); // el snapshot restaurado puede ser de un esquema anterior (ej. un snapshot 'pre-migracion'); deja la app funcional o, si no reconoce el esquema, en modo seguro (nunca a ciegas)
   await persistirInmediato();
 }
 
@@ -2956,23 +3245,95 @@ export async function _revisarReSembradoAntiCongelamientoParaVerificacion() {
 
 /**
  * INCIDENTE 2-sep-2026 — regresión: replica EXACTAMENTE la secuencia que
- * initDb() ejecuta hoy al abrir una base EXISTENTE (rama `!soloLectura`,
- * ver initDb() más arriba): `migrarEsquemaSiHaceFalta()` seguido de
- * `respaldarSnapshotDiarioSiHaceFalta()` — y a propósito NADA más. `initDb()`
- * solo corre esa rama una vez por carga de página (guardada tras
- * `inicializado=true`), así que este wrapper de solo-test es la única forma
- * de ejercitar "qué pasaría si la app se reabre sobre esta base" sin recargar
- * la página dentro de la misma corrida de `?verify=1`.
+ * initDb() ejecuta hoy al abrir una base EXISTENTE (rama `!soloLectura`, ver
+ * initDb() más arriba): llama a `abrirBaseExistente()`, el mismo helper
+ * privado que usa initDb() — y a propósito NADA más. `initDb()` solo corre
+ * esa rama una vez por carga de página (guardada tras `inicializado=true`),
+ * así que este wrapper de solo-test es la única forma de ejercitar "qué
+ * pasaría si la app se reabre sobre esta base" sin recargar la página dentro
+ * de la misma corrida de `?verify=1`.
  *
  * Si el día de mañana alguien reintroduce por error la llamada a
- * `revisarReSembradoAntiCongelamiento()` (@deprecated) en initDb(), TIENE que
- * agregarla también acá para que el test de la Sección 16 siga siendo
- * honesto — y si la agrega, ese mismo test empieza a fallar en rojo.
+ * `revisarReSembradoAntiCongelamiento()` (@deprecated) en `abrirBaseExistente()`,
+ * este wrapper la hereda automáticamente (llama a la misma función), así que
+ * el test de la Sección 16/18 sigue siendo honesto y empieza a fallar en rojo.
  * @returns {Promise<void>}
  */
 export async function _simularAperturaBaseExistenteParaVerificacion() {
-  await migrarEsquemaSiHaceFalta();
-  await respaldarSnapshotDiarioSiHaceFalta();
+  await abrirBaseExistente();
+}
+
+/**
+ * SOLO test (W-08): fuerza que las próximas `cantidad` escrituras a
+ * IndexedDB (la que guarda el archivo .sqlite activo, NO el almacén de
+ * snapshots) fallen artificialmente, para reproducir un QuotaExceededError u
+ * otro rechazo del put() sin depender de llenar de verdad el almacenamiento
+ * del navegador. Pasar `Infinity` simula un fallo persistente (cuota llena
+ * para siempre); pasar `0` deja de forzar fallos.
+ * @param {number} cantidad
+ */
+export function _forzarFallosDeGuardadoParaVerificacion(cantidad) {
+  _fallosForzadosRestantes = cantidad;
+}
+
+/** SOLO test: true si hay un guardado pendiente de persistir (W-08). */
+export function _guardadoPendienteParaVerificacion() {
+  return guardadoPendiente;
+}
+
+/**
+ * SOLO test (W-08): variante AWAITABLE de flushGuardado(). flushGuardado()
+ * en producción es fire-and-forget a propósito (pagehide no puede esperar
+ * una promesa), pero un test SÍ necesita esperar a que el intento completo
+ * (con sus reintentos y backoff) termine antes de hacer asserts. Corre
+ * exactamente el mismo camino que el flush real — no es un mock del
+ * comportamiento — solo que awaitable. Nunca rechaza (igual que el flush
+ * real): el resultado se consulta con obtenerEstadoPersistencia().
+ * @returns {Promise<void>}
+ */
+export async function _flushGuardadoInmediatoParaVerificacion() {
+  if (temporizadorGuardado) {
+    clearTimeout(temporizadorGuardado);
+    temporizadorGuardado = null;
+  }
+  if (!guardadoPendiente || !db) return;
+  const bytes = exportarBytesDb();
+  try {
+    await intentarGuardarConReintentos(bytes);
+  } catch (e) {
+    // ya quedó registrado en estadoPersistencia — comportamiento fire-and-forget replicado a propósito.
+  }
+}
+
+/**
+ * SOLO test (W-12/W-13): reemplaza la instancia ACTIVA de sql.js por
+ * `nuevaDb`, sin pasar por ninguna de las validaciones de
+ * importarRespaldo()/restaurarSnapshot() — uso exclusivo para forzar un
+ * esquema viejo/roto y ejercitar migrarEsquemaSiHaceFalta()/el modo seguro
+ * directamente vía _simularAperturaBaseExistenteParaVerificacion(), sin
+ * depender de un reload real de la página (mismo motivo que
+ * _simularAperturaBaseExistenteParaVerificacion en sí). El caller es
+ * responsable de restaurar la base activa original al final del test (ej.
+ * guardando sus bytes con `.export()` antes de reemplazar y volviendo a
+ * `_reemplazarDbActivaParaVerificacion(new (...).Database(bytesOriginales))`
+ * al terminar) para no contaminar el resto de la suite.
+ * @param {any} nuevaDb instancia de sql.js (misma clase que devuelve `_dbInternaParaVerificacion().constructor`)
+ */
+export function _reemplazarDbActivaParaVerificacion(nuevaDb) {
+  if (db) db.close();
+  db = nuevaDb;
+  ejecutarSQL('PRAGMA foreign_keys = ON;');
+}
+
+/**
+ * SOLO test (W-13): revierte el flag `modoSeguro` para que un test no deje
+ * contaminado el resto de la corrida — análogo al patrón ya usado para
+ * `modo_demo` en la Sección 18 de dev-verify.js (forzarlo con SQL directo y
+ * devolverlo a su valor seguro al final del test).
+ */
+export function _resetearModoSeguroParaVerificacion() {
+  modoSeguro = false;
+  motivoModoSeguro = null;
 }
 
 /**
