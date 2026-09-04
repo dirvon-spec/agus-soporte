@@ -44,13 +44,18 @@ import {
   importarRespaldo,
   iniciarModoReal,
   esModoDemo,
+  listarSnapshots,
+  obtenerBytesSnapshot,
+  restaurarSnapshot,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
   _revisarReSembradoAntiCongelamientoParaVerificacion,
+  _simularAperturaBaseExistenteParaVerificacion,
+  _borrarTodosLosSnapshotsParaVerificacion,
 } from './db.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { generarSeed } from './seed.js';
-import { SCHEMA_VERSION, MIGRACION_V1_A_V2 } from './schema.js';
+import { SCHEMA_VERSION, MIGRACION_V1_A_V2, DDL } from './schema.js';
 import { hoy, sumarDias, rango, diaDeSemana } from './utils/date.js';
 import { uuidV7 } from './utils/uuid.js';
 import { parsearAPesos, formatearCentavos, formatearCompacto } from './utils/money.js';
@@ -2323,6 +2328,231 @@ export async function ejecutarVerificacion() {
     assert(blob.size > 0, 'el blob exportado no debería estar vacío (sigue siendo un sqlite válido: esquema + meta)');
     assert(typeof nombreArchivo === 'string' && nombreArchivo.endsWith('.sqlite'), 'debería devolver un nombre de archivo .sqlite');
   });
+
+  // ============================================================
+  // Sección 18 — INCIDENTE DE PRODUCCIÓN, 2-sep-2026: pérdida de datos reales
+  // por revisarReSembradoAntiCongelamiento() (D1) + iniciarModoReal()/
+  // importarRespaldo() sin red de seguridad. Ver el comentario grande en
+  // revisarReSembradoAntiCongelamiento (db.js, @deprecated) para el relato
+  // completo. Va DESPUÉS de Sección 16/17 (usa iniciarModoReal e
+  // importarRespaldo, ambas destructivas) y ANTES de A-002 (housekeeping
+  // final, independiente de la base activa de esta corrida).
+  // ============================================================
+
+  await verificar(
+    'INCIDENTE (item 1) — reproducción: abrir una base existente con modo_demo=1 y datos reales con un movimiento de hace 3 días YA NO los borra (antes de la corrección, esto vaciaba clientes/acuerdos/movimientos enteros)',
+    async () => {
+      const dbInterna = _dbInternaParaVerificacion();
+      const conceptoIncidente = await crearConcepto({ nombre: 'ConceptoIncidente Verify' });
+      const clienteIncidente = await crearCliente({ nombre: 'Cliente Incidente ReSembrado Verify' });
+      await registrarCargo({
+        cliente_id: clienteIncidente.id,
+        monto_centavos: 5000,
+        fecha: sumarDias(hoy(), -3),
+        concepto: conceptoIncidente.nombre,
+      });
+
+      // El gestor real NUNCA tocó "Empezar con datos reales": crearCliente/
+      // registrarCargo ya sacaron a la base de modo_demo (item 2), así que acá
+      // se fuerza de nuevo por SQL directo para reproducir la PRECONDICIÓN
+      // exacta del incidente (modo_demo='1' + movimiento viejo + datos reales).
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      assert(esModoDemo() === true, 'setup: modo_demo forzado a 1 para reproducir la precondición exacta del incidente');
+
+      // Simula "reabrir la app sobre esta base" — exactamente lo que initDb()
+      // hace hoy para una base existente (migrar + snapshot diario, nada más).
+      await _simularAperturaBaseExistenteParaVerificacion();
+
+      const { clientes } = await listarClientes({ busqueda: 'Cliente Incidente ReSembrado Verify' });
+      assert(clientes.length === 1, 'INCIDENTE: el cliente real debería seguir existiendo tras "reabrir" la base (antes del fix, el re-seed lo borraba)');
+      const { movimientos, total } = await listarMovimientos({ cliente_id: clienteIncidente.id });
+      assert(total === 1, 'INCIDENTE: el movimiento real de hace 3 días debería seguir existiendo');
+      assert(movimientos[0].monto_centavos === 5000, 'el movimiento debería conservar su monto original, sin alterar');
+
+      dbInterna.run("UPDATE meta SET valor='0' WHERE clave='modo_demo'"); // no ensucia el resto de la suite
+    }
+  );
+
+  await verificar(
+    'INCIDENTE (item 2) — crear un cliente con modo_demo=1 saca automáticamente de modo demo, sin depender del botón',
+    async () => {
+      const dbInterna = _dbInternaParaVerificacion();
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      assert(esModoDemo() === true, 'setup: modo_demo forzado a 1');
+
+      await crearCliente({ nombre: 'Cliente SaleDeDemo Verify' });
+
+      assert(esModoDemo() === false, 'crearCliente con modo_demo=1 debería dejarlo en 0 automáticamente, en la MISMA operación');
+    }
+  );
+
+  await verificar(
+    'INCIDENTE (item 2) — registrarCargo/registrarAbono/registrarVisitaSinAbono/crearCategoria/crearConcepto (rama que SÍ inserta) también sacan de modo demo; sus ramas idempotentes (ya existía) NO lo tocan',
+    async () => {
+      const dbInterna = _dbInternaParaVerificacion();
+      const clienteDemo = await crearCliente({ nombre: 'Cliente SaleDeDemo Movimientos Verify' });
+      const conceptoDemo = await crearConcepto({ nombre: 'ConceptoSaleDeDemo Verify' });
+
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      await registrarCargo({ cliente_id: clienteDemo.id, monto_centavos: 100, fecha: hoy(), concepto: conceptoDemo.nombre });
+      assert(esModoDemo() === false, 'registrarCargo debería sacar de modo demo');
+
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      await registrarAbono({ cliente_id: clienteDemo.id, monto_centavos: 50, fecha: hoy() });
+      assert(esModoDemo() === false, 'registrarAbono debería sacar de modo demo');
+
+      const clienteVisita = await crearCliente({ nombre: 'Cliente SaleDeDemo Visita Verify' });
+      const fechaVisita = sumarDias(hoy(), -1);
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      await registrarVisitaSinAbono({ cliente_id: clienteVisita.id, fecha: fechaVisita });
+      assert(esModoDemo() === false, 'registrarVisitaSinAbono debería sacar de modo demo');
+
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      await crearCategoria({ nombre: 'CategoriaSaleDeDemo Verify', color: 'azul' });
+      assert(esModoDemo() === false, 'crearCategoria debería sacar de modo demo');
+
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      await crearConcepto({ nombre: 'ConceptoSaleDeDemo2 Verify' }); // nombre nuevo: SÍ inserta
+      assert(esModoDemo() === false, 'crearConcepto (concepto nuevo) debería sacar de modo demo');
+
+      // Ramas IDEMPOTENTES (no insertan nada nuevo): no deberían tocar modo_demo.
+      dbInterna.run("UPDATE meta SET valor='1' WHERE clave='modo_demo'");
+      await crearConcepto({ nombre: 'ConceptoSaleDeDemo2 Verify' }); // ya existe
+      assert(esModoDemo() === true, 'crearConcepto sobre un concepto YA existente (rama idempotente) NO debería tocar modo_demo');
+
+      await registrarVisitaSinAbono({ cliente_id: clienteVisita.id, fecha: fechaVisita }); // misma fecha, ya existe
+      assert(esModoDemo() === true, 'registrarVisitaSinAbono sobre una fecha YA registrada (rama idempotente) NO debería tocar modo_demo');
+
+      dbInterna.run("UPDATE meta SET valor='0' WHERE clave='modo_demo'"); // no ensucia el resto de la suite
+    }
+  );
+
+  await verificar(
+    'INCIDENTE (item 3) — iniciarModoReal() deja un snapshot restaurable; restaurarSnapshot() devuelve exactamente los datos previos (conteo total y saldo)',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+
+      const conceptoSnap = await crearConcepto({ nombre: 'ConceptoSnapshotModoReal Verify' });
+      const clienteSnap = await crearCliente({ nombre: 'Cliente Snapshot ModoReal Verify' });
+      await registrarCargo({ cliente_id: clienteSnap.id, monto_centavos: 12345, fecha: hoy(), concepto: conceptoSnap.nombre });
+      await registrarAbono({ cliente_id: clienteSnap.id, monto_centavos: 2345, fecha: hoy() });
+
+      const saldoPrevio = await calcularSaldo(clienteSnap.id, hoy());
+      const { total: totalClientesPrevio } = await listarClientes({});
+
+      await iniciarModoReal(); // DESTRUCTIVO por diseño — pero ahora deja un snapshot antes
+
+      const { total: totalClientesVacio } = await listarClientes({});
+      assert(totalClientesVacio === 0, 'precondición: tras iniciarModoReal la base activa debería quedar vacía');
+
+      const snapshotModoReal = (await listarSnapshots()).find(
+        (s) => s.categoria === 'destructiva' && s.motivo.includes('iniciarModoReal')
+      );
+      assert(snapshotModoReal, 'iniciarModoReal() debería haber dejado un snapshot categoria="destructiva" con motivo que mencione iniciarModoReal');
+      assert(snapshotModoReal.tamanioBytes > 0, 'el snapshot debería tener bytes (no vacío)');
+
+      await restaurarSnapshot(snapshotModoReal.clave);
+
+      const { total: totalClientesRestaurado } = await listarClientes({});
+      assert(
+        totalClientesRestaurado === totalClientesPrevio,
+        `el conteo TOTAL de clientes restaurado (${totalClientesRestaurado}) debería coincidir exactamente con el previo a iniciarModoReal (${totalClientesPrevio})`
+      );
+      const { clientes: clientesRestaurados } = await listarClientes({ busqueda: 'Cliente Snapshot ModoReal Verify' });
+      assert(clientesRestaurados.length === 1, 'restaurarSnapshot debería devolver al cliente de prueba que existía antes de iniciarModoReal');
+      const saldoRestaurado = await calcularSaldo(clientesRestaurados[0].id, hoy());
+      assert(
+        saldoRestaurado === saldoPrevio,
+        `el saldo restaurado (${saldoRestaurado}) debería coincidir exactamente con el previo a iniciarModoReal (${saldoPrevio})`
+      );
+
+      // restaurarSnapshot() a su vez dejó su PROPIO snapshot de seguridad
+      // ("por si el usuario se arrepiente de restaurar") — también verificable.
+      const snapshotPreRestauracion = (await listarSnapshots()).find(
+        (s) => s.categoria === 'destructiva' && s.motivo.includes('pre-restauracion')
+      );
+      assert(snapshotPreRestauracion, 'restaurarSnapshot() debería haber dejado su propio snapshot "pre-restauracion" por si el usuario se arrepiente');
+    }
+  );
+
+  await verificar(
+    'INCIDENTE (item 3) — importarRespaldo() deja un snapshot del estado ANTERIOR antes de reemplazar la base activa',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+
+      await crearCliente({ nombre: 'Cliente PreImport Snapshot Verify' });
+      const snapshotsAntes = await listarSnapshots();
+      assert(snapshotsAntes.length === 0, 'precondición: sin snapshots antes de importar');
+
+      // Respaldo v4 mínimo y válido (esquema real, sin datos) para importar encima.
+      const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+      const dbVacia = new DatabaseCtor();
+      dbVacia.run(DDL);
+      dbVacia.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', ?)", [SCHEMA_VERSION]);
+      const bytesVacios = dbVacia.export();
+      dbVacia.close();
+      const arrayBuffer = bytesVacios.buffer.slice(bytesVacios.byteOffset, bytesVacios.byteOffset + bytesVacios.byteLength);
+
+      await importarRespaldo(arrayBuffer);
+
+      const snapshotImport = (await listarSnapshots()).find(
+        (s) => s.categoria === 'destructiva' && s.motivo.includes('importarRespaldo')
+      );
+      assert(snapshotImport, 'importarRespaldo() debería haber dejado un snapshot categoria="destructiva" con motivo que mencione importarRespaldo');
+
+      // La base activa YA es la vacía recién importada...
+      const { clientes: trasImportar } = await listarClientes({ busqueda: 'Cliente PreImport Snapshot Verify' });
+      assert(trasImportar.length === 0, 'tras importar el respaldo vacío, el cliente previo ya no debería estar en la base ACTIVA');
+
+      // ...pero el snapshot preserva el estado de ANTES de importar.
+      const bytesSnapshot = await obtenerBytesSnapshot(snapshotImport.clave);
+      assert(bytesSnapshot && bytesSnapshot.length > 0, 'obtenerBytesSnapshot() debería devolver bytes no vacíos para una clave existente');
+
+      await restaurarSnapshot(snapshotImport.clave);
+      const { clientes: trasRestaurar } = await listarClientes({ busqueda: 'Cliente PreImport Snapshot Verify' });
+      assert(trasRestaurar.length === 1, 'el snapshot dejado por importarRespaldo debería contener el cliente que existía ANTES de importar');
+    }
+  );
+
+  await verificar(
+    'INCIDENTE (item 3) — rotación de snapshots: "destructiva" no crece de 2, "auto-diaria" no duplica en el mismo día',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+
+      await crearCliente({ nombre: 'Cliente Rotacion1 Verify' });
+      await iniciarModoReal(); // snapshot destructiva #1
+      await crearCliente({ nombre: 'Cliente Rotacion2 Verify' });
+      await iniciarModoReal(); // snapshot destructiva #2
+      await crearCliente({ nombre: 'Cliente Rotacion3 Verify' });
+      await iniciarModoReal(); // snapshot destructiva #3 -> debería rotar y dejar solo 2
+
+      const snapshotsDestructivos = (await listarSnapshots()).filter((s) => s.categoria === 'destructiva');
+      assert(
+        snapshotsDestructivos.length === 2,
+        `debería haber como máximo 2 snapshots "destructiva" tras 3 operaciones seguidas, hay ${snapshotsDestructivos.length}`
+      );
+
+      const autoDespues1 = (await listarSnapshots()).filter((s) => s.categoria === 'auto-diaria');
+      assert(autoDespues1.length === 0, 'precondición: sin snapshots "auto-diaria" (se limpiaron al inicio del test)');
+
+      // respaldarSnapshotDiarioSiHaceFalta() solo dispara si hay datos de
+      // negocio — el último iniciarModoReal() de arriba dejó la base vacía,
+      // así que hace falta un cliente antes de "reabrir".
+      await crearCliente({ nombre: 'Cliente RotacionAutoDiaria Verify' });
+
+      await _simularAperturaBaseExistenteParaVerificacion(); // "reabre" la app — debería crear el snapshot de hoy
+      const autoTrasAbrir1 = (await listarSnapshots()).filter((s) => s.categoria === 'auto-diaria');
+      assert(autoTrasAbrir1.length === 1, `debería haber exactamente 1 snapshot "auto-diaria" tras el primer "arranque" del día, hay ${autoTrasAbrir1.length}`);
+
+      await _simularAperturaBaseExistenteParaVerificacion(); // "reabre" de nuevo el MISMO día
+      const autoTrasAbrir2 = (await listarSnapshots()).filter((s) => s.categoria === 'auto-diaria');
+      assert(
+        autoTrasAbrir2.length === 1,
+        `un segundo "arranque" el MISMO día NO debería crear otro snapshot "auto-diaria" (máx. 1 por día), hay ${autoTrasAbrir2.length}`
+      );
+      assert(autoTrasAbrir2[0].clave === autoTrasAbrir1[0].clave, 'debería seguir siendo el MISMO snapshot (misma clave), no uno nuevo');
+    }
+  );
 
   // ============================================================
   // Sección 10 — A-002 (auditoría independiente): ?verify=1 NO debe

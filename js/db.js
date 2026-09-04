@@ -78,6 +78,19 @@ const NOMBRE_LOCK_VERIFY = 'agus-db-verify-lock';
 const NOMBRE_STORE = 'archivos';
 const CLAVE_ARCHIVO = 'sqlite-principal';
 
+// Incidente 2-sep-2026 (ver revisarReSembradoAntiCongelamiento más abajo):
+// almacén de snapshots de seguridad, SEPARADO por completo del store de la
+// base activa (nombre/base de IndexedDB distintos) para que ninguna
+// operación normal pueda tocarlos por accidente. Espejo del mismo criterio
+// de aislamiento demo/verify que ya usa NOMBRE_DB_INDEXEDDB_* (A-002).
+const NOMBRE_DB_SNAPSHOT_DEMO = 'agus-app-snapshot';
+const NOMBRE_DB_SNAPSHOT_VERIFY = 'agus-db-verify-snapshot';
+const NOMBRE_STORE_SNAPSHOT = 'snapshots';
+const CATEGORIA_SNAPSHOT_DESTRUCTIVA = 'destructiva';
+const CATEGORIA_SNAPSHOT_AUTO_DIARIA = 'auto-diaria';
+const MAX_SNAPSHOTS_DESTRUCTIVOS = 2;
+const MAX_SNAPSHOTS_AUTO_DIARIOS = 3;
+
 /** @type {any} instancia de la clase SQL.Database de sql.js */
 let db = null;
 /** @type {any} namespace SQL de sql.js (SQL.Database, etc.) */
@@ -89,6 +102,7 @@ let listenersRegistrados = false;
 let modoVerify = false;
 let nombreDbIndexedDbActual = NOMBRE_DB_INDEXEDDB_DEMO;
 let nombreLockActual = NOMBRE_LOCK_DEMO;
+let nombreDbSnapshotActual = NOMBRE_DB_SNAPSHOT_DEMO;
 
 /** True si la URL actual trae ?verify=1 (modo de verificación en vivo, dev-verify.js). */
 function detectarModoVerify() {
@@ -351,6 +365,160 @@ async function guardarArchivoEnIndexedDB(bytes) {
 }
 
 // ============================================================
+// Snapshots de seguridad (incidente 2-sep-2026 — ver el comentario grande en
+// revisarReSembradoAntiCongelamiento más abajo). Viven en una base de
+// IndexedDB TOTALMENTE separada de la base activa (NOMBRE_DB_SNAPSHOT_*),
+// para que ninguna operación normal (ni siquiera un bug en el store de la
+// base activa) pueda arrastrarlos. Cada entrada: {clave, fechaIso,
+// fechaLocal, motivo, categoria, bytes}. `fechaIso` es el instante completo
+// (ahoraIso(), para mostrar/ordenar); `fechaLocal` es 'YYYY-MM-DD' vía
+// hoy() (R-005: día calendario LOCAL) — el chequeo "¿ya hay uno de hoy?"
+// del snapshot diario automático usa fechaLocal, nunca fechaIso, para no
+// heredar el corrimiento de zona horaria que ya mordió a este proyecto una
+// vez con el arrastre del calendario (ver CLAUDE.md, cicatriz #2).
+// ============================================================
+
+function abrirIndexedDBSnapshot() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(nombreDbSnapshotActual, 1);
+    req.onupgradeneeded = () => {
+      const almacen = req.result;
+      if (!almacen.objectStoreNames.contains(NOMBRE_STORE_SNAPSHOT)) {
+        almacen.createObjectStore(NOMBRE_STORE_SNAPSHOT, { keyPath: 'clave' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function listarEntradasSnapshot() {
+  const idb = await abrirIndexedDBSnapshot();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = idb.transaction(NOMBRE_STORE_SNAPSHOT, 'readonly');
+      const req = tx.objectStore(NOMBRE_STORE_SNAPSHOT).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    idb.close();
+  }
+}
+
+async function obtenerEntradaSnapshot(clave) {
+  const idb = await abrirIndexedDBSnapshot();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = idb.transaction(NOMBRE_STORE_SNAPSHOT, 'readonly');
+      const req = tx.objectStore(NOMBRE_STORE_SNAPSHOT).get(clave);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    idb.close();
+  }
+}
+
+async function guardarEntradaSnapshot(entrada) {
+  const idb = await abrirIndexedDBSnapshot();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = idb.transaction(NOMBRE_STORE_SNAPSHOT, 'readwrite');
+      tx.objectStore(NOMBRE_STORE_SNAPSHOT).put(entrada);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    idb.close();
+  }
+}
+
+async function borrarEntradaSnapshot(clave) {
+  const idb = await abrirIndexedDBSnapshot();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = idb.transaction(NOMBRE_STORE_SNAPSHOT, 'readwrite');
+      tx.objectStore(NOMBRE_STORE_SNAPSHOT).delete(clave);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    idb.close();
+  }
+}
+
+/** Deja como máximo `maximo` snapshots de una `categoria`, borrando los más viejos por fechaIso. */
+async function rotarSnapshots(categoria, maximo) {
+  const todos = await listarEntradasSnapshot();
+  const deLaCategoria = todos
+    .filter((s) => s.categoria === categoria)
+    .sort((a, b) => (a.fechaIso < b.fechaIso ? 1 : a.fechaIso > b.fechaIso ? -1 : 0));
+  const sobrantes = deLaCategoria.slice(maximo);
+  for (const s of sobrantes) {
+    await borrarEntradaSnapshot(s.clave);
+  }
+}
+
+/**
+ * Serializa la base ACTIVA (misma exportarBytesDb() que usa la persistencia
+ * normal, reafirma PRAGMA foreign_keys) y la guarda como un snapshot nuevo,
+ * rotando después la categoría a `maximo` entradas. No-op silencioso si
+ * todavía no hay una base abierta (defensivo, no debería pasar en uso normal).
+ * @param {string} motivo texto humano ("iniciarModoReal", "auto-diario", etc.)
+ * @param {string} categoria CATEGORIA_SNAPSHOT_DESTRUCTIVA | CATEGORIA_SNAPSHOT_AUTO_DIARIA
+ * @param {number} maximo cuántos snapshots de esa categoría conservar
+ */
+async function guardarSnapshotInterno(motivo, categoria, maximo) {
+  if (!db) return;
+  const bytes = exportarBytesDb();
+  const entrada = {
+    clave: uuidV7(),
+    fechaIso: ahoraIso(),
+    fechaLocal: hoy(),
+    motivo,
+    categoria,
+    bytes,
+  };
+  await guardarEntradaSnapshot(entrada);
+  await rotarSnapshots(categoria, maximo);
+  return entrada;
+}
+
+/** Snapshot de seguridad ANTES de una operación destructiva (item 3 del incidente 2-sep-2026). */
+async function guardarSnapshotDestructivo(motivo) {
+  return guardarSnapshotInterno(motivo, CATEGORIA_SNAPSHOT_DESTRUCTIVA, MAX_SNAPSHOTS_DESTRUCTIVOS);
+}
+
+/**
+ * Snapshot diario automático (item 4 del incidente 2-sep-2026): la red que le
+ * habría salvado los datos al usuario el 2-sep-2026. Barato — si ya existe un
+ * snapshot con `fechaLocal === hoy()` en esta categoría, no hace nada (ni
+ * siquiera exporta la base). Máximo 1 por día, rota a los últimos 3 días.
+ */
+async function guardarSnapshotAutoDiarioSiHaceFalta() {
+  const hoyStr = hoy();
+  const todos = await listarEntradasSnapshot();
+  const yaHayDeHoy = todos.some((s) => s.categoria === CATEGORIA_SNAPSHOT_AUTO_DIARIA && s.fechaLocal === hoyStr);
+  if (yaHayDeHoy) return;
+  await guardarSnapshotInterno('auto-diario (arranque de la app)', CATEGORIA_SNAPSHOT_AUTO_DIARIA, MAX_SNAPSHOTS_AUTO_DIARIOS);
+}
+
+/**
+ * Llamado desde initDb() al abrir una base EXISTENTE: solo dispara el
+ * snapshot diario si la base tiene datos de negocio (clientes o movimientos
+ * vivos) — una base vacía o recién creada no tiene nada que proteger todavía.
+ */
+async function respaldarSnapshotDiarioSiHaceFalta() {
+  const filaConteo = unaFila(
+    `SELECT (SELECT COUNT(*) FROM clientes WHERE deleted_at IS NULL) +
+            (SELECT COUNT(*) FROM movimientos WHERE deleted_at IS NULL) AS total`
+  );
+  if (!filaConteo || filaConteo.total === 0) return;
+  await guardarSnapshotAutoDiarioSiHaceFalta();
+}
+
+// ============================================================
 // Persistencia (debounce 500ms + flush en pagehide/visibilitychange) — mitigación C1
 // ============================================================
 
@@ -435,19 +603,44 @@ export function estaSoloLectura() {
 }
 
 /**
- * URGENTE (bloqueante de producción, 30-ago-2026): true si la base activa
- * sigue en modo demo (`meta.modo_demo = '1'`) — la UI la usa para decidir si
- * mostrar el banner/CTA "Empezar con datos reales" y para saber si el
- * re-sembrado anti-congelamiento (D1) sigue siendo una amenaza latente sobre
- * esta base (SOLO corre si modo_demo='1', ver revisarReSembradoAntiCongelamiento).
+ * true si la base activa sigue en modo demo (`meta.modo_demo = '1'`).
+ *
+ * INCIDENTE 2-sep-2026: hasta esta fecha, `modo_demo='1'` también controlaba
+ * si `initDb()` podía BORRAR TODA la base y re-sembrarla (ver el comentario
+ * grande en `revisarReSembradoAntiCongelamiento` más abajo, @deprecated y sin
+ * consumidores desde este incidente). Ese acoplamiento causó pérdida de datos
+ * reales de un usuario en producción. Desde este incidente, `modo_demo` es
+ * PURAMENTE informativo para la UI: solo decide si se muestra el banner/CTA
+ * "Empezar con datos reales". Ya NO puede disparar ningún borrado — ni esta
+ * función ni ninguna otra ruta de arranque vuelven a leerlo con ese fin.
+ * Además, `modo_demo` ahora sale de '1' solo automáticamente en cuanto el
+ * usuario crea su primer dato propio (crearCliente/crearCategoria/
+ * crearConcepto/registrarAbono/registrarCargo/registrarVisitaSinAbono — ver
+ * `salirDeModoDemoSiHaceFalta()`), sin depender de que toque el botón.
  * Si el meta aún no existe (base recién migrada de un esquema muy viejo que
- * nunca lo seteó), se trata como NO-demo — mismo criterio conservador que ya
- * usa revisarReSembradoAntiCongelamiento (`modoDemo !== '1'` → no re-siembra).
+ * nunca lo seteó), se trata como NO-demo (criterio conservador).
  * Requiere initDb() ya resuelto (lee de la base activa, igual que estaSoloLectura()).
  * @returns {boolean}
  */
 export function esModoDemo() {
   return obtenerMetaInterno('modo_demo') === '1';
+}
+
+/**
+ * Si la base sigue en modo demo, la saca apenas el usuario crea su PRIMER
+ * dato propio — sin depender de que toque el botón "Empezar con datos
+ * reales" (mitigación del incidente 2-sep-2026, item 2: la ventana en la que
+ * datos reales conviven con `modo_demo='1'` se cierra lo antes posible).
+ * DEBE llamarse DENTRO de la misma transacción que la escritura real, antes
+ * del COMMIT, para que sea atómico con ella. No-op si ya está en '0'.
+ * Los callers deliberadamente NO la invocan en sus ramas "ya existía, no
+ * inserto nada nuevo" (crearConcepto/registrarVisitaSinAbono idempotentes):
+ * no crear un dato nuevo no cuenta como "el usuario ya usa la app en serio".
+ */
+function salirDeModoDemoSiHaceFalta() {
+  if (obtenerMetaInterno('modo_demo') === '1') {
+    setMetaInterno('modo_demo', '0');
+  }
 }
 
 // ============================================================
@@ -623,8 +816,38 @@ async function migrarEsquemaSiHaceFalta() {
   console.info(`[db] Migración de esquema aplicada: v${versionInicial} -> v${SCHEMA_VERSION}. Datos preservados.`);
 }
 
-/** Re-sembrado automático anti-congelamiento (mitigación D1), SOLO en modo_demo=1. */
-
+/**
+ * @deprecated INCIDENTE DE PRODUCCIÓN — 2-sep-2026. NO volver a llamar desde
+ * initDb() (ni desde ningún otro camino de arranque) BAJO NINGUNA CIRCUNSTANCIA.
+ *
+ * Qué hacía: re-sembrado automático "anti-congelamiento" (mitigación D1 del
+ * plan, pensada para que la DEMO nunca luciera vieja frente al dueño) — si
+ * `modo_demo='1'` y el movimiento más reciente era anterior a ayer, BORRABA
+ * `movimientos`/`acuerdos`/`clientes` enteros y volvía a sembrar el seed de
+ * ejemplo con fechas frescas. `initDb()` la invocaba en TODO arranque sobre
+ * una base ya existente (no nueva).
+ *
+ * Por qué fue una bomba en producción: el gestor real empezó a cargar datos
+ * reales (clientes, cobros) sin haber tocado nunca el botón "Empezar con
+ * datos reales" — así que `modo_demo` seguía en `'1'`. En cuanto pasaron 2
+ * días sin registrar un movimiento, este código interpretó la base entera
+ * como "demo vieja" y la borró, destruyendo datos reales de un cliente final
+ * en uso. Se reportó como pérdida de datos el 2-sep-2026.
+ *
+ * Por qué no vuelve a pasar aunque este código exista en el archivo:
+ *   1. `initDb()` ya NO la llama (ver más abajo) — CERO consumidores en
+ *      cualquier camino de arranque/producción.
+ *   2. Aunque alguien la reconecte por error, `modo_demo` ahora sale de '1'
+ *      automáticamente en cuanto el usuario crea su primer dato propio (ver
+ *      `salirDeModoDemoSiHaceFalta()`), sin depender del botón.
+ *   3. Hay un snapshot diario automático (`respaldarSnapshotDiarioSiHaceFalta`,
+ *      item 4 del incidente) que habría permitido restaurar sin pérdida.
+ *
+ * Se deja el CUERPO sin modificar (mismo bug reproducible tal cual, para que
+ * el test de regresión de la Sección 16 de dev-verify.js siga demostrando
+ * que el heurístico en sí sigue latente si algo LLEGA a invocarlo) — lo único
+ * que cambió es que ya nadie lo invoca desde producción.
+ */
 async function revisarReSembradoAntiCongelamiento() {
   const modoDemo = obtenerMetaInterno('modo_demo');
   if (modoDemo !== '1') return;
@@ -665,9 +888,11 @@ export async function initDb() {
   modoVerify = detectarModoVerify();
   nombreDbIndexedDbActual = modoVerify ? NOMBRE_DB_INDEXEDDB_VERIFY : NOMBRE_DB_INDEXEDDB_DEMO;
   nombreLockActual = modoVerify ? NOMBRE_LOCK_VERIFY : NOMBRE_LOCK_DEMO;
+  nombreDbSnapshotActual = modoVerify ? NOMBRE_DB_SNAPSHOT_VERIFY : NOMBRE_DB_SNAPSHOT_DEMO;
 
   if (modoVerify) {
     await borrarBaseIndexedDb(nombreDbIndexedDbActual);
+    await borrarBaseIndexedDb(nombreDbSnapshotActual);
   }
 
   const initSqlJsVendor = typeof window !== 'undefined' ? window.initSqlJs : undefined;
@@ -717,11 +942,16 @@ export async function initDb() {
     await persistirInmediato();
   } else if (!soloLectura) {
     await migrarEsquemaSiHaceFalta();
-    await revisarReSembradoAntiCongelamiento();
+    // INCIDENTE 2-sep-2026: acá vivía la llamada a
+    // revisarReSembradoAntiCongelamiento() (@deprecated, ver su comentario) —
+    // borraba la base entera si `modo_demo='1'` y el último movimiento tenía
+    // más de un día. NUNCA reintroducir esa llamada. En su lugar, la red de
+    // seguridad real: un snapshot diario automático (item 4 del incidente).
+    await respaldarSnapshotDiarioSiHaceFalta();
   }
-  // persistirInmediato()/revisarReSembradoAntiCongelamiento() exportan la DB (db.export()),
-  // lo que reinicia PRAGMA foreign_keys en sql.js (ver exportarBytesDb) — se reafirma acá
-  // como garantía final antes de que la app empiece a leer/escribir (R-003).
+  // persistirInmediato()/respaldarSnapshotDiarioSiHaceFalta() pueden exportar la DB
+  // (db.export()), lo que reinicia PRAGMA foreign_keys en sql.js (ver exportarBytesDb)
+  // — se reafirma acá como garantía final antes de que la app empiece a leer/escribir (R-003).
   ejecutarSQL('PRAGMA foreign_keys = ON;');
 
   registrarListenersDeFlush();
@@ -827,6 +1057,12 @@ export async function importarRespaldo(arrayBuffer) {
     throw crearError('VALIDATION_ERROR', 'El archivo no es un respaldo válido de esta app.', { original: String(e) });
   }
 
+  // Item 3 del incidente 2-sep-2026: snapshot de seguridad de la base ACTIVA
+  // (la que está a punto de ser reemplazada), tomado recién ahora que ya se
+  // validó por completo el archivo candidato — así no se gasta un snapshot
+  // en un import que de todos modos iba a ser rechazado.
+  await guardarSnapshotDestructivo('importarRespaldo (reemplazo de la base activa)');
+
   if (db) db.close();
   db = dbCandidata;
   ejecutarSQL('PRAGMA foreign_keys = ON;');
@@ -853,10 +1089,17 @@ export async function importarRespaldo(arrayBuffer) {
  * persistirEnIndexedDB()) porque esta operación es irreversible y de una sola
  * vez: no tiene sentido dejar una ventana donde la base activa ya está vacía
  * en memoria pero IndexedDB todavía tiene el snapshot demo viejo.
+ *
+ * Item 3 del incidente 2-sep-2026: YA NO es irreversible de verdad — antes de
+ * borrar nada, se guarda un snapshot completo de la base tal cual estaba
+ * (`restaurarSnapshot()` la trae de vuelta si esto se tocó por error, incluso
+ * si tenía datos reales cargados).
  * @returns {Promise<void>}
  */
 export async function iniciarModoReal() {
   verificarEscritura();
+
+  await guardarSnapshotDestructivo('iniciarModoReal (Empezar con datos reales)');
 
   ejecutarSQL('BEGIN;');
   try {
@@ -873,6 +1116,89 @@ export async function iniciarModoReal() {
     throw crearError('DB_ERROR', 'No se pudo iniciar el modo real.', { original: String(e) });
   }
 
+  await persistirInmediato();
+}
+
+// ============================================================
+// Snapshots de seguridad — API pública (item 3 del incidente 2-sep-2026).
+// Contratos exactos para el builder de UI:
+//
+// - listarSnapshots(): Promise<Array<{clave, fechaIso, fechaLocal, motivo,
+//   categoria, tamanioBytes}>> — SIN los bytes (para listar barato: hasta 5
+//   entradas como mucho — 2 destructivas + 3 auto-diarias — pero de todos
+//   modos evita cargar blobs completos solo para pintar una lista). Orden
+//   descendente por fechaIso (más reciente primero). `categoria` es
+//   'destructiva' (tomado antes de iniciarModoReal/importarRespaldo/
+//   restaurarSnapshot) o 'auto-diaria' (uno por día, máx. 3). `motivo` es
+//   texto humano listo para mostrar tal cual. `fechaLocal` ('YYYY-MM-DD') es
+//   útil para agrupar/mostrar "de hoy"/"de ayer" sin reparsear fechaIso.
+// - obtenerBytesSnapshot(clave): Promise<Uint8Array|null> — getter de los
+//   bytes de UN snapshot puntual (para ofrecer "descargar este snapshot"
+//   como .sqlite, por ejemplo). null si la clave no existe.
+// - restaurarSnapshot(clave): Promise<void> — reemplaza la base ACTIVA por
+//   ese snapshot. Antes de reemplazar nada, guarda un snapshot del estado
+//   ACTUAL (categoria 'destructiva', motivo "pre-restauracion...") por si el
+//   usuario se arrepiente de haber restaurado — ese nuevo snapshot también
+//   aparece en listarSnapshots() y es restaurable como cualquier otro.
+//   Persiste de inmediato (sin debounce), igual que iniciarModoReal/
+//   importarRespaldo. Lanza NOT_FOUND si `clave` no existe, CONFLICT si la
+//   pestaña está en solo-lectura (misma regla que toda escritura).
+// ============================================================
+
+/**
+ * @returns {Promise<Array<{clave:string, fechaIso:string, fechaLocal:string, motivo:string, categoria:string, tamanioBytes:number}>>}
+ *   metadata de todos los snapshots guardados (sin bytes), más reciente primero.
+ */
+export async function listarSnapshots() {
+  const todos = await listarEntradasSnapshot();
+  return todos
+    .map((s) => ({
+      clave: s.clave,
+      fechaIso: s.fechaIso,
+      fechaLocal: s.fechaLocal,
+      motivo: s.motivo,
+      categoria: s.categoria,
+      tamanioBytes: s.bytes ? s.bytes.length : 0,
+    }))
+    .sort((a, b) => (a.fechaIso < b.fechaIso ? 1 : a.fechaIso > b.fechaIso ? -1 : 0));
+}
+
+/**
+ * @param {string} clave
+ * @returns {Promise<Uint8Array|null>} bytes crudos del .sqlite de ese snapshot, o null si no existe.
+ */
+export async function obtenerBytesSnapshot(clave) {
+  const entrada = await obtenerEntradaSnapshot(clave);
+  return entrada ? entrada.bytes : null;
+}
+
+/**
+ * Reemplaza la base ACTIVA por el snapshot `clave`. Antes de tocar nada,
+ * guarda un snapshot del estado actual (por si el usuario se arrepiente de
+ * restaurar) — ver contrato completo más arriba.
+ * @param {string} clave
+ * @returns {Promise<void>}
+ */
+export async function restaurarSnapshot(clave) {
+  verificarEscritura();
+
+  const entrada = await obtenerEntradaSnapshot(clave);
+  if (!entrada) {
+    throw crearError('NOT_FOUND', 'Snapshot no encontrado.', { clave });
+  }
+
+  await guardarSnapshotDestructivo(`pre-restauracion (antes de restaurar snapshot del ${entrada.fechaLocal})`);
+
+  let dbRestaurada;
+  try {
+    dbRestaurada = new SQL.Database(entrada.bytes);
+  } catch (e) {
+    throw crearError('DB_ERROR', 'El snapshot guardado está dañado y no se pudo abrir.', { original: String(e), clave });
+  }
+
+  if (db) db.close();
+  db = dbRestaurada;
+  ejecutarSQL('PRAGMA foreign_keys = ON;');
   await persistirInmediato();
 }
 
@@ -913,6 +1239,7 @@ export async function crearCategoria({ nombre, color }) {
       ts,
       ts,
     ]);
+    salirDeModoDemoSiHaceFalta(); // incidente 2-sep-2026, item 2
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -1020,6 +1347,7 @@ export async function crearConcepto({ nombre }) {
   ejecutarSQL('BEGIN;');
   try {
     db.run('INSERT INTO conceptos (id, nombre, created_at, updated_at, deleted_at) VALUES (?,?,?,?,NULL)', [id, nombreLimpio, ts, ts]);
+    salirDeModoDemoSiHaceFalta(); // incidente 2-sep-2026, item 2 (solo en la rama que SÍ inserta, no en el "ya existía" de arriba)
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -1180,6 +1508,7 @@ export async function crearCliente({ nombre, telefono, categoria_id, notas }) {
        VALUES (?,?,?,?,?,?,?,?,NULL)`,
       [id, nombreLimpio, telefono || null, categoriaFinal, ordenNuevo, notas || null, ts, ts]
     );
+    salirDeModoDemoSiHaceFalta(); // incidente 2-sep-2026, item 2
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -1809,6 +2138,7 @@ export async function registrarCargo({ cliente_id, monto_centavos, fecha, concep
        VALUES (?,?,?,?,?,?,?,?,NULL,?,?,NULL)`,
       [id, cliente_id, 'CARGO', monto_centavos, fecha, conceptoCatalogo.nombre, referencia || null, nota || null, ts, ts]
     );
+    salirDeModoDemoSiHaceFalta(); // incidente 2-sep-2026, item 2
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -1845,6 +2175,7 @@ export async function registrarAbono({ cliente_id, monto_centavos, fecha, nota }
        VALUES (?,?,?,?,?,NULL,NULL,?,NULL,?,?,NULL)`,
       [id, cliente_id, 'ABONO', monto_centavos, fecha, nota || null, ts, ts]
     );
+    salirDeModoDemoSiHaceFalta(); // incidente 2-sep-2026, item 2
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -2065,6 +2396,7 @@ export async function registrarVisitaSinAbono({ cliente_id, fecha }) {
       ts,
       ts,
     ]);
+    salirDeModoDemoSiHaceFalta(); // incidente 2-sep-2026, item 2 (solo en la rama que SÍ inserta, no en el "ya existía" de arriba)
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -2620,6 +2952,40 @@ export function _dbInternaParaVerificacion() {
  */
 export async function _revisarReSembradoAntiCongelamientoParaVerificacion() {
   return revisarReSembradoAntiCongelamiento();
+}
+
+/**
+ * INCIDENTE 2-sep-2026 — regresión: replica EXACTAMENTE la secuencia que
+ * initDb() ejecuta hoy al abrir una base EXISTENTE (rama `!soloLectura`,
+ * ver initDb() más arriba): `migrarEsquemaSiHaceFalta()` seguido de
+ * `respaldarSnapshotDiarioSiHaceFalta()` — y a propósito NADA más. `initDb()`
+ * solo corre esa rama una vez por carga de página (guardada tras
+ * `inicializado=true`), así que este wrapper de solo-test es la única forma
+ * de ejercitar "qué pasaría si la app se reabre sobre esta base" sin recargar
+ * la página dentro de la misma corrida de `?verify=1`.
+ *
+ * Si el día de mañana alguien reintroduce por error la llamada a
+ * `revisarReSembradoAntiCongelamiento()` (@deprecated) en initDb(), TIENE que
+ * agregarla también acá para que el test de la Sección 16 siga siendo
+ * honesto — y si la agrega, ese mismo test empieza a fallar en rojo.
+ * @returns {Promise<void>}
+ */
+export async function _simularAperturaBaseExistenteParaVerificacion() {
+  await migrarEsquemaSiHaceFalta();
+  await respaldarSnapshotDiarioSiHaceFalta();
+}
+
+/**
+ * SOLO test: vacía por completo el almacén de snapshots de la base ACTIVA
+ * (demo o verify, según corresponda) para que un test pueda partir de "cero
+ * snapshots" sin depender del orden de ejecución de tests anteriores.
+ * @returns {Promise<void>}
+ */
+export async function _borrarTodosLosSnapshotsParaVerificacion() {
+  const todos = await listarEntradasSnapshot();
+  for (const s of todos) {
+    await borrarEntradaSnapshot(s.clave);
+  }
 }
 
 /**
