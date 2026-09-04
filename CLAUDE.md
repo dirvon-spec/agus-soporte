@@ -30,6 +30,12 @@ npm run verify:node          # módulos puros (calendar, money, date, uuid, seed
 - Null honesto en UI: sin dato = "—", jamás $0.00 inventado. Color = semántica del dato.
 - Todo cambio se verifica EJECUTANDO (suite `?verify=1` + Node). Hallazgo serio → test en ROJO antes del fix. La suite completa, no solo el módulo tocado.
 
+## Regla de despliegue (service worker)
+
+La app es PWA con service worker (`sw.js`, precache versionado). **Todo despliegue que toque `index.html`, `css/**`, `js/**` o el propio `sw.js` DEBE subir la constante `VERSION` en `sw.js`** — si no, el navegador del usuario puede seguir sirviendo la versión cacheada anterior y el arreglo nunca le llega. Verificar tras desplegar: recargar, comprobar que el caché nuevo reemplazó al viejo y que el cambio se ve.
+
+**Esto ya mordió durante el desarrollo (4-sep-2026):** la suite local reportaba 112/112 en vez de 120/120 porque un service worker de una prueba anterior servía los `js/**` viejos — el código nuevo estaba en disco pero el navegador nunca lo veía. Si una verificación da un resultado que no cuadra con el código que acabás de leer, **sospechá del service worker antes que del código**: desregistralo y borrá los cachés (`navigator.serviceWorker.getRegistrations()` → `unregister()`, `caches.keys()` → `caches.delete()`) y volvé a correr.
+
 ## Cicatrices (cómo cazarlas si vuelven)
 
 1. **sql.js apaga `PRAGMA foreign_keys` como efecto secundario de cada `db.export()`.** Por eso existe `exportarBytesDb()` en db.js que re-afirma el pragma tras cada export. Si las FKs "dejan de funcionar", revisar que ningún código llame `db.export()` directo.

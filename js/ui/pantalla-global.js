@@ -10,16 +10,17 @@
 
 import {
   obtenerCalendarioGlobalMovimientos, listarClientesArchivados, listarClientesAgrupados,
-  exportarRespaldo, estaSoloLectura, listarMovimientos, esModoDemo,
+  listarMovimientos, esModoDemo,
 } from '../db.js';
 import { hoy } from '../utils/date.js';
 import {
   microcopy, estadoVacio, montoOGuion, claseSaldo, formatearMesAnio, formatearFechaLegible, formatearFechaCorta,
-  escapeHtml, mostrarToast, bolitaHtml, Iconos,
+  escapeHtml, bolitaHtml, Iconos,
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
   bannerModoDemoHtml, wireBannerModoDemo, abrirSheetIniciarModoReal,
   calcularBalanceGeneral, dispararImportarRespaldo,
   panelCopiasAutomaticasHtml, renderCopiasAutomaticas,
+  edicionBloqueada, motivoEdicionBloqueada, ejecutarExportarRespaldoConConfirmacion,
 } from './componentes.js';
 
 const MICROCOPY = `
@@ -108,25 +109,11 @@ async function enriquecerMovimientosConId(fecha, movimientos) {
 export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
   let mesVisible = anioMes || hoy().slice(0, 7);
   let diaSeleccionado = null;
-  const soloLectura = estaSoloLectura();
-
-  async function realizarExportar() {
-    try {
-      const { blob, nombreArchivo } = await exportarRespaldo();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = nombreArchivo;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      mostrarToast('Respaldo exportado.', 'exito');
-      await renderTodo();
-    } catch (e) {
-      mostrarToast(e.message || 'No se pudo exportar el respaldo.', 'error');
-    }
-  }
+  // W-13: solo-lectura de otra pestaña Y modo seguro bloquean edición por
+  // igual — combinado acá para no repetir el chequeo en cada botón de
+  // escritura de esta pantalla. exportarRespaldo() es la única excepción (no
+  // se gatea ni con uno ni con otro, ver su propio botón más abajo).
+  const bloqueada = edicionBloqueada();
 
   // §2.12: registros a futuro (adelantos) — un día futuro sin movimientos
   // queda "limpio" igual que siempre (ahora tocable, para capturar); un día
@@ -238,27 +225,27 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
                     <span class="${clase}">${signo} ${montoOGuion(Math.abs(m.montoCentavos))}</span>
                     ${!esAjuste && m.id ? `
                       <span class="fila-movimiento-acciones">
-                        <button type="button" class="btn-icono btn-icono-chico" data-accion="corregir-movimiento" aria-label="Corregir monto">${Iconos.lapiz()}</button>
-                        <button type="button" class="btn-icono btn-icono-chico" data-accion="eliminar-movimiento" aria-label="Eliminar movimiento">${Iconos.papelera()}</button>
+                        <button type="button" class="btn-icono btn-icono-chico" data-accion="corregir-movimiento" aria-label="Corregir monto" ${bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>${Iconos.lapiz()}</button>
+                        <button type="button" class="btn-icono btn-icono-chico" data-accion="eliminar-movimiento" aria-label="Eliminar movimiento" ${bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>${Iconos.papelera()}</button>
                       </span>` : ''}
                   </li>`;
                 }).join('')}</ul>`
             }
-            <button type="button" class="btn btn-secundario btn-ancho" id="btn-agregar-movimiento-dia" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>${Iconos.mas()} Agregar movimiento en este día</button>
+            <button type="button" class="btn btn-secundario btn-ancho" id="btn-agregar-movimiento-dia" ${bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>${Iconos.mas()} Agregar movimiento en este día</button>
           </div>` : ''}
 
         <details class="panel-colapsable panel-ajustes" open>
           <summary>Ajustes / Respaldo</summary>
           ${esModoDemo() ? `
             <div class="zona-modo-real">
-              <button type="button" class="btn btn-peligro btn-ancho" id="btn-empezar-modo-real" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>Empezar a trabajar con mis datos reales</button>
+              <button type="button" class="btn btn-peligro btn-ancho" id="btn-empezar-modo-real" ${bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>Empezar a trabajar con mis datos reales</button>
               <p class="texto-secundario">Borra los clientes y movimientos de EJEMPLO y deja la app lista para tus datos reales. Es definitivo.</p>
             </div>` : ''}
           <p id="estado-persistencia" class="estado-persistencia"></p>
           <p class="texto-secundario">${MICROCOPY_AJUSTES_RESPALDO}</p>
           <div class="acciones-respaldo">
             <button type="button" class="btn btn-secundario" id="btn-exportar-respaldo">Exportar respaldo</button>
-            <button type="button" class="btn btn-secundario" id="btn-importar-respaldo-global" ${soloLectura ? 'disabled title="Modo solo lectura"' : ''}>Importar respaldo</button>
+            <button type="button" class="btn btn-secundario" id="btn-importar-respaldo-global" ${bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>Importar respaldo</button>
           </div>
           <div id="slot-error-importar"></div>
           ${panelCopiasAutomaticasHtml()}
@@ -370,7 +357,9 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
       }
     });
 
-    contenedor.querySelector('#btn-exportar-respaldo').addEventListener('click', realizarExportar);
+    contenedor.querySelector('#btn-exportar-respaldo').addEventListener('click', () => {
+      ejecutarExportarRespaldoConConfirmacion({ onCambio: renderTodo });
+    });
 
     const btnImportar = contenedor.querySelector('#btn-importar-respaldo-global');
     if (btnImportar) {

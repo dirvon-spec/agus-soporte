@@ -253,7 +253,7 @@ button {
 }
 
 /* ============================================================
-   Avisos globales (solo lectura)
+   Avisos globales (solo lectura, guardado fallido, modo seguro)
    ============================================================ */
 
 .aviso-banner {
@@ -266,6 +266,105 @@ button {
   background: var(--color-error-bg);
   color: var(--color-error);
   border-bottom: 1px solid var(--color-error);
+}
+
+/* W-08 (postmortem 2-sep-2026, el hallazgo más grave): alarma ROJA sólida
+   (no el fondo tenue de .aviso-solo-lectura — este caso es más grave: hay
+   trabajo capturado que se puede perder), pegada (sticky) al tope de la
+   pantalla en TODAS las pantallas mientras dure el fallo de persistencia, así
+   sigue visible aunque el gestor scrollee. Sin botón de cerrar a propósito
+   (desaparece sola cuando vuelve a guardar bien). */
+.alarma-guardado-fallido {
+  position: sticky;
+  top: 0;
+  z-index: 300;
+  background: var(--color-error);
+  color: #fff;
+  text-align: left;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espaciado-xs) var(--espaciado-sm);
+  font-weight: 600;
+}
+
+/* `display: flex` en la regla de arriba pisaría el `[hidden]{display:none}`
+   del user-agent (misma especificidad, esta hoja carga después) — el aviso
+   quedaría visible aunque `hidden` esté puesto. Flex solo cuando NO está
+   oculto; oculto explícito para que gane siempre. */
+.alarma-guardado-fallido:not([hidden]) {
+  display: flex;
+}
+.alarma-guardado-fallido[hidden] {
+  display: none;
+}
+
+.alarma-guardado-fallido-texto {
+  flex: 1;
+  min-width: 200px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alarma-guardado-fallido-boton {
+  background: #fff;
+  border-color: #fff;
+  color: var(--color-error);
+  flex-shrink: 0;
+}
+
+/* W-13: banner de modo seguro — advertencia (no rojo: los datos están
+   intactos, solo bloqueados hasta exportar o restaurar), también pegado al
+   tope, debajo de la alarma de guardado si ambas coincidieran. */
+.aviso-modo-seguro {
+  position: sticky;
+  top: 0;
+  z-index: 290;
+  background: var(--color-advertencia-bg);
+  color: var(--color-advertencia);
+  border-bottom: 1px solid var(--color-advertencia);
+  text-align: left;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espaciado-xs) var(--espaciado-sm);
+  font-weight: 600;
+}
+
+/* Mismo motivo que .alarma-guardado-fallido de arriba: display:flex directo
+   pisaría [hidden]. */
+.aviso-modo-seguro:not([hidden]) {
+  display: flex;
+}
+.aviso-modo-seguro[hidden] {
+  display: none;
+}
+
+.aviso-modo-seguro-texto {
+  flex: 1;
+  min-width: 200px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ============================================================
+   Deshabilitado evidente de controles de edición (solo-lectura / modo
+   seguro, W-13) — no todos tenían :disabled propio porque nunca antes se
+   deshabilitaban (los quick-taps de Clientes/Persona, el engrane de
+   Configuración, las tarjetas +Abonos/+Cargos de Persona).
+   ============================================================ */
+
+.btn-icono:disabled,
+.btn-dato-grande:disabled,
+button.fila-excel-monto:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.banner-modo-demo-accion:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 /* ============================================================
@@ -859,6 +958,14 @@ button {
   margin: -6px;
   touch-action: none;
   flex-shrink: 0;
+}
+
+.asa-arrastre-deshabilitada {
+  /* R-004 (auditoría): modo seguro / solo lectura — el gesto ya no procede
+     (ver activarArrastreOrden() en componentes.js), así que la afordancia
+     visual tampoco debe prometerlo. */
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .asa-arrastre-vacia {
@@ -2203,4 +2310,34 @@ button.fila-excel-monto:focus-visible {
   gap: var(--espaciado-sm);
   flex-wrap: wrap;
   margin-bottom: var(--espaciado-md);
+}
+
+/* ============================================================
+   PWA — aviso de actualización de versión (service worker)
+   ============================================================
+   Toast breve, no bloqueante: aparece justo antes del reload único que
+   dispara 'controllerchange' en js/app.js (guard anti-bucle). No es un
+   .aviso-banner de router.js a propósito — el reload lo saca de pantalla
+   solo en <1s, no necesita vivir en el shell de la app. */
+.sw-aviso-actualizacion {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--altura-nav) + var(--espaciado-md));
+  transform: translateX(-50%);
+  z-index: 400;
+  background: var(--color-texto);
+  color: var(--color-fondo);
+  padding: var(--espaciado-sm) var(--espaciado-lg);
+  border-radius: var(--radio-borde);
+  box-shadow: var(--sombra-elevada);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+  animation: sw-aviso-aparecer 0.15s ease-out;
+}
+
+@keyframes sw-aviso-aparecer {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }

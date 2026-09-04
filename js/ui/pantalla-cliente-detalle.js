@@ -18,6 +18,7 @@ import {
   formatearFechaCorta, formatearMesAnio, escapeHtml, bolitaHtml, abrirPanelRapido, Iconos,
   abrirSheet, cerrarSheet, mostrarToast, errorCampo, errorGeneral,
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer,
+  edicionBloqueada, motivoEdicionBloqueada,
 } from './componentes.js';
 
 const MICROCOPY_PERSONA = `
@@ -128,6 +129,8 @@ function lineasCelda(diaInfo) {
  */
 function listaMovimientosMesHtml(movimientos) {
   if (movimientos.length === 0) return estadoVacio('Sin movimientos este mes.');
+  const bloqueada = edicionBloqueada();
+  const disabledAttr = bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : '';
   return `<ul class="lista lista-movimientos-mes">
     ${movimientos.map((m) => {
       const esAjuste = m.tipo === 'AJUSTE';
@@ -141,8 +144,8 @@ function listaMovimientosMesHtml(movimientos) {
         <span class="${clase}">${signo} ${montoOGuion(Math.abs(m.monto_centavos))}</span>
         ${esAjuste ? '' : `
           <span class="fila-movimiento-acciones">
-            <button type="button" class="btn-icono btn-icono-chico" data-accion="corregir-movimiento" aria-label="Corregir monto">${Iconos.lapiz()}</button>
-            <button type="button" class="btn-icono btn-icono-chico" data-accion="eliminar-movimiento" aria-label="Eliminar movimiento">${Iconos.papelera()}</button>
+            <button type="button" class="btn-icono btn-icono-chico" data-accion="corregir-movimiento" aria-label="Corregir monto" ${disabledAttr}>${Iconos.lapiz()}</button>
+            <button type="button" class="btn-icono btn-icono-chico" data-accion="eliminar-movimiento" aria-label="Eliminar movimiento" ${disabledAttr}>${Iconos.papelera()}</button>
           </span>`}
       </li>`;
     }).join('')}
@@ -195,6 +198,12 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
     const celdasFinales = Math.ceil(totalCeldas / 7) * 7;
 
     const infoDiaSeleccionado = fechaSeleccionada ? dias.get(fechaSeleccionada) : null;
+    // W-13: la UI de edición (editar cliente, +Abonos/+Cargos, popover del
+    // día, ✎/🗑 de movimientos) debe quedar deshabilitada de forma evidente
+    // tanto en solo-lectura (otra pestaña) como en modo seguro — mismo
+    // patrón `disabled title="…"` que el resto de la app.
+    const bloqueada = edicionBloqueada();
+    const disabledAttr = bloqueada ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : '';
 
     contenedor.innerHTML = `
       <section class="pantalla pantalla-persona" data-pantalla="persona">
@@ -204,15 +213,15 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
           <a href="#/clientes" class="btn-icono" aria-label="Volver a Clientes">${Iconos.chevronIzquierda()}</a>
           ${bolitaHtml(categoria ? categoria.color : null, 'bolita-grande')}
           <h1 class="encabezado-persona-nombre">${escapeHtml(cliente.nombre)}</h1>
-          <button type="button" class="btn-icono" id="btn-editar-persona" aria-label="Editar cliente">${Iconos.lapiz()} Editar</button>
+          <button type="button" class="btn-icono" id="btn-editar-persona" aria-label="Editar cliente" ${disabledAttr}>${Iconos.lapiz()} Editar</button>
         </header>
 
         <div class="tarjeta-persona">
           <div class="tarjeta-persona-botones">
-            <button type="button" class="btn-dato-grande" id="btn-tarjeta-abono">
+            <button type="button" class="btn-dato-grande" id="btn-tarjeta-abono" ${disabledAttr}>
               <span>+Abonos</span><strong>${montoOGuion(abonosMesCentavos)}</strong>
             </button>
-            <button type="button" class="btn-dato-grande" id="btn-tarjeta-cargo">
+            <button type="button" class="btn-dato-grande" id="btn-tarjeta-cargo" ${disabledAttr}>
               <span>+Cargos</span><strong>${montoOGuion(cargosMesCentavos)}</strong>
             </button>
           </div>
@@ -288,8 +297,8 @@ export async function renderPantallaClienteDetalle(contenedor, { id }) {
               }
               <p class="popover-dia-saldo">Saldo a esa fecha: <strong>${montoOGuion(infoDiaSeleccionado ? infoDiaSeleccionado.saldoAcumuladoCentavos : null)}</strong></p>
               <div class="popover-dia-acciones">
-                <button type="button" class="btn btn-secundario" id="btn-popover-abono">+ Abono</button>
-                <button type="button" class="btn btn-secundario" id="btn-popover-cargo">+ Cargo</button>
+                <button type="button" class="btn btn-secundario" id="btn-popover-abono" ${disabledAttr}>+ Abono</button>
+                <button type="button" class="btn btn-secundario" id="btn-popover-cargo" ${disabledAttr}>+ Cargo</button>
               </div>
             </div>
           </div>` : ''}

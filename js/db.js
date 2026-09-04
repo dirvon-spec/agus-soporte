@@ -116,10 +116,11 @@ let nombreDbSnapshotActual = NOMBRE_DB_SNAPSHOT_DEMO;
 // — p.ej. un deploy revertido, o una copia cacheada vieja del JS abriendo una
 // base ya migrada por una versión más nueva), la app NO debe morir ni migrar
 // ni borrar nada a ciegas. Entra en MODO SEGURO: verificarEscritura() rechaza
-// toda escritura normal (CONFLICT), pero exportarRespaldo() y la API de
-// snapshots (listarSnapshots/obtenerBytesSnapshot/restaurarSnapshot) siguen
-// operando sobre los bytes tal cual, porque no dependen de entender el
-// esquema. Ver obtenerEstadoModoSeguro() (contrato para la UI) más abajo.
+// toda escritura normal (CONFLICT), pero exportarRespaldo(), importarRespaldo()
+// (R-002, auditoría independiente — ver su comentario) y la API de snapshots
+// (listarSnapshots/obtenerBytesSnapshot/restaurarSnapshot) siguen operando
+// sobre los bytes tal cual, porque no dependen de entender el esquema. Ver
+// obtenerEstadoModoSeguro() (contrato para la UI) más abajo.
 let modoSeguro = false;
 let motivoModoSeguro = null;
 
@@ -199,8 +200,8 @@ function normalizarError(e) {
  * export: un solo punto de control auditable). W-13: además del lock de
  * instancia única, ahora también rechaza CUALQUIER escritura mientras la app
  * está en MODO SEGURO (schema_version desconocido) — salvo que el propio
- * caller sea uno de los dos escapes explícitamente permitidos por el
- * contrato de modo seguro (hoy: restaurarSnapshot), que pasa
+ * caller sea uno de los escapes explícitamente permitidos por el contrato de
+ * modo seguro (hoy: restaurarSnapshot e importarRespaldo — R-002), que pasan
  * `permitirEnModoSeguro: true`.
  * @param {{permitirEnModoSeguro?: boolean}} [opciones]
  */
@@ -425,7 +426,24 @@ async function guardarArchivoEnIndexedDB(bytes) {
 // vez con el arrastre del calendario (ver CLAUDE.md, cicatriz #2).
 // ============================================================
 
+// R-001 (auditoría independiente, POSTMORTEM 2-sep-2026): cuántas próximas
+// aperturas del almacén de snapshots deben fallar artificialmente antes de
+// dejar pasar la real — mismo mecanismo que `_fallosForzadosRestantes` usa
+// para el store de la base activa (ver guardarArchivoEnIndexedDB() más
+// arriba), pero acá aplicado a `abrirIndexedDBSnapshot()`: permite a
+// dev-verify.js reproducir "el almacén de snapshots no se puede abrir"
+// (cuota, storage evictado, IndexedDB caído) sin depender de romper el
+// navegador de verdad. Ver `_forzarFallosDeSnapshotParaVerificacion()` más
+// abajo.
+let _fallosForzadosSnapshotRestantes = 0;
+
 function abrirIndexedDBSnapshot() {
+  if (_fallosForzadosSnapshotRestantes > 0) {
+    _fallosForzadosSnapshotRestantes -= 1;
+    return Promise.reject(
+      crearError('DB_ERROR', 'Fallo simulado al abrir el almacén de snapshots, para verificación (R-001).')
+    );
+  }
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(nombreDbSnapshotActual, 1);
     req.onupgradeneeded = () => {
@@ -467,7 +485,28 @@ async function obtenerEntradaSnapshot(clave) {
   }
 }
 
+// D-001/degradación asimétrica (orquestador, POSTMORTEM 2-sep-2026): a
+// diferencia de `_fallosForzadosSnapshotRestantes` (que falla la APERTURA
+// completa del almacén — lecturas Y escrituras por igual, pensado para los
+// tests de R-001 que solo necesitan simular "el store no abre"), este
+// contador SOLO afecta la ESCRITURA de una entrada nueva. Hace falta porque
+// restaurarSnapshot() necesita LEER el snapshot a restaurar (obtenerEntradaSnapshot)
+// ANTES de intentar la copia de seguridad previa (guardarSnapshotDestructivo,
+// que ESCRIBE) — con el contador compartido no hay forma de simular "la
+// lectura del snapshot a restaurar funciona, pero la escritura de la copia
+// previa falla" (que es exactamente el escenario que ejercita el contrato de
+// `permitirSinCopiaPrevia`) sin que la lectura previa también quede afectada.
+// Ver `_forzarFallosDeEscrituraSnapshotParaVerificacion()` más abajo.
+let _fallosForzadosEscrituraSnapshotRestantes = 0;
+
 async function guardarEntradaSnapshot(entrada) {
+  if (_fallosForzadosEscrituraSnapshotRestantes > 0) {
+    _fallosForzadosEscrituraSnapshotRestantes -= 1;
+    throw crearError(
+      'DB_ERROR',
+      'Fallo simulado al escribir en el almacén de snapshots, para verificación (degradación asimétrica).'
+    );
+  }
   const idb = await abrirIndexedDBSnapshot();
   try {
     await new Promise((resolve, reject) => {
@@ -537,6 +576,108 @@ async function guardarSnapshotDestructivo(motivo) {
   return guardarSnapshotInterno(motivo, CATEGORIA_SNAPSHOT_DESTRUCTIVA, MAX_SNAPSHOTS_DESTRUCTIVOS);
 }
 
+// ============================================================
+// R-001 (auditoría independiente, POSTMORTEM 2-sep-2026): contrato de estado
+// del SUBSISTEMA de snapshots, análogo a obtenerEstadoPersistencia() de la
+// sección de arriba. Antes de esta corrección, si el almacén de snapshots
+// (crear/rotar/abrir su propio store de IndexedDB) fallaba, la excepción
+// subía sin capturar desde respaldarSnapshotDiarioSiHaceFalta()/
+// guardarSnapshotAutoDiarioSiHaceFalta() (arranque normal, TODOS los días con
+// datos reales) y desde el snapshot pre-migración de migrarEsquemaSiHaceFalta()
+// (arranque tras un deploy con migración pendiente) hasta initDb(), que no
+// tenía try/catch — la app moría al arrancar con los datos intactos pero
+// inalcanzables (peor que el bug original: ni siquiera se podía exportar).
+//
+// Contrato nuevo: NINGÚN fallo del subsistema de snapshots puede impedir que
+// la app arranque. Los dos puntos de la vida de la app donde un snapshot se
+// toma sin gesto del usuario (diario y pre-migración) quedan envueltos en
+// try/catch — se registra el error, la app sigue arrancando SIN el snapshot
+// de ese momento, y el estado queda consultable acá para que la UI lo
+// muestre si tiene sentido (mismo patrón que obtenerEstadoPersistencia():
+// {ok, ultimoErrorIso, mensaje}; `ok:false` = el último intento de tomar un
+// snapshot automático falló, así que la red de seguridad de HOY podría faltar
+// aunque los datos del usuario estén perfectamente a salvo).
+// ============================================================
+
+const ESTADO_SNAPSHOTS_OK = Object.freeze({ ok: true, ultimoErrorIso: null, mensaje: null });
+let estadoSnapshots = ESTADO_SNAPSHOTS_OK;
+
+function marcarSnapshotsOk() {
+  estadoSnapshots = ESTADO_SNAPSHOTS_OK;
+}
+
+function marcarSnapshotsFallidos(error) {
+  estadoSnapshots = {
+    ok: false,
+    ultimoErrorIso: ahoraIso(),
+    mensaje: (error && error.message) || String(error),
+  };
+}
+
+/**
+ * @returns {{ok: boolean, ultimoErrorIso: string|null, mensaje: string|null}}
+ *   Estado ACTUAL del subsistema de snapshots automáticos (diario y
+ *   pre-migración — NO cubre los snapshots "destructiva", que si fallan
+ *   abortan la operación que los pidió en vez de degradarse: ver
+ *   guardarSnapshotDestructivo()). `ok:false` = el último intento automático
+ *   falló y no hay snapshot de ese momento — la app arrancó/migró igual, pero
+ *   sin esa red de seguridad puntual.
+ */
+export function obtenerEstadoSnapshots() {
+  return estadoSnapshots;
+}
+
+/**
+ * Decisión del orquestador (POST-MORTEM 2-sep-2026) — degradación ASIMÉTRICA
+ * de guardarSnapshotDestructivo(): reproducido en vivo, el combo "modo seguro
+ * + almacén de snapshots caído" dejaba al usuario sin ninguna salida, porque
+ * TODA operación destructiva abortaba si no podía tomar su copia previa —
+ * incluidas las dos únicas vías de RESCATE (importarRespaldo/restaurarSnapshot).
+ *
+ * Por qué la asimetría es correcta y no un relajamiento general: iniciarModoReal()
+ * es ELECTIVA (nadie la necesita para salir de un problema) y borra el 100% de
+ * los datos — ahí no hay ningún beneficio en dejarla avanzar sin red de
+ * seguridad, así que sigue llamando a guardarSnapshotDestructivo() DIRECTO
+ * (sin pasar por este wrapper): si el almacén está caído, espera. En cambio
+ * importarRespaldo() y restaurarSnapshot() son exactamente las herramientas
+ * que el usuario usa para RESCATARSE de un desastre — bloquearlas por un
+ * fallo del almacén de snapshots es sumarle un segundo desastre al primero.
+ *
+ * Contrato para ambas (documentado también en cada una de las dos funciones):
+ * aceptan `{ permitirSinCopiaPrevia = false }`.
+ *   - Copia previa OK: comportamiento idéntico a como era antes de esto
+ *     (además se marca estadoSnapshots.ok=true, igual que el resto de la capa).
+ *   - Copia previa falla y permitirSinCopiaPrevia !== true: la operación NO
+ *     se ejecuta — no se toca nada — y se lanza `{code:'SIN_COPIA_PREVIA'}`
+ *     con mensaje legible (código propio, no uno de los 4 de crearError(),
+ *     para que la UI pueda ofrecer explícitamente "continuar sin copia previa"
+ *     en vez de un error genérico sin salida).
+ *   - Copia previa falla y permitirSinCopiaPrevia === true: se registra el
+ *     fallo (marcarSnapshotsFallidos(), igual que
+ *     respaldarSnapshotDiarioSiHaceFalta()) y la operación CONTINÚA sin la
+ *     copia previa — el usuario ya decidió a sabiendas que el riesgo vale la
+ *     pena.
+ * @param {string} motivo pasado tal cual a guardarSnapshotDestructivo()
+ * @param {string} mensajeSinCopiaPrevia mensaje humano del error si corresponde abortar
+ * @param {{permitirSinCopiaPrevia?: boolean}} [opciones]
+ * @returns {Promise<void>}
+ */
+async function intentarSnapshotDestructivoDeRescate(motivo, mensajeSinCopiaPrevia, { permitirSinCopiaPrevia = false } = {}) {
+  try {
+    await guardarSnapshotDestructivo(motivo);
+    marcarSnapshotsOk();
+  } catch (e) {
+    if (permitirSinCopiaPrevia !== true) {
+      throw crearError('SIN_COPIA_PREVIA', mensajeSinCopiaPrevia, { original: String(e) });
+    }
+    marcarSnapshotsFallidos(e);
+    console.error(
+      `[db] fallo al tomar la copia de seguridad previa a "${motivo}" — se continúa SIN copia previa por permitirSinCopiaPrevia:true (ver obtenerEstadoSnapshots()).`,
+      e
+    );
+  }
+}
+
 /**
  * Snapshot diario automático (item 4 del incidente 2-sep-2026): la red que le
  * habría salvado los datos al usuario el 2-sep-2026. Barato — si ya existe un
@@ -555,6 +696,10 @@ async function guardarSnapshotAutoDiarioSiHaceFalta() {
  * Llamado desde initDb() al abrir una base EXISTENTE: solo dispara el
  * snapshot diario si la base tiene datos de negocio (clientes o movimientos
  * vivos) — una base vacía o recién creada no tiene nada que proteger todavía.
+ *
+ * R-001: NUNCA deja escapar un fallo del almacén de snapshots — se degrada
+ * (log + obtenerEstadoSnapshots().ok=false) y la app sigue arrancando
+ * normalmente, con lectura/escritura completas, solo sin snapshot de hoy.
  */
 async function respaldarSnapshotDiarioSiHaceFalta() {
   const filaConteo = unaFila(
@@ -562,7 +707,16 @@ async function respaldarSnapshotDiarioSiHaceFalta() {
             (SELECT COUNT(*) FROM movimientos WHERE deleted_at IS NULL) AS total`
   );
   if (!filaConteo || filaConteo.total === 0) return;
-  await guardarSnapshotAutoDiarioSiHaceFalta();
+  try {
+    await guardarSnapshotAutoDiarioSiHaceFalta();
+    marcarSnapshotsOk();
+  } catch (e) {
+    marcarSnapshotsFallidos(e);
+    console.error(
+      '[db] R-001: fallo al tomar/consultar el snapshot diario automático — la app sigue arrancando SIN snapshot de hoy (ver obtenerEstadoSnapshots()).',
+      e
+    );
+  }
 }
 
 // ============================================================
@@ -965,6 +1119,13 @@ function aplicarMigracionV2AV3(dbObjetivo) {
  *   `detalle.motivo === 'SCHEMA_VERSION_DESCONOCIDA'`, que el caller
  *   (abrirBaseExistente()/migrarOModoSeguro() más abajo) traduce en MODO
  *   SEGURO en vez de dejar la app muerta al arrancar.
+ * - R-001: el snapshot pre-migración de arriba es, igual que el snapshot
+ *   diario (ver respaldarSnapshotDiarioSiHaceFalta()), un segundo camino de
+ *   arranque que pasaba por el almacén de snapshots SIN try/catch — un
+ *   deploy con migración pendiente + el almacén de snapshots caído también
+ *   tumbaba la app. Se degrada igual: si el snapshot falla, se registra
+ *   (obtenerEstadoSnapshots().ok=false) y la migración sigue de todos modos
+ *   (mejor migrar sin snapshot previo que no arrancar nunca).
  */
 async function migrarEsquemaSiHaceFalta() {
   const versionInicial = obtenerMetaInterno('schema_version');
@@ -977,11 +1138,20 @@ async function migrarEsquemaSiHaceFalta() {
     );
   }
 
-  await guardarSnapshotInterno(
-    `pre-migracion v${versionInicial}->v${SCHEMA_VERSION}`,
-    CATEGORIA_SNAPSHOT_PRE_MIGRACION,
-    MAX_SNAPSHOTS_PRE_MIGRACION
-  );
+  try {
+    await guardarSnapshotInterno(
+      `pre-migracion v${versionInicial}->v${SCHEMA_VERSION}`,
+      CATEGORIA_SNAPSHOT_PRE_MIGRACION,
+      MAX_SNAPSHOTS_PRE_MIGRACION
+    );
+    marcarSnapshotsOk();
+  } catch (e) {
+    marcarSnapshotsFallidos(e);
+    console.error(
+      '[db] R-001: fallo al tomar el snapshot pre-migración — se continúa la migración SIN snapshot previo (ver obtenerEstadoSnapshots()).',
+      e
+    );
+  }
 
   ejecutarSQL('BEGIN;');
   try {
@@ -1117,9 +1287,65 @@ async function revisarReSembradoAntiCongelamiento() {
  * si el día de mañana alguien reintroduce por error un camino destructivo
  * acá, tiene que agregarlo también en este único lugar para que los tests de
  * la Sección 16/18/19 de dev-verify.js sigan siendo honestos.
+ *
+ * R-001 (b) — red de última instancia: `migrarOModoSeguro()` ya captura el
+ * único caso de fallo que sabía nombrar (schema_version desconocido, W-13) y
+ * `respaldarSnapshotDiarioSiHaceFalta()` ya no deja escapar fallos del
+ * almacén de snapshots (ver su comentario). Pero "abrir una base existente"
+ * puede fallar de OTRAS formas que hoy no tenemos previstas — p.ej. una
+ * migración que sí reconoce la versión pero cuyo SQL falla a mitad de camino
+ * por una causa distinta a columna duplicada (disco corrupto, límite del
+ * motor, etc.). Este try/catch es el techo: en vez de dejar morir el
+ * arranque, intenta degradar al MISMO modo seguro que W-13 — pero SOLO si
+ * `db` sigue siendo mínimamente legible (una consulta trivial funciona).
+ *
+ * Verificado en vivo (auditoría independiente): `new SQL.Database(bytes)` de
+ * initDb() NO lanza con bytes completamente ajenos/corruptos — sql.js los
+ * "abre" sin quejarse y recién falla («file is not a database») en la
+ * PRIMERA consulta real, que en este código es exactamente
+ * `obtenerMetaInterno('schema_version')` dentro de migrarEsquemaSiHaceFalta().
+ * Si se degradara a modo seguro con un `db` así, la promesa del modo seguro
+ * (exportarRespaldo()/importarRespaldo()/listar-restaurar snapshots "siguen
+ * operando sobre los bytes tal cual") sería falsa — y peor: la app seguiría
+ * arrancando hacia el router, que intentaría leer clientes/movimientos con el
+ * mismo `db` roto y terminaría en el error boundary GENÉRICO de router.js
+ * (sin ninguna acción de rescate), no en la pantalla fatal de app.js que sí
+ * las tiene. Por eso, antes de degradar, se prueba `SELECT 1` — si ESO
+ * también falla, `db` no sirve para nada y se relanza el error original para
+ * que llegue a initDb()/app.js tal cual: la pantalla fatal de app.js rescata
+ * sin depender de `db` (bytes crudos de IndexedDB + API de snapshots).
+ * Si la prueba pasa, exportarRespaldo()/importarRespaldo()/snapshots quedan
+ * operando; toda otra escritura queda bloqueada hasta restaurar una copia
+ * sana. Nunca debería dispararse en el uso normal — es deliberadamente
+ * inespecífico, para que ningún fallo nuevo e imprevisto de este tramo vuelva
+ * a dejar al usuario sin salida (la lección concreta del incidente 2-sep-2026).
  */
 async function abrirBaseExistente() {
-  const esquemaReconocido = await migrarOModoSeguro();
+  let esquemaReconocido;
+  try {
+    esquemaReconocido = await migrarOModoSeguro();
+  } catch (e) {
+    let dbMinimamenteLegible = false;
+    try {
+      unaFila('SELECT 1 AS ok');
+      dbMinimamenteLegible = true;
+    } catch (e2) {
+      dbMinimamenteLegible = false;
+    }
+    if (!dbMinimamenteLegible) {
+      // `db` no sirve ni para una consulta trivial: no hay nada que degradar
+      // "en modo seguro" de verdad — se relanza tal cual para que initDb()
+      // muera y app.js ofrezca el rescate que SÍ funciona sin `db`.
+      throw e;
+    }
+    modoSeguro = true;
+    motivoModoSeguro = `Error inesperado al abrir tu base guardada: ${normalizarError(e).message}`;
+    console.error(
+      '[db] R-001: fallo inesperado (no previsto) al abrir la base existente — arrancando en MODO SEGURO en vez de morir.',
+      e
+    );
+    return;
+  }
   if (esquemaReconocido) {
     await respaldarSnapshotDiarioSiHaceFalta();
   }
@@ -1253,14 +1479,61 @@ export async function obtenerUltimoRespaldo() {
 }
 
 /**
+ * R-001 (b), auditoría independiente, POSTMORTEM 2-sep-2026 — rescate de
+ * ÚLTIMO recurso: exporta los bytes CRUDOS de la base activa tal cual están
+ * guardados en IndexedDB, SIN pasar por sql.js. A diferencia de
+ * exportarRespaldo() (que necesita una instancia `db` ya abierta y válida —
+ * `db.export()`), esta función solo necesita `leerArchivoDeIndexedDB()`:
+ * funciona incluso cuando `new SQL.Database(bytesGuardados)` no pudo
+ * parsear el archivo dentro de initDb() — la base sigue intacta en disco, lo
+ * que falló fue abrirla en memoria. Pensada EXCLUSIVAMENTE para la pantalla
+ * de error fatal de app.js cuando initDb() no llegó a completar: no requiere
+ * `inicializado`, solo que initDb() haya alcanzado a fijar
+ * `nombreDbIndexedDbActual` — lo primero que hace, antes de cualquier punto
+ * de fallo posible (ver initDb()) — así que es seguro llamarla desde el
+ * catch de main() en cualquier escenario.
+ * @returns {Promise<{blob: Blob, nombreArchivo: string}|null>} null si no hay
+ *   nada guardado todavía (primer arranque que falló antes de sembrar, o
+ *   storage vacío).
+ */
+export async function exportarBytesCrudosSinAbrir() {
+  const bytes = await leerArchivoDeIndexedDB();
+  if (!bytes) return null;
+  const blob = new Blob([bytes], { type: 'application/x-sqlite3' });
+  const ahora = new Date();
+  const nombreArchivo = `rescate-${ahora.getFullYear()}${pad2(ahora.getMonth() + 1)}${pad2(ahora.getDate())}-${pad2(ahora.getHours())}${pad2(ahora.getMinutes())}.sqlite`;
+  return { blob, nombreArchivo };
+}
+
+/**
  * Valida ANTES de reemplazar nada: schema_version soportada (v1..v4; v1/v2/v3
  * se migran en memoria encadenando MIGRACION_V1_A_V2, aplicarMigracionV2AV3 y
  * MIGRACION_V3_A_V4 antes de aceptar — §2.8/§2.9/§2.11) + cero huérfanos.
+ *
+ * R-002 (auditoría independiente, POSTMORTEM 2-sep-2026): funciona en MODO
+ * SEGURO (`permitirEnModoSeguro: true`), igual que restaurarSnapshot(). Los
+ * snapshots viven en el MISMO origen que la base activa (misma amenaza que
+ * W-01/W-02/W-03 del postmortem) — si lo que llevó a modo seguro también
+ * afectó al almacén de snapshots, el `.sqlite` que el gestor exportó y
+ * verificó a mano por su cuenta puede ser el único activo confiable que le
+ * queda, y antes de esta corrección la app se lo rechazaba (CONFLICT) justo
+ * cuando más lo necesitaba. Es seguro habilitarlo: valida versión y huérfanos
+ * con el mismo rigor de siempre ANTES de tocar nada, y de todos modos toma su
+ * propio snapshot "destructiva" de la base activa (la que está en modo
+ * seguro) antes de reemplazarla — ver más abajo.
+ * Decisión del orquestador (POST-MORTEM 2-sep-2026): es una de las DOS vías
+ * de rescate a las que NO se les puede exigir un almacén de snapshots sano —
+ * ver el comentario de intentarSnapshotDestructivoDeRescate() más arriba para
+ * el razonamiento completo de la asimetría con iniciarModoReal().
  * @param {ArrayBuffer} arrayBuffer
+ * @param {{permitirSinCopiaPrevia?: boolean}} [opciones] default `{permitirSinCopiaPrevia: false}`
+ *   — si la copia de seguridad previa a importar falla, por default NO se
+ *   ejecuta el import (se lanza `{code:'SIN_COPIA_PREVIA'}` sin tocar nada);
+ *   con `permitirSinCopiaPrevia: true`, se registra el fallo y se importa igual.
  * @returns {Promise<void>}
  */
-export async function importarRespaldo(arrayBuffer) {
-  verificarEscritura();
+export async function importarRespaldo(arrayBuffer, { permitirSinCopiaPrevia = false } = {}) {
+  verificarEscritura({ permitirEnModoSeguro: true });
 
   let dbCandidata;
   try {
@@ -1313,7 +1586,27 @@ export async function importarRespaldo(arrayBuffer) {
   // (la que está a punto de ser reemplazada), tomado recién ahora que ya se
   // validó por completo el archivo candidato — así no se gasta un snapshot
   // en un import que de todos modos iba a ser rechazado.
-  await guardarSnapshotDestructivo('importarRespaldo (reemplazo de la base activa)');
+  //
+  // Degradación ASIMÉTRICA (decisión del orquestador, ver comentario de
+  // intentarSnapshotDestructivoDeRescate()): si esto falla y el caller no
+  // pasó `permitirSinCopiaPrevia:true`, se aborta ACÁ (nada se tocó todavía:
+  // `db` sigue siendo la base activa original) con `{code:'SIN_COPIA_PREVIA'}`
+  // — hay que cerrar `dbCandidata` (ya validado, pero no se va a usar) para no
+  // dejarlo huérfano en memoria.
+  try {
+    await intentarSnapshotDestructivoDeRescate(
+      'importarRespaldo (reemplazo de la base activa)',
+      'No se pudo guardar una copia de seguridad de tu base actual antes de importar; no se tocó nada. Si es una emergencia, podés reintentar permitiendo continuar sin esa copia previa.',
+      { permitirSinCopiaPrevia }
+    );
+  } catch (e) {
+    try {
+      dbCandidata.close();
+    } catch (e2) {
+      // best-effort: el candidato se descarta de todos modos
+    }
+    throw e;
+  }
 
   if (db) db.close();
   db = dbCandidata;
@@ -1418,8 +1711,12 @@ export async function iniciarModoReal() {
 //   importarRespaldo. Lanza NOT_FOUND si `clave` no existe, CONFLICT si la
 //   pestaña está en solo-lectura. A diferencia de toda otra escritura,
 //   restaurarSnapshot() SÍ funciona en MODO SEGURO (W-13, ver
-//   obtenerEstadoModoSeguro() más abajo) — es, junto con exportarRespaldo(),
-//   uno de los dos únicos escapes de ese estado.
+//   obtenerEstadoModoSeguro() más abajo) — es, junto con exportarRespaldo() e
+//   importarRespaldo() (R-002, auditoría independiente, POSTMORTEM
+//   2-sep-2026: los snapshots comparten origen con la base activa, así que si
+//   lo que llevó a modo seguro también los afectó, el .sqlite exportado a
+//   mano por el usuario puede ser el único activo confiable que queda — no
+//   tiene sentido bloqueárselo), uno de los TRES escapes de ese estado.
 // ============================================================
 
 /**
@@ -1454,9 +1751,10 @@ export async function obtenerBytesSnapshot(clave) {
  * guarda un snapshot del estado actual (por si el usuario se arrepiente de
  * restaurar) — ver contrato completo más arriba.
  *
- * W-13: es uno de los DOS escapes permitidos del modo seguro (el otro es
- * exportarRespaldo(), que nunca pasó por verificarEscritura()) — por eso es
- * la única función de escritura que llama a verificarEscritura() con
+ * W-13: es uno de los TRES escapes permitidos del modo seguro (los otros son
+ * exportarRespaldo(), que nunca pasó por verificarEscritura(), e
+ * importarRespaldo() — R-002). Es, junto con importarRespaldo(), una de las
+ * dos funciones de escritura que llaman a verificarEscritura() con
  * `permitirEnModoSeguro: true`. Tras el swap, se vuelve a intentar migrar
  * (migrarOModoSeguro()): si el snapshot restaurado ya está en un esquema
  * reconocido, la app sale del modo seguro sola; si el snapshot restaurado
@@ -1464,10 +1762,43 @@ export async function obtenerBytesSnapshot(clave) {
  * snapshots propios, pero es la misma cautela que el resto de esta capa),
  * la app se queda en modo seguro en vez de asumir que ahora sí es seguro
  * escribir.
+ *
+ * D-001 (auditoría independiente, POSTMORTEM 2-sep-2026 — HALLAZGO ALTO,
+ * corregido): sql.js NO lanza al construir `new SQL.Database(bytesBasura)`
+ * — recién falla en la PRIMERA consulta real (verificado en vivo por la
+ * auditoría; mismo hallazgo que ya documenta abrirBaseExistente() más
+ * arriba). Antes de esta corrección, esta función armaba `dbRestaurada` y
+ * reemplazaba `db` INMEDIATAMENTE sin probarla — la consulta real fallaba
+ * DESPUÉS del swap, dentro de migrarOModoSeguro() -> migrarEsquemaSiHaceFalta()
+ * -> obtenerMetaInterno('schema_version') -> unaFila() sobre el `db` global
+ * YA reemplazado por bytes basura. Ese fallo salía como una excepción CRUDA
+ * de sql.js sin `.code` (viola el contrato de CLAUDE.md de nunca dejar
+ * escapar un error sin {code}), y ese punto de falla está ANTES de donde
+ * migrarOModoSeguro() setea `modoSeguro=true` — así que
+ * obtenerEstadoModoSeguro().modoSeguro quedaba en `false`: la app se rompía
+ * SIN bandera y SIN ninguna guía de rescate, aunque los bytes buenos de la
+ * base activa anterior seguían intactos en IndexedDB (ya perdidos de `db` en
+ * memoria por el swap prematuro).
+ *
+ * Fix: se prueba el candidato con una consulta real (misma consulta trivial,
+ * 'SELECT 1', que usa abrirBaseExistente() para el mismo propósito) ANTES de
+ * comprometer el swap. Si falla, NO se toca `db` ni se persiste nada — se
+ * lanza VALIDATION_ERROR con mensaje claro y los datos actuales del usuario
+ * siguen intactos. Mismo motivo por el que la copia de seguridad de la base
+ * activa (antes tomada ANTES de validar) ahora se toma DESPUÉS de validar el
+ * candidato — igual que ya hacía importarRespaldo() — para no gastar un
+ * snapshot "destructiva" en una restauración que de todos modos iba a
+ * rechazarse.
  * @param {string} clave
+ * @param {{permitirSinCopiaPrevia?: boolean}} [opciones] default
+ *   `{permitirSinCopiaPrevia: false}` — ver intentarSnapshotDestructivoDeRescate()
+ *   más arriba: si la copia de seguridad previa a restaurar falla, por
+ *   default NO se ejecuta la restauración (se lanza `{code:'SIN_COPIA_PREVIA'}`
+ *   sin tocar nada); con `permitirSinCopiaPrevia: true`, se registra el
+ *   fallo y se restaura igual.
  * @returns {Promise<void>}
  */
-export async function restaurarSnapshot(clave) {
+export async function restaurarSnapshot(clave, { permitirSinCopiaPrevia = false } = {}) {
   verificarEscritura({ permitirEnModoSeguro: true });
 
   const entrada = await obtenerEntradaSnapshot(clave);
@@ -1475,17 +1806,47 @@ export async function restaurarSnapshot(clave) {
     throw crearError('NOT_FOUND', 'Snapshot no encontrado.', { clave });
   }
 
-  await guardarSnapshotDestructivo(`pre-restauracion (antes de restaurar snapshot del ${entrada.fechaLocal})`);
-
-  let dbRestaurada;
+  let dbCandidata;
   try {
-    dbRestaurada = new SQL.Database(entrada.bytes);
+    dbCandidata = new SQL.Database(entrada.bytes);
+    unaFila('SELECT 1 AS ok', [], dbCandidata); // D-001: fuerza la PRIMERA consulta real ANTES de comprometer el swap
   } catch (e) {
-    throw crearError('DB_ERROR', 'El snapshot guardado está dañado y no se pudo abrir.', { original: String(e), clave });
+    if (dbCandidata) {
+      try {
+        dbCandidata.close();
+      } catch (e2) {
+        // best-effort: el candidato es basura de todos modos, no hay nada más que hacer con él
+      }
+    }
+    throw crearError(
+      'VALIDATION_ERROR',
+      'Esa copia de seguridad está dañada y no se pudo restaurar; tus datos actuales siguen intactos.',
+      { original: String(e), clave }
+    );
+  }
+
+  // Degradación ASIMÉTRICA (decisión del orquestador, ver comentario de
+  // intentarSnapshotDestructivoDeRescate()): si esto falla y el caller no
+  // pasó `permitirSinCopiaPrevia:true`, se aborta ACÁ (nada se tocó todavía:
+  // `db` sigue siendo la base activa original) con `{code:'SIN_COPIA_PREVIA'}`
+  // — hay que cerrar `dbCandidata` (ya validado, pero no se va a usar).
+  try {
+    await intentarSnapshotDestructivoDeRescate(
+      `pre-restauracion (antes de restaurar snapshot del ${entrada.fechaLocal})`,
+      'No se pudo guardar una copia de seguridad de tu base actual antes de restaurar; no se tocó nada. Si es una emergencia, podés reintentar permitiendo continuar sin esa copia previa.',
+      { permitirSinCopiaPrevia }
+    );
+  } catch (e) {
+    try {
+      dbCandidata.close();
+    } catch (e2) {
+      // best-effort: el candidato se descarta de todos modos
+    }
+    throw e;
   }
 
   if (db) db.close();
-  db = dbRestaurada;
+  db = dbCandidata;
   ejecutarSQL('PRAGMA foreign_keys = ON;');
   await migrarOModoSeguro(); // el snapshot restaurado puede ser de un esquema anterior (ej. un snapshot 'pre-migracion'); deja la app funcional o, si no reconoce el esquema, en modo seguro (nunca a ciegas)
   await persistirInmediato();
@@ -3276,6 +3637,37 @@ export function _forzarFallosDeGuardadoParaVerificacion(cantidad) {
   _fallosForzadosRestantes = cantidad;
 }
 
+/**
+ * SOLO test (R-001): fuerza que las próximas `cantidad` aperturas del
+ * almacén de snapshots (`abrirIndexedDBSnapshot()`) fallen artificialmente
+ * — reproduce "el almacén de snapshots no se puede abrir" (cuota, storage
+ * evictado, IndexedDB caído) sin depender de romper el navegador de verdad.
+ * Pasar `Infinity` simula un fallo persistente; pasar `0` deja de forzar
+ * fallos.
+ * @param {number} cantidad
+ */
+export function _forzarFallosDeSnapshotParaVerificacion(cantidad) {
+  _fallosForzadosSnapshotRestantes = cantidad;
+}
+
+/**
+ * SOLO test (D-001/degradación asimétrica): fuerza que las próximas
+ * `cantidad` ESCRITURAS de una entrada de snapshot (`guardarEntradaSnapshot()`
+ * — usado por guardarSnapshotDestructivo()/guardarSnapshotInterno() para
+ * guardar la copia previa) fallen artificialmente, SIN afectar las lecturas
+ * (`obtenerEntradaSnapshot`/`listarEntradasSnapshot`). A diferencia de
+ * `_forzarFallosDeSnapshotParaVerificacion()` (que rompe la apertura completa
+ * del almacén, lecturas incluidas), este permite simular "restaurarSnapshot()
+ * puede LEER el snapshot que el usuario quiere restaurar, pero la copia de
+ * seguridad de la base ACTIVA previa a restaurar no se puede ESCRIBIR" — el
+ * escenario exacto que ejercita el contrato de `permitirSinCopiaPrevia`.
+ * Pasar `Infinity` simula un fallo persistente; pasar `0` deja de forzar fallos.
+ * @param {number} cantidad
+ */
+export function _forzarFallosDeEscrituraSnapshotParaVerificacion(cantidad) {
+  _fallosForzadosEscrituraSnapshotRestantes = cantidad;
+}
+
 /** SOLO test: true si hay un guardado pendiente de persistir (W-08). */
 export function _guardadoPendienteParaVerificacion() {
   return guardadoPendiente;
@@ -3347,6 +3739,20 @@ export async function _borrarTodosLosSnapshotsParaVerificacion() {
   for (const s of todos) {
     await borrarEntradaSnapshot(s.clave);
   }
+}
+
+/**
+ * SOLO test (D-001): inserta una entrada de snapshot ARBITRARIA directo en el
+ * almacén de snapshots de la base ACTIVA, sin pasar por
+ * guardarSnapshotDestructivo()/guardarSnapshotInterno() (que siempre exportan
+ * la base ACTIVA real vía exportarBytesDb()) — necesario para poder ejercitar
+ * restaurarSnapshot() contra un snapshot deliberadamente corrupto/basura sin
+ * depender de corromper la base activa de verdad para conseguirlo.
+ * @param {{clave:string, fechaIso:string, fechaLocal:string, motivo:string, categoria:string, bytes:Uint8Array}} entrada
+ * @returns {Promise<void>}
+ */
+export async function _guardarEntradaSnapshotCrudaParaVerificacion(entrada) {
+  await guardarEntradaSnapshot(entrada);
 }
 
 /**

@@ -19,8 +19,11 @@
 // renglón propio; ver almacenamientoPersistenteDenegado() en
 // ui/componentes.js) y en el texto de Ajustes/Respaldo de Global.
 
-import { estaSoloLectura } from './db.js';
-import { escapeHtml, cerrarSheet, Iconos } from './ui/componentes.js';
+import { estaSoloLectura, obtenerEstadoPersistencia, alFallarPersistencia, obtenerEstadoModoSeguro } from './db.js';
+import {
+  escapeHtml, cerrarSheet, Iconos, edicionBloqueada,
+  ejecutarExportarRespaldoConConfirmacion, abrirSheetModoSeguro,
+} from './ui/componentes.js';
 import { renderPantallaClientes, abrirSheetNuevoCliente } from './ui/pantalla-clientes.js';
 import { renderPantallaClienteDetalle, renderEstadoCuentaImprimible } from './ui/pantalla-cliente-detalle.js';
 import { renderPantallaGlobal } from './ui/pantalla-global.js';
@@ -58,13 +61,21 @@ function iconoTab(tab) {
 
 function armarShell() {
   elApp.innerHTML = `
+    <div id="alarma-guardado-fallido" class="aviso-banner alarma-guardado-fallido" hidden role="alert" aria-live="assertive">
+      <span class="alarma-guardado-fallido-texto">${Iconos.alerta()} No se pudo guardar en este dispositivo. Exportá un respaldo AHORA para no perder lo capturado.</span>
+      <button type="button" class="btn btn-primario btn-pequeno alarma-guardado-fallido-boton" id="btn-alarma-exportar-ahora">Exportar respaldo ahora</button>
+    </div>
+    <div id="aviso-modo-seguro" class="aviso-banner aviso-modo-seguro" hidden role="alert">
+      <span class="aviso-modo-seguro-texto">${Iconos.alerta()} Modo seguro: no se puede editar. Solo exportar o restaurar una copia.</span>
+      <button type="button" class="btn btn-secundario btn-pequeno" id="btn-aviso-modo-seguro">Ver opciones</button>
+    </div>
     <div id="aviso-solo-lectura" class="aviso-banner aviso-solo-lectura" hidden role="alert"></div>
     <main id="pantalla-contenido" class="pantalla-contenido" aria-live="polite"></main>
     <nav id="nav-inferior" class="nav-inferior" aria-label="Navegación principal">
       <a href="#/clientes" data-tab="clientes" class="nav-item">
         <span class="nav-icono" aria-hidden="true">${iconoTab('clientes')}</span><span class="nav-texto">Clientes</span>
       </a>
-      <button type="button" class="nav-item nav-item-central" id="btn-nav-nuevo-cliente" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
+      <button type="button" class="nav-item nav-item-central" id="btn-nav-nuevo-cliente" ${edicionBloqueada() ? 'disabled title="No se puede crear un cliente ahora"' : ''}>
         <span class="nav-icono-central" aria-hidden="true">${Iconos.mas()}</span><span class="nav-texto">Nuevo cliente</span>
       </button>
       <a href="#/global" data-tab="global" class="nav-item">
@@ -95,6 +106,39 @@ function armarShell() {
     aviso.hidden = false;
     aviso.textContent = 'La app ya está abierta en otra pestaña; cerrala para editar aquí. Esta pestaña quedó en modo solo lectura.';
   }
+
+  // W-13: modo seguro se resuelve UNA vez al abrir la base (initDb() ya
+  // corrió antes de iniciarRouter()) y solo cambia restaurando un snapshot o
+  // recargando — ambos casos recargan la página entera (ver
+  // abrirSheetModoSeguro()/renderCopiasAutomaticas()), así que un chequeo
+  // estático acá (sin suscripción) es suficiente y consistente con el resto
+  // del shell (mismo patrón que el aviso de solo-lectura de arriba).
+  const { modoSeguro } = obtenerEstadoModoSeguro();
+  if (modoSeguro) {
+    const avisoModoSeguro = document.getElementById('aviso-modo-seguro');
+    avisoModoSeguro.hidden = false;
+    avisoModoSeguro.querySelector('#btn-aviso-modo-seguro').addEventListener('click', () => abrirSheetModoSeguro());
+  }
+
+  // W-08 (el hallazgo más grave del postmortem 2-sep-2026): alarma ROJA,
+  // persistente e imposible de ignorar en TODAS las pantallas mientras la
+  // persistencia a IndexedDB esté fallando — ver obtenerEstadoPersistencia()/
+  // alFallarPersistencia() en db.js. armarShell() corre UNA sola vez por
+  // sesión (iniciarRouter), así que esta suscripción vive toda la vida de la
+  // pestaña y reacciona tanto a la falla como a la recuperación (la alarma
+  // desaparece sola cuando vuelve a guardar bien).
+  const elAlarmaPersistencia = document.getElementById('alarma-guardado-fallido');
+  function actualizarAlarmaPersistencia(estado) {
+    elAlarmaPersistencia.hidden = estado.ok;
+  }
+  actualizarAlarmaPersistencia(obtenerEstadoPersistencia());
+  alFallarPersistencia(actualizarAlarmaPersistencia);
+  document.getElementById('btn-alarma-exportar-ahora').addEventListener('click', () => {
+    // exportarRespaldo() serializa la base EN MEMORIA (exportarBytesDb()) —
+    // funciona aunque IndexedDB esté rechazando escrituras; es exactamente
+    // por eso que sigue siendo la vía de rescate correcta durante la alarma.
+    ejecutarExportarRespaldoConConfirmacion({});
+  });
 }
 
 function actualizarNavActiva(tabActivo) {

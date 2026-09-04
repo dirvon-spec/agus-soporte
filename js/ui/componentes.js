@@ -17,7 +17,8 @@ import {
   listarClientesAgrupados, registrarVisitaSinAbono, eliminarVisitaSinAbono,
   corregirMontoMovimiento, borrarMovimientoLogico, restaurarMovimiento,
   esModoDemo, iniciarModoReal, importarRespaldo, estaSoloLectura,
-  listarSnapshots, restaurarSnapshot,
+  listarSnapshots, restaurarSnapshot, exportarRespaldo, obtenerUltimoRespaldo,
+  obtenerEstadoModoSeguro,
 } from '../db.js';
 
 // ============================================================
@@ -32,6 +33,34 @@ export function escapeHtml(valor) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ============================================================
+// Estado de escritura bloqueada — postmortem 2-sep-2026, W-13: además de la
+// solo-lectura de una segunda pestaña (estaSoloLectura(), ya existente),
+// ahora la app puede arrancar en MODO SEGURO (schema_version desconocido,
+// ver obtenerEstadoModoSeguro() en db.js). En ambos casos verificarEscritura()
+// de db.js rechaza CUALQUIER escritura normal — la UI debe deshabilitar sus
+// controles de edición de forma evidente en los dos casos, con el MISMO
+// patrón visual (disabled + title). Excepción a propósito: exportarRespaldo()
+// y restaurarSnapshot() son los DOS escapes del modo seguro (contrato de
+// db.js) — sus botones NUNCA deben deshabilitarse por modoSeguro, solo por
+// estaSoloLectura() (conflicto real de pestañas), así que siguen usando
+// estaSoloLectura() a secas en sus propios call sites, no este helper.
+// ============================================================
+
+/** @returns {boolean} true si ninguna escritura normal (crear/editar/borrar)
+ * va a funcionar ahora mismo — ni por conflicto de pestaña ni por modo seguro. */
+export function edicionBloqueada() {
+  return estaSoloLectura() || obtenerEstadoModoSeguro().modoSeguro;
+}
+
+/** Texto humano de POR QUÉ está bloqueada la edición ahora — para title/aria-label. */
+export function motivoEdicionBloqueada() {
+  if (estaSoloLectura()) return 'Modo solo lectura: la app ya está abierta en otra pestaña.';
+  const { modoSeguro, motivo } = obtenerEstadoModoSeguro();
+  if (modoSeguro) return `Modo seguro: ${motivo || 'la base tiene una versión de esquema no reconocida.'} No se puede editar.`;
+  return '';
 }
 
 // ============================================================
@@ -578,6 +607,12 @@ export function activarArrastreOrden(listaEl, onSoltar) {
     const li = asa.closest('li[data-cliente-id]');
     if (!li) return;
     asa.addEventListener('pointerdown', (e) => {
+      // R-004 (auditoría): en modo solo lectura / modo seguro ninguna
+      // escritura normal funciona (actualizarOrdenClientes incluida) — el
+      // gesto de arrastre NI SIQUIERA se arma, mismo criterio que el resto
+      // de los controles de edición (edicionBloqueada()). Antes se podía
+      // completar el gesto entero y recién al soltar aparecía el error.
+      if (edicionBloqueada()) return;
       e.preventDefault();
       origenY = e.clientY;
       try { asa.setPointerCapture(e.pointerId); } catch { /* no soportado, seguimos igual */ }
@@ -1209,6 +1244,209 @@ export function abrirSheetSeleccionarCliente({ fecha, onGuardado }) {
 }
 
 // ============================================================
+// Respaldo honesto (W-18, postmortem 2-sep-2026): exportarRespaldo() (db.js)
+// sella meta.ultimo_respaldo y dispara la descarga ANTES de saber si el
+// archivo llegó a algún lado — en iOS un <a download> sobre un blob es
+// errático (puede abrir un visor, ir a una carpeta que no encuentra, o no
+// hacer nada). db.js está fuera de este alcance, así que no se puede posponer
+// ese sello — LIMITACIÓN DOCUMENTADA, a resolver en la capa de datos después
+// (idealmente exportarRespaldo() debería aceptar una confirmación separada
+// antes de escribir `ultimo_respaldo`). Mientras tanto, la UI agrega un paso
+// de confirmación explícita y un flag LOCAL (localStorage, por dispositivo)
+// para no confiar ciegamente en la fecha que db.js ya escribió: hasta que el
+// gestor confirme "Sí, ahí está", la fecha se muestra como "sin confirmar".
+// ============================================================
+
+const CLAVE_RESPALDO_PENDIENTE = 'agus-respaldo-pendiente-confirmacion';
+
+function marcarRespaldoPendiente(iso) {
+  try { localStorage.setItem(CLAVE_RESPALDO_PENDIENTE, iso); } catch (e) { /* sin persistencia local: la confirmación sigue funcionando en memoria para esta sesión */ }
+}
+function limpiarRespaldoPendiente() {
+  try { localStorage.removeItem(CLAVE_RESPALDO_PENDIENTE); } catch (e) { /* ver arriba */ }
+}
+function respaldoPendienteIso() {
+  try { return localStorage.getItem(CLAVE_RESPALDO_PENDIENTE); } catch (e) { return null; }
+}
+
+/**
+ * Cruza `obtenerUltimoRespaldo()` (db.js, la fecha que YA se escribió) contra
+ * el flag local de confirmación pendiente, para que la UI nunca muestre una
+ * fecha de respaldo como un hecho consumado si el gestor todavía no confirmó
+ * que el archivo apareció.
+ * @param {string|null} ultimoRespaldoIso desde obtenerUltimoRespaldo()
+ * @returns {{estado:'nunca'|'confirmado'|'sin_confirmar', iso:string|null}}
+ */
+export function estadoRespaldoUi(ultimoRespaldoIso) {
+  if (!ultimoRespaldoIso) return { estado: 'nunca', iso: null };
+  const pendiente = respaldoPendienteIso();
+  if (pendiente && pendiente === ultimoRespaldoIso) return { estado: 'sin_confirmar', iso: ultimoRespaldoIso };
+  return { estado: 'confirmado', iso: ultimoRespaldoIso };
+}
+
+// R-003 (auditoría): "Respaldar · último" es el indicador principal de "¿estoy
+// a salvo?" — no puede depender de que cada punto de entrada se acuerde de
+// pasar `onCambio`. El botón de la alarma roja del shell (router.js) llama
+// ejecutarExportarRespaldoConConfirmacion({}) SIN onCambio, así que la línea
+// de Clientes quedaba mintiendo por omisión ("último: nunca") justo después
+// del momento más crítico, hasta que el gestor navegaba y volvía. Suscripción
+// global: cualquier pantalla que muestre el estado de respaldo se registra
+// acá UNA vez al montarse y se repinta sola ante CUALQUIER cambio, sin
+// importar desde dónde se disparó (Clientes, Global, o la alarma).
+const suscriptoresCambioRespaldo = new Set();
+
+/**
+ * Registra `fn` para que se llame cada vez que el estado de respaldo cambia
+ * (exportado, confirmado, o "no aparece") desde CUALQUIER punto de entrada.
+ * `fn` debe ser idempotente y tolerar ejecutarse sin efecto si la pantalla
+ * que la registró ya no está visible (mismo patrón que renderLineaRespaldo()
+ * en pantalla-clientes.js: `if (!el) return`).
+ * @param {() => void|Promise<void>} fn
+ * @returns {() => void} des-suscribe
+ */
+export function suscribirseACambioRespaldo(fn) {
+  suscriptoresCambioRespaldo.add(fn);
+  return () => suscriptoresCambioRespaldo.delete(fn);
+}
+
+async function notificarCambioRespaldo() {
+  for (const fn of suscriptoresCambioRespaldo) {
+    try {
+      await fn();
+    } catch (e) {
+      console.error('[ui] listener de cambio de estado de respaldo falló:', e);
+    }
+  }
+}
+
+/** Corre el `onCambio` propio del llamador (si lo pasó) Y siempre notifica a
+ * la suscripción global — así ningún llamador puede omitir el refresco. */
+async function dispararCambioRespaldo(onCambio) {
+  if (onCambio) await onCambio();
+  await notificarCambioRespaldo();
+}
+
+function descargarBlob(blob, nombreArchivo) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombreArchivo;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Flujo COMPLETO de "Exportar respaldo" con confirmación honesta (W-18):
+ * exporta, dispara la descarga, marca el respaldo como pendiente de
+ * confirmar, y abre el sheet que pregunta explícitamente si el archivo
+ * apareció. Reemplaza al patrón viejo (exportar → toast "Respaldo
+ * exportado ✓" inmediato) en los tres lugares que ofrecen exportar
+ * (Clientes, Global, alarma de guardado fallido).
+ * @param {{onCambio?: () => void|Promise<void>}} [cfg] se llama tras cada
+ *   cambio de estado (export disparado, confirmado, o "no aparece") para que
+ *   la pantalla refresque su línea de "Respaldar · último" — ADEMÁS (R-003)
+ *   de eso, `suscribirseACambioRespaldo()` se notifica siempre, pase o no
+ *   `onCambio`, así que ninguna pantalla que esté mostrando el estado queda
+ *   desactualizada sin importar desde dónde se disparó el export.
+ */
+export async function ejecutarExportarRespaldoConConfirmacion({ onCambio } = {}) {
+  let blob, nombreArchivo;
+  try {
+    ({ blob, nombreArchivo } = await exportarRespaldo());
+  } catch (e) {
+    mostrarToast(e.message || 'No se pudo exportar el respaldo.', 'error');
+    return;
+  }
+  descargarBlob(blob, nombreArchivo);
+  const iso = await obtenerUltimoRespaldo();
+  marcarRespaldoPendiente(iso);
+  await dispararCambioRespaldo(onCambio);
+  abrirSheetConfirmarRespaldo({ blob, nombreArchivo, onCambio });
+}
+
+/**
+ * Sheet de confirmación honesta de un respaldo (W-18). `blob`/`nombreArchivo`
+ * son opcionales: si están (recién exportado en esta misma sesión) Y el
+ * navegador soporta Web Share con ese archivo, "No aparece" ofrece Compartir
+ * el archivo directamente. R-005 (auditoría): esa condición sola dejaba al
+ * gestor sin ninguna acción real cuando había blob pero NO había Web Share
+ * (ej. navegador de escritorio) — "Exportar un respaldo nuevo" ahora aparece
+ * siempre que Compartir NO esté disponible (con blob o sin él, ej. reabierto
+ * más tarde para confirmar un pendiente de una sesión anterior — la fecha
+ * "sin confirmar" de la línea de respaldo), así SIEMPRE hay al menos una
+ * acción real disponible en este paso.
+ * @param {{blob?: Blob, nombreArchivo: string, onCambio?: () => void|Promise<void>}} cfg
+ */
+export function abrirSheetConfirmarRespaldo({ blob, nombreArchivo, onCambio }) {
+  abrirSheet((host) => {
+    function renderPaso1() {
+      host.innerHTML = `
+        <p>Revisá que el archivo <strong>${escapeHtml(nombreArchivo)}</strong> esté en tu app
+          Archivos (o donde tu dispositivo guarda descargas).</p>
+        <p><strong>¿Lo encontraste?</strong></p>
+        <div class="acciones-formulario acciones-formulario-columna">
+          <button type="button" class="btn btn-primario btn-ancho" id="btn-respaldo-si">Sí, ahí está</button>
+          <button type="button" class="btn btn-secundario btn-ancho" id="btn-respaldo-no">No aparece</button>
+        </div>`;
+      host.querySelector('#btn-respaldo-si').addEventListener('click', async () => {
+        limpiarRespaldoPendiente();
+        cerrarSheet();
+        mostrarToast('Respaldo confirmado.', 'exito');
+        await dispararCambioRespaldo(onCambio);
+      });
+      host.querySelector('#btn-respaldo-no').addEventListener('click', () => renderPaso2());
+    }
+
+    function puedeCompartirArchivo() {
+      if (!blob || typeof navigator === 'undefined' || !navigator.share || !navigator.canShare) return false;
+      try {
+        return navigator.canShare({ files: [new File([blob], nombreArchivo, { type: 'application/x-sqlite3' })] });
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function renderPaso2() {
+      const compartirDisponible = puedeCompartirArchivo();
+      host.innerHTML = `
+        <div class="aviso-modo-real">
+          <p>El respaldo <strong>sigue SIN confirmar</strong> — vas a seguir viendo el aviso hasta que
+            confirmes que tenés el archivo a salvo.</p>
+        </div>
+        <p>Probá con el botón <strong>Compartir</strong> de tu navegador para mandarlo por WhatsApp, a
+          Drive, o guardarlo directamente en tu app Archivos.</p>
+        <div class="acciones-formulario acciones-formulario-columna">
+          ${compartirDisponible ? `<button type="button" class="btn btn-primario btn-ancho" id="btn-respaldo-compartir">Compartir archivo</button>` : ''}
+          ${!compartirDisponible ? `<button type="button" class="btn btn-primario btn-ancho" id="btn-respaldo-reexportar">Exportar un respaldo nuevo</button>` : ''}
+          <button type="button" class="btn btn-secundario btn-ancho" id="btn-respaldo-volver">Ya lo encontré</button>
+        </div>`;
+      const btnCompartir = host.querySelector('#btn-respaldo-compartir');
+      if (btnCompartir) {
+        btnCompartir.addEventListener('click', async () => {
+          try {
+            await navigator.share({ files: [new File([blob], nombreArchivo, { type: 'application/x-sqlite3' })], title: nombreArchivo });
+          } catch (e) {
+            // Cancelado por el usuario u otro rechazo de la API nativa — no es un fallo nuestro, sin toast.
+          }
+        });
+      }
+      const btnReexportar = host.querySelector('#btn-respaldo-reexportar');
+      if (btnReexportar) {
+        btnReexportar.addEventListener('click', () => {
+          cerrarSheet();
+          ejecutarExportarRespaldoConConfirmacion({ onCambio });
+        });
+      }
+      host.querySelector('#btn-respaldo-volver').addEventListener('click', () => renderPaso1());
+    }
+
+    renderPaso1();
+  }, { titulo: 'Confirmar respaldo' });
+}
+
+// ============================================================
 // Emergencia de producción: un gestor perdió sus datos reales (re-sembrado
 // automático de la demo los borró). Tiene un .sqlite de respaldo pero no
 // encontraba cómo importarlo — estaba enterrado en un panel plegado. Este
@@ -1225,20 +1463,123 @@ export function abrirSheetSeleccionarCliente({ fecha, onGuardado }) {
 // real de que el archivo sea un .sqlite válido de esta app sigue viviendo
 // enteramente en `importarRespaldo()` (db.js), que rechaza archivos
 // inválidos con VALIDATION_ERROR y NUNCA toca la base activa.
+//
+// W-11 (postmortem): antes de reemplazar nada, se muestra qué archivo se
+// eligió (nombre/tamaño/fecha de modificación) en un sheet propio en vez de
+// un `window.confirm` genérico. LIMITACIÓN DOCUMENTADA: no se muestra el
+// CONTENIDO del .sqlite (cuántos clientes/movimientos trae, fecha de su
+// último movimiento) — mostrar eso exigiría que la UI abra y consulte el
+// archivo con sql.js, lo que violaría la regla firme "la UI jamás ejecuta
+// SQL, db.js es la única puerta a los datos" (CLAUDE.md). Pendiente para la
+// capa de datos: una función tipo `previsualizarRespaldo(arrayBuffer)` en
+// db.js que devuelva esos conteos sin reemplazar nada, para que esta
+// confirmación pueda comparar "archivo vs. base actual" (postmortem §6, P0-7).
+// ============================================================
+
+function formatearTamanioArchivo(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Sheet de confirmación de importación (W-11): muestra la metadata del
+ * ARCHIVO elegido (no su contenido, ver limitación arriba) y advierte
+ * explícitamente que se reemplazan los datos actuales y que se guarda una
+ * copia automática antes (cierto: `importarRespaldo()` en db.js llama
+ * `guardarSnapshotDestructivo()` antes de tocar la base activa).
+ * @param {{archivo: File, onConfirmar: () => void|Promise<void>}} cfg
+ */
+export function abrirSheetConfirmarImportacion({ archivo, onConfirmar }) {
+  abrirSheet((host) => {
+    const fechaTexto = archivo.lastModified
+      ? formatearFechaHoraInstante(new Date(archivo.lastModified).toISOString())
+      : 'desconocida';
+    host.innerHTML = `
+      <div class="aviso-modo-real">
+        <p><strong>Esto reemplaza TODOS tus datos actuales</strong> (clientes, movimientos, categorías y
+          conceptos) por los del archivo elegido.</p>
+        <p>Se guardará una copia automática del estado actual antes de continuar — restaurable después
+          desde Ajustes/Respaldo si te arrepentís.</p>
+      </div>
+      <p><strong>Archivo:</strong> ${escapeHtml(archivo.name)}</p>
+      <p><strong>Tamaño:</strong> ${escapeHtml(formatearTamanioArchivo(archivo.size))}</p>
+      <p><strong>Modificado:</strong> ${escapeHtml(fechaTexto)}</p>
+      <p class="texto-secundario">No se puede mostrar acá qué clientes o movimientos trae — el archivo se
+        valida recién al importarlo, y se rechaza sin tocar tus datos si no es un respaldo válido.</p>
+      <div class="acciones-formulario acciones-formulario-columna">
+        <button type="button" class="btn btn-peligro btn-ancho" id="btn-confirmar-importar">Reemplazar mis datos con este archivo</button>
+        <button type="button" class="btn btn-secundario btn-ancho" id="btn-cancelar-importar">Cancelar</button>
+      </div>
+    `;
+    host.querySelector('#btn-cancelar-importar').addEventListener('click', () => cerrarSheet());
+    const btnConfirmar = host.querySelector('#btn-confirmar-importar');
+    btnConfirmar.addEventListener('click', async () => {
+      btnConfirmar.disabled = true;
+      await onConfirmar();
+    });
+  }, { titulo: 'Confirmar importación' });
+}
+
+// ============================================================
+// SIN_COPIA_PREVIA (contrato de importarRespaldo()/restaurarSnapshot() en
+// db.js): antes de reemplazar la base activa, ambas funciones intentan
+// guardar una copia de seguridad del estado actual. Si esa copia falla, YA
+// NO abortan a ciegas dejando al gestor sin salida (auditoría: modo seguro +
+// almacén de copias caído = sin salida) — en cambio lanzan un error con
+// `code === 'SIN_COPIA_PREVIA'` SIN haber tocado nada, y solo reintentan sin
+// copia si se les pasa `{ permitirSinCopiaPrevia: true }`. Este sheet es la
+// SEGUNDA confirmación, distinta de la primera (que ya advierte que se
+// reemplazan los datos), y es la única vía de la UI para pasar ese flag —
+// compartida por dispararImportarRespaldo() y renderCopiasAutomaticas() (esta
+// última usada tanto en Ajustes/Respaldo de Global como en el sheet de Modo
+// seguro, ver panelCopiasAutomaticasHtml()).
 // ============================================================
 
 /**
+ * @param {{onContinuar: () => void|Promise<void>}} cfg
+ */
+function abrirSheetConfirmarSinCopiaPrevia({ onContinuar }) {
+  abrirSheet((host) => {
+    host.innerHTML = `
+      <div class="aviso-modo-real">
+        <p><strong>No se pudo guardar una copia de seguridad de tus datos actuales</strong> antes de este paso.</p>
+        <p>Si algo sale mal ahora, <strong>no habrá vuelta atrás</strong>.</p>
+        <p>¿Continuar de todas formas?</p>
+      </div>
+      <div class="acciones-formulario acciones-formulario-columna">
+        <button type="button" class="btn btn-peligro btn-ancho" id="btn-continuar-sin-copia">Continuar sin copia</button>
+        <button type="button" class="btn btn-secundario btn-ancho" id="btn-cancelar-sin-copia">Cancelar</button>
+      </div>
+    `;
+    host.querySelector('#btn-cancelar-sin-copia').addEventListener('click', () => cerrarSheet());
+    const btnContinuar = host.querySelector('#btn-continuar-sin-copia');
+    btnContinuar.addEventListener('click', async () => {
+      btnContinuar.disabled = true;
+      await onContinuar();
+    });
+  }, { titulo: 'Sin copia de seguridad' });
+}
+
+/**
  * Dispara el selector de archivo nativo y corre el flujo completo de
- * importación de respaldo: confirmación destructiva → importarRespaldo() →
- * toast + recarga en éxito, o mensaje de error claro en fallo (sin tocar la
- * base activa). El error se muestra inline en `mostrarErrorEn` si se pasa un
- * elemento (ej. el slot de error de Global); si no, como toast (banner y
- * Clientes, que no tienen un slot inline dedicado).
+ * importación de respaldo: selector → sheet de confirmación informada (W-11)
+ * → importarRespaldo() → toast + recarga en éxito, o mensaje de error claro
+ * en fallo (sin tocar la base activa). El error se muestra inline en
+ * `mostrarErrorEn` si se pasa un elemento (ej. el slot de error de Global);
+ * si no, como toast (banner y Clientes, que no tienen un slot inline
+ * dedicado).
+ *
+ * Si `importarRespaldo()` no pudo guardar la copia de seguridad previa
+ * (`code === 'SIN_COPIA_PREVIA'`), se ofrece una SEGUNDA confirmación
+ * explícita (abrirSheetConfirmarSinCopiaPrevia) antes de reintentar con
+ * `{ permitirSinCopiaPrevia: true }` — el archivo elegido se mantiene en el
+ * cierre (closure), no hace falta volver a buscarlo.
  * @param {{mostrarErrorEn?: HTMLElement}} [opciones]
  */
 export function dispararImportarRespaldo({ mostrarErrorEn } = {}) {
-  if (estaSoloLectura()) {
-    mostrarToast('Modo solo lectura: no se puede importar un respaldo.', 'error');
+  if (edicionBloqueada()) {
+    mostrarToast(motivoEdicionBloqueada() || 'No se puede importar un respaldo ahora.', 'error');
     return;
   }
   const input = document.createElement('input');
@@ -1252,19 +1593,43 @@ export function dispararImportarRespaldo({ mostrarErrorEn } = {}) {
     input.remove();
     if (!archivo) return;
 
-    const confirmado = window.confirm('Esto reemplaza todos los datos actuales por los del archivo. ¿Continuar?');
-    if (!confirmado) return;
-
-    try {
-      const arrayBuffer = await archivo.arrayBuffer();
-      await importarRespaldo(arrayBuffer);
-      mostrarToast('Respaldo importado. Recargando…', 'exito');
-      setTimeout(() => window.location.reload(), 800);
-    } catch (e) {
+    function fallarImportacion(e) {
       const mensaje = e.message || 'El archivo no es un respaldo válido de esta app.';
+      cerrarSheet();
       if (mostrarErrorEn) mostrarErrorEn.innerHTML = errorGeneral(mensaje);
       else mostrarToast(mensaje, 'error');
     }
+
+    abrirSheetConfirmarImportacion({
+      archivo,
+      onConfirmar: async () => {
+        try {
+          const arrayBuffer = await archivo.arrayBuffer();
+          await importarRespaldo(arrayBuffer);
+          cerrarSheet();
+          mostrarToast('Respaldo importado. Recargando…', 'exito');
+          setTimeout(() => window.location.reload(), 800);
+        } catch (e) {
+          if (e.code === 'SIN_COPIA_PREVIA') {
+            abrirSheetConfirmarSinCopiaPrevia({
+              onContinuar: async () => {
+                try {
+                  const arrayBuffer = await archivo.arrayBuffer();
+                  await importarRespaldo(arrayBuffer, { permitirSinCopiaPrevia: true });
+                  cerrarSheet();
+                  mostrarToast('Respaldo importado sin copia de seguridad previa. Recargando…', 'exito');
+                  setTimeout(() => window.location.reload(), 800);
+                } catch (e2) {
+                  fallarImportacion(e2);
+                }
+              },
+            });
+            return;
+          }
+          fallarImportacion(e);
+        }
+      },
+    });
   });
 
   input.click();
@@ -1289,12 +1654,14 @@ export function dispararImportarRespaldo({ mostrarErrorEn } = {}) {
  */
 export function bannerModoDemoHtml() {
   if (!esModoDemo()) return '';
+  const bloqueada = edicionBloqueada();
+  const tituloBloqueo = bloqueada ? ` title="${escapeHtml(motivoEdicionBloqueada())}"` : '';
   return `
     <div class="banner-modo-demo-compacto" role="note">
       <span class="banner-modo-demo-texto">${Iconos.alerta()} Estás viendo datos de EJEMPLO</span>
-      <button type="button" class="banner-modo-demo-accion" id="btn-banner-modo-demo">Empezar de cero</button>
+      <button type="button" class="banner-modo-demo-accion" id="btn-banner-modo-demo" ${bloqueada ? 'disabled' : ''}${tituloBloqueo}>Empezar de cero</button>
       <span class="banner-modo-demo-separador" aria-hidden="true">·</span>
-      <button type="button" class="banner-modo-demo-accion banner-modo-demo-accion-importar" id="btn-banner-importar-respaldo">Importar respaldo</button>
+      <button type="button" class="banner-modo-demo-accion banner-modo-demo-accion-importar" id="btn-banner-importar-respaldo" ${bloqueada ? 'disabled' : ''}${tituloBloqueo}>Importar respaldo</button>
     </div>`;
 }
 
@@ -1469,11 +1836,80 @@ export async function renderCopiasAutomaticas(contenedor) {
         mostrarToast('Copia restaurada. Recargando…', 'exito');
         setTimeout(() => window.location.reload(), 800);
       } catch (e) {
+        if (e.code === 'SIN_COPIA_PREVIA') {
+          // abrirSheet() reemplaza cualquier sheet abierto (uno-a-la-vez): si
+          // este panel vive dentro del sheet de Modo seguro, esa segunda
+          // confirmación lo cierra al abrirse — si el gestor cancela, puede
+          // reabrir Modo seguro desde el aviso persistente (router.js). Si
+          // vive en Global (no es un sheet), la pantalla de abajo no se ve
+          // afectada. En ambos casos el botón vuelve a quedar usable si se
+          // cancela, sin haber tocado ningún dato.
+          btn.disabled = false;
+          abrirSheetConfirmarSinCopiaPrevia({
+            onContinuar: async () => {
+              btn.disabled = true;
+              try {
+                await restaurarSnapshot(clave, { permitirSinCopiaPrevia: true });
+                cerrarSheet();
+                mostrarToast('Copia restaurada sin copia de seguridad previa. Recargando…', 'exito');
+                setTimeout(() => window.location.reload(), 800);
+              } catch (e2) {
+                cerrarSheet();
+                mostrarToast(e2.message || 'No se pudo restaurar la copia.', 'error');
+                btn.disabled = false;
+              }
+            },
+          });
+          return;
+        }
         mostrarToast(e.message || 'No se pudo restaurar la copia.', 'error');
         btn.disabled = false;
       }
     });
   });
+}
+
+// ============================================================
+// Modo seguro (W-13, postmortem 2-sep-2026): la base tiene un schema_version
+// que este código no reconoce (JS viejo cacheado abriendo una base ya
+// migrada, o un deploy revertido). db.js entra en un estado donde NINGUNA
+// escritura normal pasa — solo exportarRespaldo() y restaurarSnapshot() son
+// los dos escapes permitidos (contrato de obtenerEstadoModoSeguro()/
+// verificarEscritura() en db.js). Este sheet es DELIBERADAMENTE autónomo: no
+// usa listarClientesAgrupados/obtenerCalendarioMovimientos ni ninguna otra
+// consulta que asuma columnas del esquema v4 — en un esquema realmente
+// desconocido esas consultas podrían fallar. Solo llama a las tres funciones
+// que el contrato de modo seguro promete que SIEMPRE funcionan: exportar,
+// listar snapshots, restaurar snapshot.
+// ============================================================
+
+/**
+ * Sheet "Modo seguro": explica el motivo, dice explícitamente que no se
+ * puede editar, y ofrece las DOS únicas salidas (exportar / restaurar una
+ * copia automática) — reutiliza panelCopiasAutomaticasHtml()/
+ * renderCopiasAutomaticas() tal cual (mismo componente que Ajustes/Respaldo
+ * de Global).
+ */
+export function abrirSheetModoSeguro() {
+  const { motivo } = obtenerEstadoModoSeguro();
+  abrirSheet((host) => {
+    host.innerHTML = `
+      <div class="aviso-modo-real">
+        <p><strong>Esta app abrió en modo seguro</strong> y NO permite editar — así se evita dañar datos
+          con una versión de esquema que este código no reconoce.</p>
+        <p>${escapeHtml(motivo || 'La base tiene una versión de esquema no reconocida.')}</p>
+        <p>Tenés dos salidas: exportar un respaldo del estado actual, o restaurar una copia automática
+          anterior (si el motivo fue un deploy revertido, una copia de antes suele estar en un esquema
+          que sí se reconoce).</p>
+      </div>
+      <button type="button" class="btn btn-primario btn-ancho" id="btn-modo-seguro-exportar">Exportar respaldo</button>
+      ${panelCopiasAutomaticasHtml()}
+    `;
+    host.querySelector('#btn-modo-seguro-exportar').addEventListener('click', () => {
+      ejecutarExportarRespaldoConConfirmacion({});
+    });
+    renderCopiasAutomaticas(host);
+  }, { titulo: 'Modo seguro' });
 }
 
 // ============================================================

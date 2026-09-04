@@ -15,7 +15,7 @@
 import {
   listarClientesAgrupados, listarClientesArchivados, restaurarCliente,
   listarCategorias, crearCliente, crearCategoria, actualizarOrdenClientes, estaSoloLectura,
-  obtenerUltimoRespaldo, exportarRespaldo,
+  obtenerUltimoRespaldo,
 } from '../db.js';
 import { formatearCentavos } from '../utils/money.js';
 import { hoy, sumarDias, esFechaIsoValida } from '../utils/date.js';
@@ -27,6 +27,8 @@ import {
   bannerModoDemoHtml, wireBannerModoDemo, dispararImportarRespaldo,
   iconoTemaHtml, alternarTema, temaActivo, wireCambioTemaSistema,
   calcularBalanceGeneral, almacenamientoPersistenteDenegado,
+  edicionBloqueada, motivoEdicionBloqueada,
+  estadoRespaldoUi, ejecutarExportarRespaldoConConfirmacion, suscribirseACambioRespaldo,
 } from './componentes.js';
 
 // §2.13: se retira la notación compacta (A-201 queda resuelto de otra forma)
@@ -34,6 +36,12 @@ import {
 // formateado es largo, baja un paso de tamaño (clase .v-chico, ver
 // styles.css) ANTES de invadir la columna del nombre, que conserva su
 // min-width + elipsis propios.
+// R-003 (auditoría): des-suscripción de la ronda anterior de esta pantalla —
+// no hay hook de "desmontar pantalla" en este router (ver router.js), así
+// que cada renderPantallaClientes() reemplaza la suscripción viva en vez de
+// apilar una nueva cada vez que el gestor vuelve a la pestaña Clientes.
+let desuscribirCambioRespaldo = null;
+
 const UMBRAL_LARGO_MONTO = 8; // caracteres — ej. "$1,834,560" (10) dispara .v-chico
 
 function claseLongitudMonto(texto) {
@@ -109,18 +117,23 @@ function fechaLocalDeIso(iso) {
  * semáforo posible porque nadie "visitó" un día que no pasó; si YA hay un
  * abono registrado a esa fecha futura — un adelanto — el estado real es
  * 'ABONO', no 'FUTURO', así que ese caso se pinta normal más arriba). */
-function celdaAbonoDiaHtml(c) {
+/** W-13: en modo seguro (o solo-lectura de otra pestaña) ninguna captura
+ * normal funciona — las celdas de captura rápida se deshabilitan de forma
+ * evidente (mismo patrón `disabled title="…"` que el resto de la app) en vez
+ * de dejar que el gestor toque, escriba un monto, y recién ahí se entere. */
+function celdaAbonoDiaHtml(c, bloqueada, tituloBloqueo) {
+  const disabledAttr = bloqueada ? `disabled title="${tituloBloqueo}"` : '';
   if (c.estado_dia === 'ABONO') {
     const texto = montoOGuion(c.abonos_mes_centavos);
-    return `<button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" title="${escapeHtml(texto)}">${montoSpan(texto)}</button>`;
+    return `<button type="button" class="fila-excel-monto monto-positivo" data-accion="abono" ${bloqueada ? disabledAttr : `title="${escapeHtml(texto)}"`}>${montoSpan(texto)}</button>`;
   }
   if (c.estado_dia === 'CERO') {
-    return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Dijo que hoy no abona">${montoSpan('$0')}</button>`;
+    return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" ${bloqueada ? disabledAttr : 'title="Dijo que hoy no abona"'}>${montoSpan('$0')}</button>`;
   }
   if (c.estado_dia === 'FUTURO') {
-    return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Día futuro — tocá para registrar un adelanto">${montoSpan('+')}</button>`;
+    return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" ${bloqueada ? disabledAttr : 'title="Día futuro — tocá para registrar un adelanto"'}>${montoSpan('+')}</button>`;
   }
-  return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" title="Todavía sin visitar">${montoSpan('—')}</button>`;
+  return `<button type="button" class="fila-excel-monto monto-neutro" data-accion="abono" ${bloqueada ? disabledAttr : 'title="Todavía sin visitar"'}>${montoSpan('—')}</button>`;
 }
 
 function filaClienteHtml(c, categoriaColor) {
@@ -128,13 +141,20 @@ function filaClienteHtml(c, categoriaColor) {
   const saldoParaMostrar = sinMovimientos ? null : c.saldo_centavos;
   const textoCargo = montoOGuion(c.cargos_mes_centavos);
   const textoSaldo = montoOGuion(saldoParaMostrar);
+  const bloqueada = edicionBloqueada();
+  const tituloBloqueo = bloqueada ? escapeHtml(motivoEdicionBloqueada()) : '';
+  // R-004 (auditoría): el asa de arrastre no debe prometer un reordenamiento
+  // que no puede cumplir — mismo criterio visual (title explicativo) que el
+  // resto de los controles ya bloqueados por edicionBloqueada() en esta fila;
+  // el gesto en sí se corta en origen dentro de activarArrastreOrden().
+  const tituloArrastre = bloqueada ? tituloBloqueo : 'Mantené presionado para reordenar';
   return `
     <li class="lista-item fila-cliente fila-excel" data-cliente-id="${escapeHtml(c.id)}">
-      <span class="asa-arrastre" aria-hidden="true" title="Mantené presionado para reordenar">${Iconos.arrastre()}</span>
+      <span class="asa-arrastre ${bloqueada ? 'asa-arrastre-deshabilitada' : ''}" aria-hidden="true" title="${escapeHtml(tituloArrastre)}">${Iconos.arrastre()}</span>
       ${bolitaHtml(categoriaColor)}
       <button type="button" class="fila-excel-nombre" data-accion="ver-persona" title="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</button>
-      ${celdaAbonoDiaHtml(c)}
-      <button type="button" class="fila-excel-monto monto-negativo col-cargo" data-accion="cargo" title="${escapeHtml(textoCargo)}">${montoSpan(textoCargo)}</button>
+      ${celdaAbonoDiaHtml(c, bloqueada, tituloBloqueo)}
+      <button type="button" class="fila-excel-monto monto-negativo col-cargo" data-accion="cargo" ${bloqueada ? `disabled title="${tituloBloqueo}"` : `title="${escapeHtml(textoCargo)}"`}>${montoSpan(textoCargo)}</button>
       <span class="fila-excel-monto ${claseSaldo(saldoParaMostrar)}" title="${escapeHtml(textoSaldo)}">${montoSpan(textoSaldo)}</span>
     </li>`;
 }
@@ -405,11 +425,20 @@ export async function renderPantallaClientes(contenedor) {
       obtenerUltimoRespaldo(),
       almacenamientoPersistenteDenegado(),
     ]);
-    const diasDesde = ultimoRespaldoIso ? Math.max(0, diasEntre(fechaLocalDeIso(ultimoRespaldoIso), hoy())) : null;
-    const destacar = diasDesde === null || diasDesde > 7;
-    const textoFecha = diasDesde === null ? 'nunca' : `hace ${diasDesde} día(s)`;
+    // W-18 (postmortem 2-sep-2026): la fecha que db.js escribió no basta —
+    // hasta que el gestor confirme "sí, ahí está" en el sheet de respaldo, se
+    // muestra "sin confirmar" en vez de una fecha que todavía puede ser
+    // mentira (descarga errática en iOS).
+    const { estado, iso } = estadoRespaldoUi(ultimoRespaldoIso);
+    const diasDesde = iso ? Math.max(0, diasEntre(fechaLocalDeIso(iso), hoy())) : null;
+    const sinConfirmar = estado === 'sin_confirmar';
+    const destacar = sinConfirmar || diasDesde === null || diasDesde > 7;
+    const textoFecha = sinConfirmar
+      ? `sin confirmar (exportado hace ${diasDesde} día(s))`
+      : diasDesde === null ? 'nunca' : `hace ${diasDesde} día(s)`;
     const textoAvisoPersistencia = 'Almacenamiento persistente denegado: el navegador podría liberar espacio ' +
       'si el dispositivo anda justo de memoria. Te recomendamos exportar un respaldo seguido.';
+    const bloqueadaImportar = edicionBloqueada();
     el.innerHTML = `
       <div class="fila-linea-respaldo-clientes">
         <button type="button" class="linea-respaldo-clientes" id="btn-respaldar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
@@ -417,31 +446,17 @@ export async function renderPantallaClientes(contenedor) {
           <span>Respaldar · último: ${destacar ? `<span class="linea-respaldo-destacado">${escapeHtml(textoFecha)}</span>` : escapeHtml(textoFecha)}</span>
         </button>
         ${persistenciaDenegada ? `<span class="icono-aviso-persistencia" role="img" aria-label="${escapeHtml(textoAvisoPersistencia)}" title="${escapeHtml(textoAvisoPersistencia)}">${Iconos.alerta()}</span>` : ''}
-        <button type="button" class="linea-respaldo-clientes linea-restaurar-clientes" id="btn-restaurar-clientes" ${estaSoloLectura() ? 'disabled title="Modo solo lectura"' : ''}>
+        <button type="button" class="linea-respaldo-clientes linea-restaurar-clientes" id="btn-restaurar-clientes" ${bloqueadaImportar ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>
           ${Iconos.restaurar()}
           <span>Restaurar</span>
         </button>
       </div>
     `;
+    // exportarRespaldo() NUNCA está bloqueada por modo seguro (es uno de sus
+    // dos escapes) — solo por estaSoloLectura() (conflicto real de pestañas).
     const btn = el.querySelector('#btn-respaldar-clientes');
     if (btn) {
-      btn.addEventListener('click', async () => {
-        try {
-          const { blob, nombreArchivo } = await exportarRespaldo();
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = nombreArchivo;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-          mostrarToast('Respaldo exportado.', 'exito');
-          await renderLineaRespaldo();
-        } catch (e) {
-          mostrarToast(e.message || 'No se pudo exportar el respaldo.', 'error');
-        }
-      });
+      btn.addEventListener('click', () => ejecutarExportarRespaldoConConfirmacion({ onCambio: renderLineaRespaldo }));
     }
     // Emergencia de producción: acceso discreto pero presente para restaurar
     // un .sqlite sin tener que ir a Global — mismo flujo compartido que el
@@ -590,7 +605,7 @@ export async function renderPantallaClientes(contenedor) {
           <h1>Clientes</h1>
           <div class="encabezado-clientes-acciones">
             <button type="button" class="btn-icono" id="btn-toggle-tema" aria-label="Cambiar de tema">${iconoTemaHtml()}</button>
-            <button type="button" class="btn-icono" id="btn-config" aria-label="Configuración de categorías y conceptos">${Iconos.engrane()}</button>
+            <button type="button" class="btn-icono" id="btn-config" aria-label="Configuración de categorías y conceptos" ${edicionBloqueada() ? `disabled title="${escapeHtml(motivoEdicionBloqueada())}"` : ''}>${Iconos.engrane()}</button>
           </div>
         </div>
 
@@ -623,6 +638,13 @@ export async function renderPantallaClientes(contenedor) {
 
   renderCabeceraColumnas();
   await refrescarTodo();
+
+  // R-003 (auditoría): "Respaldar · último" debe repintarse ante CUALQUIER
+  // cambio de estado de respaldo, incluido el que dispara el botón "Exportar
+  // respaldo ahora" de la alarma roja (router.js — ese call site no pasa
+  // `onCambio`). Reemplaza la suscripción anterior en vez de apilarla.
+  if (desuscribirCambioRespaldo) desuscribirCambioRespaldo();
+  desuscribirCambioRespaldo = suscribirseACambioRespaldo(renderLineaRespaldo);
 
   contenedor.querySelector('#btn-config').addEventListener('click', () => {
     abrirSheetConfiguracion({ onCambios: refrescarTodo });

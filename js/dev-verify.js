@@ -41,6 +41,7 @@ import {
   obtenerCalendarioGlobalMovimientos,
   exportarRespaldo,
   obtenerUltimoRespaldo,
+  exportarBytesCrudosSinAbrir,
   importarRespaldo,
   iniciarModoReal,
   esModoDemo,
@@ -50,12 +51,16 @@ import {
   obtenerEstadoPersistencia,
   alFallarPersistencia,
   obtenerEstadoModoSeguro,
+  obtenerEstadoSnapshots,
   _dbInternaParaVerificacion,
   _leerClientesVerifyEnDemo,
   _revisarReSembradoAntiCongelamientoParaVerificacion,
   _simularAperturaBaseExistenteParaVerificacion,
   _borrarTodosLosSnapshotsParaVerificacion,
+  _guardarEntradaSnapshotCrudaParaVerificacion,
   _forzarFallosDeGuardadoParaVerificacion,
+  _forzarFallosDeSnapshotParaVerificacion,
+  _forzarFallosDeEscrituraSnapshotParaVerificacion,
   _guardadoPendienteParaVerificacion,
   _flushGuardadoInmediatoParaVerificacion,
   _reemplazarDbActivaParaVerificacion,
@@ -2713,7 +2718,7 @@ export async function ejecutarVerificacion() {
   );
 
   await verificar(
-    'W-12: si la migración falla a mitad de camino (ej. un ALTER TABLE inesperado), el snapshot pre-migración sigue existiendo y es restaurable al estado original, sin corrupción ni pérdida',
+    'W-12 + R-001 (b): si la migración falla a mitad de camino (ej. un ALTER TABLE inesperado), la app YA NO muere — abrirBaseExistente() degrada a MODO SEGURO (R-001 (b), auditoría independiente) en vez de propagar el error — y el snapshot pre-migración sigue existiendo y es restaurable al estado original, sin corrupción ni pérdida',
     async () => {
       await _borrarTodosLosSnapshotsParaVerificacion();
       const DatabaseCtor = _dbInternaParaVerificacion().constructor;
@@ -2731,16 +2736,27 @@ export async function ejecutarVerificacion() {
       _reemplazarDbActivaParaVerificacion(dbV1Rota);
 
       // try/finally: ver el comentario del test anterior — un assert en rojo
-      // acá no puede dejar la base activa en el estado roto para el resto de
-      // la suite.
+      // acá no puede dejar la base activa en el estado roto (ni el flag
+      // modoSeguro encendido) para el resto de la suite.
       try {
+        assert(obtenerEstadoModoSeguro().modoSeguro === false, 'precondición: la app no debería estar en modo seguro todavía');
+
         let lanzo = false;
         try {
           await _simularAperturaBaseExistenteParaVerificacion();
         } catch (e) {
           lanzo = true;
         }
-        assert(lanzo, 'setup: la migración debería haber fallado de verdad (columna duplicada) para ejercitar el escenario de W-12');
+        // R-001 (b), auditoría independiente (POSTMORTEM 2-sep-2026): ANTES de
+        // esta corrección, este mismo escenario hacía que
+        // _simularAperturaBaseExistenteParaVerificacion() (y por lo tanto
+        // initDb() en producción) LANZARA — la app moría al arrancar con la
+        // pantalla fatal, sin ninguna acción posible, aunque el snapshot
+        // pre-migración de abajo ya existiera. Ahora abrirBaseExistente()
+        // atrapa cualquier fallo inesperado de migrarOModoSeguro() y degrada a
+        // MODO SEGURO en vez de morir.
+        assert(!lanzo, 'R-001 (b): un fallo inesperado de migración (no solo schema_version desconocido) NO debería propagar y matar el arranque');
+        assert(obtenerEstadoModoSeguro().modoSeguro === true, 'R-001 (b): debería quedar en modo seguro tras un fallo inesperado al abrir la base existente');
 
         const snapshotPreMigracion = (await listarSnapshots()).find((s) => s.categoria === 'pre-migracion');
         assert(snapshotPreMigracion, 'INCIDENTE W-12: debería existir un snapshot "pre-migracion" AUNQUE la migración haya fallado a mitad de camino');
@@ -2758,6 +2774,7 @@ export async function ejecutarVerificacion() {
           dbRestaurado.close();
         }
       } finally {
+        _resetearModoSeguroParaVerificacion(); // idempotente y barato, corra o no en rojo
         _reemplazarDbActivaParaVerificacion(new DatabaseCtor(bytesActivosPrevios)); // limpieza, corra o no en rojo
       }
     }
@@ -2838,6 +2855,450 @@ export async function ejecutarVerificacion() {
         const dbFinal = _dbInternaParaVerificacion();
         if (dbFinal) dbFinal.run("UPDATE meta SET valor=? WHERE clave='schema_version'", [SCHEMA_VERSION]);
       }
+    }
+  );
+
+  // ============================================================
+  // Sección 20 — R-001/R-002 (auditoría independiente sobre la capa de
+  // seguridad del POSTMORTEM 2-sep-2026, 4-sep-2026): dos fallos encontrados
+  // en el blindaje recién construido. R-001: un fallo del ALMACÉN de
+  // snapshots (no de los datos — el store de IndexedDB que los guarda) tumbaba
+  // el arranque sin ninguna salida, algo peor que el incidente original (ver
+  // el comentario grande sobre obtenerEstadoSnapshots() en db.js). R-002:
+  // importarRespaldo() estaba bloqueado en MODO SEGURO aunque
+  // restaurarSnapshot() sí funcionaba ahí, dejando al usuario sin su propio
+  // .sqlite verificado a mano justo cuando más lo necesitaba. Va DESPUÉS de
+  // la Sección 19 (comparte el mismo patrón de fault-injection que W-08) y
+  // ANTES de la Sección 10 (housekeeping final).
+  // ============================================================
+
+  await verificar(
+    'R-001 (a): un fallo al abrir el almacén de snapshots durante el snapshot DIARIO automático (reabrir una base existente con datos) YA NO tumba el arranque — se degrada sin snapshot de hoy (obtenerEstadoSnapshots().ok=false) y el resto de la apertura sigue funcionando con lectura/escritura completas (NO entra en modo seguro por esto)',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      await crearCliente({ nombre: 'Cliente R001 SnapshotDiario Verify' }); // datos de negocio > 0: condición para que dispare el snapshot diario
+      assert(obtenerEstadoSnapshots().ok === true, 'precondición: sin fallos previos del subsistema de snapshots');
+      assert(obtenerEstadoModoSeguro().modoSeguro === false, 'precondición: la app no debería estar en modo seguro');
+
+      _forzarFallosDeSnapshotParaVerificacion(Infinity); // simula el almacén de snapshots caído (cuota, storage evictado, IndexedDB down)
+
+      // try/finally: mientras el fault-injection está activo, CUALQUIER
+      // llamada que toque el almacén de snapshots (incluida listarSnapshots()
+      // del propio test, para inspeccionar) también falla — hay que
+      // apagarlo ANTES de inspeccionar, y garantizar que quede apagado pase
+      // lo que pase para no contaminar el resto de la suite (mismo motivo que
+      // el try/finally de los tests de W-12/W-13).
+      try {
+        let lanzo = false;
+        try {
+          await _simularAperturaBaseExistenteParaVerificacion(); // exactamente lo que initDb() hace hoy al reabrir la app
+        } catch (e) {
+          lanzo = true;
+        }
+        assert(
+          !lanzo,
+          'INCIDENTE R-001: reabrir la app con el almacén de snapshots caído NO debería lanzar ni matar el arranque (antes de esta corrección, initDb() no tenía try/catch para esto)'
+        );
+
+        const estadoTrasFallo = obtenerEstadoSnapshots();
+        assert(estadoTrasFallo.ok === false, 'obtenerEstadoSnapshots() debería reportar ok=false: el snapshot de hoy no se pudo tomar');
+        assert(
+          typeof estadoTrasFallo.mensaje === 'string' && estadoTrasFallo.mensaje.length > 0,
+          'debería registrar un mensaje legible del error'
+        );
+        assert(
+          obtenerEstadoModoSeguro().modoSeguro === false,
+          'un fallo puntual del ALMACÉN de snapshots no debería forzar modo seguro: los datos y el esquema activos están sanos, la app sigue totalmente escribible'
+        );
+
+        // La app sigue totalmente funcional: se puede seguir escribiendo con
+        // normalidad (crearCliente no toca el almacén de snapshots).
+        await crearCliente({ nombre: 'Cliente R001 SigueEscribible Verify' });
+
+        // Recién ACÁ se apaga el fault-injection — listarSnapshots() de abajo
+        // (inspección del propio test) también depende del almacén.
+        _forzarFallosDeSnapshotParaVerificacion(0);
+
+        const autoDiariaTrasFallo = (await listarSnapshots()).filter((s) => s.categoria === 'auto-diaria');
+        assert(autoDiariaTrasFallo.length === 0, 'no debería haber quedado ningún snapshot "auto-diaria" a medio guardar tras el fallo');
+
+        // Recuperación: con el almacén sano de nuevo, el próximo "arranque"
+        // sí logra el snapshot de hoy y el estado se limpia solo.
+        await _simularAperturaBaseExistenteParaVerificacion();
+        assert(obtenerEstadoSnapshots().ok === true, 'obtenerEstadoSnapshots() debería volver a ok=true en cuanto el almacén vuelve a andar');
+        const autoDiariaTrasRecuperar = (await listarSnapshots()).filter((s) => s.categoria === 'auto-diaria');
+        assert(autoDiariaTrasRecuperar.length === 1, 'debería existir el snapshot "auto-diaria" de hoy tras recuperarse');
+      } finally {
+        _forzarFallosDeSnapshotParaVerificacion(0); // idempotente y barato, corra o no en rojo
+      }
+    }
+  );
+
+  await verificar(
+    'R-001 (a): un fallo al abrir el almacén de snapshots durante el snapshot PRE-MIGRACIÓN (reabrir una base vieja justo cuando toca migrar) tampoco tumba el arranque — la migración sigue igual, sin snapshot previo, y queda registrado en obtenerEstadoSnapshots()',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+      const bytesActivosPrevios = _dbInternaParaVerificacion().export();
+
+      const clienteId = uuidV7();
+      const acuerdoId = uuidV7();
+      const movimientoId = uuidV7();
+      const dbV1 = crearDbV1VaciaConDatos({ clienteId, acuerdoId, movimientoId, fechaAcuerdo: sumarDias(hoy(), -5) });
+      _reemplazarDbActivaParaVerificacion(dbV1);
+
+      _forzarFallosDeSnapshotParaVerificacion(Infinity);
+
+      // try/finally: ver el comentario de los tests de W-12 — un assert en
+      // rojo acá no puede dejar la base activa en v1 ni el fault-injection
+      // encendido para el resto de la suite.
+      try {
+        let lanzo = false;
+        try {
+          await _simularAperturaBaseExistenteParaVerificacion(); // migra v1->v4, con el almacén de snapshots caído
+        } catch (e) {
+          lanzo = true;
+        }
+        assert(
+          !lanzo,
+          'INCIDENTE R-001: una migración pendiente con el almacén de snapshots caído NO debería lanzar ni matar el arranque'
+        );
+
+        const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V1 Verify' });
+        assert(clientes.length === 1, 'la migración debería haber completado igual: el cliente v1 debería existir ya en la base v4');
+
+        assert(obtenerEstadoSnapshots().ok === false, 'obtenerEstadoSnapshots() debería reportar ok=false: el snapshot pre-migración no se pudo tomar');
+        assert(obtenerEstadoModoSeguro().modoSeguro === false, 'la migración en sí tuvo éxito: no hay motivo para entrar en modo seguro');
+
+        // Recién ACÁ se apaga el fault-injection — listarSnapshots() de abajo
+        // (inspección del propio test) también depende del almacén de
+        // snapshots, igual que cualquier otra llamada mientras sigue caído.
+        _forzarFallosDeSnapshotParaVerificacion(0);
+        const snapshotPreMigracion = (await listarSnapshots()).find((s) => s.categoria === 'pre-migracion');
+        assert(!snapshotPreMigracion, 'no debería haber quedado ningún snapshot "pre-migracion" a medio guardar tras el fallo del almacén');
+      } finally {
+        _forzarFallosDeSnapshotParaVerificacion(0); // idempotente y barato, corra o no en rojo
+        _reemplazarDbActivaParaVerificacion(new DatabaseCtor(bytesActivosPrevios)); // limpieza, corra o no en rojo
+      }
+    }
+  );
+
+  await verificar(
+    'R-002: importarRespaldo() de un archivo .sqlite válido YA NO se rechaza en MODO SEGURO — es, junto con restaurarSnapshot(), un tercer escape del modo seguro (antes de esta corrección, verificarEscritura() lo bloqueaba con CONFLICT)',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      const dbInterna = _dbInternaParaVerificacion();
+      assert(obtenerEstadoModoSeguro().modoSeguro === false, 'precondición: la app no debería estar en modo seguro todavía');
+
+      await crearCliente({ nombre: 'Cliente R002 PreModoSeguro Verify' });
+
+      // Respaldo v4 mínimo y válido para importar — mismo patrón que el test
+      // de importarRespaldo() de la Sección 18.
+      const DatabaseCtor = dbInterna.constructor;
+      const dbImport = new DatabaseCtor();
+      dbImport.run(DDL);
+      dbImport.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', ?)", [SCHEMA_VERSION]);
+      const tsImport = new Date().toISOString();
+      dbImport.run(
+        "INSERT INTO clientes (id, nombre, created_at, updated_at, deleted_at) VALUES (?, 'Cliente R002 DesdeArchivo Verify', ?, ?, NULL)",
+        [uuidV7(), tsImport, tsImport]
+      );
+      const bytesImport = dbImport.export();
+      dbImport.close();
+      const arrayBuffer = bytesImport.buffer.slice(bytesImport.byteOffset, bytesImport.byteOffset + bytesImport.byteLength);
+
+      // try/finally: idéntico motivo que los tests de W-13 — un assert en
+      // rojo acá no puede dejar la app en modo seguro para el resto de la suite.
+      try {
+        dbInterna.run("UPDATE meta SET valor='99' WHERE clave='schema_version'");
+        let lanzoApertura = false;
+        try {
+          await _simularAperturaBaseExistenteParaVerificacion();
+        } catch (e) {
+          lanzoApertura = true;
+        }
+        assert(!lanzoApertura, 'setup: reabrir con schema_version desconocido no debería lanzar (W-13)');
+        assert(obtenerEstadoModoSeguro().modoSeguro === true, 'setup: debería estar en modo seguro para ejercitar R-002');
+
+        let lanzoImport = false;
+        let codigoImport = null;
+        try {
+          await importarRespaldo(arrayBuffer);
+        } catch (e) {
+          lanzoImport = true;
+          codigoImport = e && e.code;
+        }
+        assert(
+          !lanzoImport,
+          `INCIDENTE R-002: importarRespaldo() de un archivo válido debería funcionar en modo seguro, igual que restaurarSnapshot() — se rechazó con código ${codigoImport}`
+        );
+
+        assert(obtenerEstadoModoSeguro().modoSeguro === false, 'importarRespaldo() de un archivo con esquema reconocido debería sacar a la app del modo seguro');
+        const { clientes } = await listarClientes({ busqueda: 'Cliente R002 DesdeArchivo Verify' });
+        assert(clientes.length === 1, 'tras importar en modo seguro, la base activa debería ser la del archivo importado');
+
+        // El snapshot de seguridad previo a importar (item 3 del incidente
+        // 2-sep-2026) también debería seguir funcionando en modo seguro —
+        // preserva la base que estaba en modo seguro, por si hacía falta.
+        const snapshotImport = (await listarSnapshots()).find(
+          (s) => s.categoria === 'destructiva' && s.motivo.includes('importarRespaldo')
+        );
+        assert(snapshotImport, 'importarRespaldo() debería haber dejado su snapshot "destructiva" también en modo seguro');
+      } finally {
+        _resetearModoSeguroParaVerificacion();
+        const dbFinal = _dbInternaParaVerificacion();
+        if (dbFinal) dbFinal.run("UPDATE meta SET valor=? WHERE clave='schema_version'", [SCHEMA_VERSION]);
+      }
+    }
+  );
+
+  await verificar(
+    'R-001 (b): exportarBytesCrudosSinAbrir() (rescate de último recurso para la pantalla fatal de app.js) devuelve los bytes tal cual están guardados en IndexedDB, sin depender de que `db`/sql.js estén en un estado válido',
+    async () => {
+      const resultado = await exportarBytesCrudosSinAbrir();
+      assert(resultado, 'debería haber una base guardada (la demo de esta corrida ya persistió varias veces)');
+      assert(resultado.blob instanceof Blob && resultado.blob.size > 0, 'debería devolver un Blob no vacío');
+      assert(typeof resultado.nombreArchivo === 'string' && resultado.nombreArchivo.endsWith('.sqlite'), 'debería proponer un nombre de archivo .sqlite');
+
+      // Los bytes crudos deberían ser un .sqlite abrible de verdad (mismo
+      // contenido que ve db.js internamente), no un blob arbitrario.
+      const bytes = new Uint8Array(await resultado.blob.arrayBuffer());
+      const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+      const dbInspeccion = new DatabaseCtor(bytes);
+      try {
+        const stmt = dbInspeccion.prepare("SELECT valor FROM meta WHERE clave = 'schema_version'");
+        assert(stmt.step(), 'los bytes exportados deberían tener una tabla meta legible');
+        stmt.free();
+      } finally {
+        dbInspeccion.close();
+      }
+    }
+  );
+
+  // ============================================================
+  // Sección 21 — D-001 (auditoría independiente, ALTA) + decisión del
+  // orquestador sobre degradación ASIMÉTRICA de guardarSnapshotDestructivo()
+  // (cierre de lote del POSTMORTEM 2-sep-2026, 4-sep-2026).
+  //
+  // D-001: restaurarSnapshot() no validaba los bytes del snapshot ANTES de
+  // reemplazar la base activa — sql.js no lanza al construir
+  // `new SQL.Database(bytesBasura)`, así que el swap se comprometía antes de
+  // que la primera consulta real fallara, dejando la app rota con un error
+  // CRUDO sin `.code` y obtenerEstadoModoSeguro().modoSeguro en `false` (ver
+  // el comentario grande en restaurarSnapshot(), db.js).
+  //
+  // Segundo punto, decisión del orquestador: hoy, si el almacén de snapshots
+  // está caído, TODA operación destructiva (incluidas las DOS ÚNICAS vías de
+  // RESCATE) abortaba — reproducido en vivo en el combo modo-seguro + almacén
+  // caído. Asimetría deliberada: iniciarModoReal() (electiva, borra el 100%
+  // de los datos) sigue bloqueando tal cual; importarRespaldo() y
+  // restaurarSnapshot() (rescate) ahora aceptan `{permitirSinCopiaPrevia:true}`
+  // para continuar sin la copia previa cuando el usuario ya decidió que vale
+  // la pena el riesgo. Va DESPUÉS de la Sección 20 (comparte infraestructura
+  // de fault-injection) y ANTES de la Sección 10 (housekeeping final). Orden
+  // interno: los tres tests de degradación asimétrica primero, D-001 al
+  // final (si el swap contra bytes basura llegara a comprometerse por una
+  // regresión futura, deja `db` corrupta para el resto de la corrida — de
+  // última, para no arrastrar al resto de la sección a un falso rojo).
+  // ============================================================
+
+  await verificar(
+    'Decisión del orquestador (degradación ASIMÉTRICA): importarRespaldo() con el almacén de snapshots caído (solo escritura) y SIN permitirSinCopiaPrevia aborta con code=SIN_COPIA_PREVIA sin tocar la base activa; con permitirSinCopiaPrevia:true completa igual y queda registrado en obtenerEstadoSnapshots()',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      await crearCliente({ nombre: 'Cliente Asim PreImport Verify' });
+
+      // Respaldo v4 mínimo y válido para importar — mismo patrón que el test
+      // R-002 de la Sección 20.
+      const dbInterna = _dbInternaParaVerificacion();
+      const DatabaseCtor = dbInterna.constructor;
+      const dbImport = new DatabaseCtor();
+      dbImport.run(DDL);
+      dbImport.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', ?)", [SCHEMA_VERSION]);
+      const tsImport = new Date().toISOString();
+      dbImport.run(
+        "INSERT INTO clientes (id, nombre, created_at, updated_at, deleted_at) VALUES (?, 'Cliente Asim DesdeArchivo Verify', ?, ?, NULL)",
+        [uuidV7(), tsImport, tsImport]
+      );
+      const bytesImport = dbImport.export();
+      dbImport.close();
+      const arrayBuffer = bytesImport.buffer.slice(bytesImport.byteOffset, bytesImport.byteOffset + bytesImport.byteLength);
+
+      // Solo falla la ESCRITURA de la copia previa (no hay lectura del
+      // almacén de snapshots en el camino de importarRespaldo() antes de
+      // eso — la validación del archivo candidato es enteramente en memoria).
+      _forzarFallosDeEscrituraSnapshotParaVerificacion(Infinity);
+
+      try {
+        let lanzo = false;
+        let codigo = null;
+        try {
+          await importarRespaldo(arrayBuffer);
+        } catch (e) {
+          lanzo = true;
+          codigo = e && e.code;
+        }
+        assert(lanzo, 'importarRespaldo() debería abortar si no puede tomar la copia previa y no se permitió continuar sin ella');
+        assert(codigo === 'SIN_COPIA_PREVIA', `debería lanzar {code:'SIN_COPIA_PREVIA'} — se obtuvo ${codigo}`);
+
+        const { clientes: sinTocar } = await listarClientes({ busqueda: 'Cliente Asim PreImport Verify' });
+        assert(sinTocar.length === 1, 'la base activa NO debería haberse tocado: el cliente previo al intento de import sigue ahí');
+        const { clientes: noImportado } = await listarClientes({ busqueda: 'Cliente Asim DesdeArchivo Verify' });
+        assert(noImportado.length === 0, 'el archivo NO debería haberse importado todavía');
+
+        // El usuario, a sabiendas del riesgo, decide continuar igual.
+        await importarRespaldo(arrayBuffer, { permitirSinCopiaPrevia: true });
+
+        assert(
+          obtenerEstadoSnapshots().ok === false,
+          'con permitirSinCopiaPrevia:true, el fallo de la copia previa debería quedar registrado en obtenerEstadoSnapshots() (igual que respaldarSnapshotDiarioSiHaceFalta)'
+        );
+        const { clientes: importadoAhora } = await listarClientes({ busqueda: 'Cliente Asim DesdeArchivo Verify' });
+        assert(importadoAhora.length === 1, 'con permitirSinCopiaPrevia:true, el import debería completar igual');
+      } finally {
+        _forzarFallosDeEscrituraSnapshotParaVerificacion(0);
+      }
+    }
+  );
+
+  await verificar(
+    'Decisión del orquestador (degradación ASIMÉTRICA): restaurarSnapshot() con el almacén de snapshots caído (solo escritura — la LECTURA del snapshot a restaurar sigue funcionando) y SIN permitirSinCopiaPrevia aborta con code=SIN_COPIA_PREVIA sin tocar la base activa; con permitirSinCopiaPrevia:true restaura igual y queda registrado en obtenerEstadoSnapshots()',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      await crearCliente({ nombre: 'Cliente Asim PreRestaurar Verify' });
+
+      // Snapshot legítimo (vía el snapshot diario automático) que sirve de
+      // blanco de restauración — captura el estado CON "PreRestaurar".
+      await _simularAperturaBaseExistenteParaVerificacion();
+      const snapshotBlanco = (await listarSnapshots()).find((s) => s.categoria === 'auto-diaria');
+      assert(snapshotBlanco, 'setup: debería existir un snapshot auto-diario recién tomado para usar de blanco');
+
+      // Dato agregado DESPUÉS del snapshot — distingue si la restauración de
+      // verdad ocurrió o no.
+      await crearCliente({ nombre: 'Cliente Asim DespuesDelSnapshot Verify' });
+
+      _forzarFallosDeEscrituraSnapshotParaVerificacion(Infinity); // la LECTURA del snapshot blanco sigue funcionando; solo falla la ESCRITURA de la copia previa
+
+      try {
+        let lanzo = false;
+        let codigo = null;
+        try {
+          await restaurarSnapshot(snapshotBlanco.clave);
+        } catch (e) {
+          lanzo = true;
+          codigo = e && e.code;
+        }
+        assert(lanzo, 'restaurarSnapshot() debería abortar si no puede tomar la copia previa y no se permitió continuar sin ella');
+        assert(codigo === 'SIN_COPIA_PREVIA', `debería lanzar {code:'SIN_COPIA_PREVIA'} — se obtuvo ${codigo}`);
+
+        const { clientes: sinTocar } = await listarClientes({ busqueda: 'Cliente Asim DespuesDelSnapshot Verify' });
+        assert(sinTocar.length === 1, 'la base activa NO debería haberse tocado: el cliente posterior al snapshot sigue ahí (no se restauró)');
+
+        // El usuario, a sabiendas del riesgo, decide restaurar igual.
+        await restaurarSnapshot(snapshotBlanco.clave, { permitirSinCopiaPrevia: true });
+
+        assert(
+          obtenerEstadoSnapshots().ok === false,
+          'con permitirSinCopiaPrevia:true, el fallo de la copia previa debería quedar registrado en obtenerEstadoSnapshots()'
+        );
+        const { clientes: trasRestaurar } = await listarClientes({ busqueda: 'Cliente Asim DespuesDelSnapshot Verify' });
+        assert(
+          trasRestaurar.length === 0,
+          'con permitirSinCopiaPrevia:true, la restauración debería haber completado: el cliente posterior al snapshot ya no debería existir'
+        );
+        const { clientes: recuperado } = await listarClientes({ busqueda: 'Cliente Asim PreRestaurar Verify' });
+        assert(recuperado.length === 1, 'el cliente que sí estaba en el snapshot debería seguir presente tras restaurar');
+      } finally {
+        _forzarFallosDeEscrituraSnapshotParaVerificacion(0);
+      }
+    }
+  );
+
+  await verificar(
+    'Decisión del orquestador (degradación ASIMÉTRICA): iniciarModoReal() SIGUE bloqueando si no puede tomar su copia previa — es electiva y borra el 100% de los datos, a diferencia de importarRespaldo()/restaurarSnapshot() no tiene el escape permitirSinCopiaPrevia',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      await crearCliente({ nombre: 'Cliente Asim PreModoReal Verify' });
+
+      _forzarFallosDeEscrituraSnapshotParaVerificacion(Infinity);
+      try {
+        let lanzo = false;
+        let codigo = null;
+        try {
+          await iniciarModoReal();
+        } catch (e) {
+          lanzo = true;
+          codigo = e && e.code;
+        }
+        assert(
+          lanzo,
+          'iniciarModoReal() debería SEGUIR abortando si no puede tomar su copia previa — es electiva, sin el escape permitirSinCopiaPrevia de las vías de rescate'
+        );
+        assert(
+          codigo === 'DB_ERROR' && codigo !== 'SIN_COPIA_PREVIA',
+          `iniciarModoReal() no acepta permitirSinCopiaPrevia y debería propagar el fallo del snapshot tal cual (code='DB_ERROR' del fault-injection) — se obtuvo ${codigo}`
+        );
+
+        const { clientes: sigueAhi } = await listarClientes({ busqueda: 'Cliente Asim PreModoReal Verify' });
+        assert(sigueAhi.length === 1, 'iniciarModoReal() no debería haber borrado nada: abortó antes de tocar los datos (el snapshot previo se toma ANTES del BEGIN)');
+      } finally {
+        _forzarFallosDeEscrituraSnapshotParaVerificacion(0);
+      }
+    }
+  );
+
+  // D-001 va AL FINAL de la sección: si por algún motivo el swap contra
+  // bytes basura llegara a comprometerse (regresión), corrompe `db` para el
+  // resto de la corrida — de última, para no arrastrar a los tres tests de
+  // arriba (que necesitan una base activa sana) a un falso rojo por cascada.
+  await verificar(
+    'D-001 (ALTA, corregido): restaurarSnapshot() de un snapshot con bytes basura NO rompe la app — lanza VALIDATION_ERROR limpio (con .code), conserva la base activa intacta, y obtenerEstadoModoSeguro().modoSeguro sigue en false',
+    async () => {
+      await _borrarTodosLosSnapshotsParaVerificacion();
+      assert(obtenerEstadoModoSeguro().modoSeguro === false, 'precondición: la app no debería estar en modo seguro');
+
+      await crearCliente({ nombre: 'Cliente D001 PreRestaurar Verify' });
+      const { clientes: previos } = await listarClientes({ busqueda: 'Cliente D001 PreRestaurar Verify' });
+      assert(previos.length === 1, 'precondición: el cliente de control debería existir antes de intentar restaurar basura');
+
+      const claveBasura = uuidV7();
+      await _guardarEntradaSnapshotCrudaParaVerificacion({
+        clave: claveBasura,
+        fechaIso: new Date().toISOString(),
+        fechaLocal: hoy(),
+        motivo: 'D001 snapshot basura Verify',
+        categoria: 'destructiva',
+        bytes: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), // NO es un .sqlite válido
+      });
+
+      let lanzo = false;
+      let codigo = null;
+      try {
+        await restaurarSnapshot(claveBasura);
+      } catch (e) {
+        lanzo = true;
+        codigo = e && e.code;
+      }
+      assert(lanzo, 'D-001: restaurar un snapshot con bytes basura debería lanzar, no completar en silencio');
+      assert(
+        codigo === 'VALIDATION_ERROR',
+        `D-001: el error debería tener code='VALIDATION_ERROR' (contrato de CLAUDE.md: nunca un error crudo sin .code) — se obtuvo ${codigo}`
+      );
+      assert(
+        obtenerEstadoModoSeguro().modoSeguro === false,
+        'D-001: un snapshot corrupto rechazado ANTES del swap no debería dejar la app en modo seguro ni en ningún estado a medio camino'
+      );
+
+      const { clientes: trasFallo } = await listarClientes({ busqueda: 'Cliente D001 PreRestaurar Verify' });
+      assert(
+        trasFallo.length === 1,
+        'D-001: la base activa debería seguir intacta (el cliente de control sigue existiendo) porque el swap nunca se comprometió'
+      );
+
+      // Sigue totalmente escribible: la app no quedó en ningún estado roto.
+      await crearCliente({ nombre: 'Cliente D001 SigueEscribible Verify' });
+
+      await _borrarTodosLosSnapshotsParaVerificacion(); // limpieza: no dejar el snapshot basura para el resto de la suite
     }
   );
 

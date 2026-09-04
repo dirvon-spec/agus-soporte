@@ -474,6 +474,12 @@ Verificación mínima: monto de 7 dígitos se muestra completo con letra reducid
 
 | B-027 | Reintroducir buscador de clientes si la cartera crece (retirado en §2.13-2). |
 | B-028 | Reintroducir filtro por categoría si se necesita (retirado en §2.13-3). |
+| B-029 | `exportarRespaldo()` escribe `meta.ultimo_respaldo` ANTES de que el usuario confirme que el archivo existe (W-18). La UI ya compensa con un estado local "sin confirmar", pero la capa de datos debería diferir esa escritura o exponer `confirmarRespaldo()`. |
+| B-030 | `previsualizarRespaldo(arrayBuffer)` en db.js: devolver conteo de clientes/movimientos y fecha del último movimiento del ARCHIVO, para que la confirmación de importación muestre qué contiene y no solo su nombre y tamaño (W-11). La UI no puede leerlo sin ejecutar SQL, prohibido por CLAUDE.md. |
+| B-031 | Mostrar el número de versión de la app (el `VERSION` del service worker) en Ajustes, para que "olvidé subir VERSION al desplegar" sea detectable a simple vista y no dependa de la memoria de quien despliega (auditoría PWA, P-02). |
+| B-032 | Un fallo de instalación del precache del service worker hoy solo va a consola: el usuario se queda sin capacidad offline sin enterarse. Hacerlo visible, como se hizo con el fallo de persistencia (auditoría PWA, P-03 — mismo patrón de falla silenciosa del incidente). |
+| B-033 | Paridad del panel "Copias automáticas": permitir DESCARGAR cada copia (la pantalla de rescate fatal ya lo hace, el panel normal solo ofrece restaurar). Sacar una copia interna a un archivo es justo lo que la protege de una purga del navegador (auditoría de destrucción, D-002). |
+| B-034 | Snapshot diario vs. reloj retrocedido: `guardarSnapshotAutoDiarioSiHaceFalta` compara por fecha local; si el reloj del dispositivo retrocede, se puede saltear el snapshot del día real sin aviso (W-17 del post-mortem, confirmado vigente por la auditoría de destrucción). |
 
 ### 2.14 ROUND 6 — retro de Agustín, gate 1-sep-2026 (aprobado directo; tamaño de letra confirmado "perfecto" — esa iteración CIERRA)
 
