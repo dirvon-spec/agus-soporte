@@ -345,6 +345,108 @@ function crearDbV3VaciaConDatos({ clienteId, categoriaId, movimientoId, fecha })
   return dbV3;
 }
 
+// v4: forma real de una base recién migrada por MIGRACION_V3_A_V4 — ya tiene
+// `visitas_sin_abono` (§2.11), pero `categorias` TODAVÍA no tiene `modo_resumen`
+// (§2.15/v5). Punto de partida exacto para probar MIGRACION_V4_A_V5.
+const DDL_V4_LITERAL = `
+CREATE TABLE IF NOT EXISTS categorias (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 1),
+  color         TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS conceptos (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 1),
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS clientes (
+  id            TEXT PRIMARY KEY,
+  nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 2),
+  telefono      TEXT,
+  categoria_id  TEXT REFERENCES categorias(id),
+  orden         INTEGER,
+  notas         TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS acuerdos (
+  id                      TEXT PRIMARY KEY,
+  cliente_id              TEXT NOT NULL REFERENCES clientes(id),
+  monto_cuota_centavos    INTEGER NOT NULL CHECK (monto_cuota_centavos > 0),
+  frecuencia              TEXT NOT NULL DEFAULT 'DIARIA' CHECK (frecuencia IN ('DIARIA','SEMANAL','MENSUAL')),
+  dia_semana              INTEGER,
+  dia_mes                 INTEGER,
+  vigente_desde           TEXT NOT NULL,
+  vigente_hasta           TEXT,
+  created_at              TEXT NOT NULL,
+  updated_at              TEXT NOT NULL,
+  deleted_at              TEXT,
+  CHECK (vigente_hasta IS NULL OR vigente_hasta >= vigente_desde)
+);
+CREATE TABLE IF NOT EXISTS movimientos (
+  id                        TEXT PRIMARY KEY,
+  cliente_id                TEXT NOT NULL REFERENCES clientes(id),
+  tipo                       TEXT NOT NULL CHECK (tipo IN ('CARGO', 'ABONO', 'AJUSTE')),
+  monto_centavos             INTEGER NOT NULL,
+  fecha                      TEXT NOT NULL,
+  servicio                   TEXT,
+  referencia                 TEXT,
+  nota                       TEXT,
+  movimiento_original_id     TEXT REFERENCES movimientos(id),
+  created_at                 TEXT NOT NULL,
+  updated_at                 TEXT NOT NULL,
+  deleted_at                 TEXT,
+  CHECK (
+    (tipo IN ('CARGO','ABONO') AND monto_centavos > 0 AND movimiento_original_id IS NULL)
+    OR
+    (tipo = 'AJUSTE' AND monto_centavos != 0 AND movimiento_original_id IS NOT NULL)
+  )
+);
+CREATE TABLE IF NOT EXISTS visitas_sin_abono (
+  id            TEXT PRIMARY KEY,
+  cliente_id    TEXT NOT NULL REFERENCES clientes(id),
+  fecha         TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  deleted_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS meta (
+  clave  TEXT PRIMARY KEY,
+  valor  TEXT NOT NULL
+);
+`;
+
+/** Categoría v4 (sin `modo_resumen`, columna que todavía no existe en este
+ * esquema) + un cliente que la usa — para probar que MIGRACION_V4_A_V5 (solo
+ * agrega `categorias.modo_resumen`) preserva todo intacto y dejar la columna
+ * nueva en 'NORMAL' (el DEFAULT del ALTER TABLE) para las categorías ya
+ * existentes. */
+function crearDbV4VaciaConDatos({ categoriaId, clienteId }) {
+  const DatabaseCtor = _dbInternaParaVerificacion().constructor;
+  const dbV4 = new DatabaseCtor();
+  dbV4.run(DDL_V4_LITERAL);
+  const ts = '2026-04-01T00:00:00.000Z';
+  dbV4.run('INSERT INTO categorias (id,nombre,color,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,NULL)', [
+    categoriaId,
+    'CategoriaMigracionV4 Verify',
+    'celeste',
+    ts,
+    ts,
+  ]);
+  dbV4.run(
+    'INSERT INTO clientes (id,nombre,telefono,categoria_id,orden,notas,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,NULL)',
+    [clienteId, 'Cliente Migracion V4 Verify', '5215500000096', categoriaId, 1, null, ts, ts]
+  );
+  dbV4.run("INSERT INTO meta (clave, valor) VALUES ('schema_version', '4')");
+  return dbV4;
+}
+
 export async function ejecutarVerificacion() {
   await initDb();
 
@@ -1084,6 +1186,130 @@ export async function ejecutarVerificacion() {
       grupoSinCategoria.clientes.some((c) => c.id === clienteSinCat.id),
       'el cliente sin categoría debería aparecer en el grupo "Sin categoría"'
     );
+  });
+
+  // ============================================================
+  // §2.15: categorías fuera del balance (modo_resumen NORMAL/NO_SUMA/OCULTA)
+  // ============================================================
+
+  await verificar('§2.15: crearCategoria acepta modo_resumen (default NORMAL) y rechaza enum inválido', async () => {
+    const catDefault = await crearCategoria({ nombre: 'Cat Modo Default Verify', color: 'azul' });
+    assert(catDefault.modo_resumen === 'NORMAL', `una categoría nueva sin modo debería nacer NORMAL, nació "${catDefault.modo_resumen}"`);
+
+    const catNoSuma = await crearCategoria({ nombre: 'Cat NoSuma Verify', color: 'rojo', modo_resumen: 'NO_SUMA' });
+    assert(catNoSuma.modo_resumen === 'NO_SUMA', 'debería persistir modo_resumen NO_SUMA al crear');
+
+    let lanzo = null;
+    try {
+      await crearCategoria({ nombre: 'Cat Modo Malo Verify', color: 'verde', modo_resumen: 'CUALQUIERA' });
+    } catch (e) { lanzo = e; }
+    assert(lanzo && lanzo.code === 'VALIDATION_ERROR', 'un modo_resumen inválido debería lanzar VALIDATION_ERROR');
+  });
+
+  await verificar('§2.15: actualizarCategoria cambia modo_resumen y listarCategorias lo refleja', async () => {
+    const cat = await crearCategoria({ nombre: 'Cat Cambia Modo Verify', color: 'rosa' });
+    assert(cat.modo_resumen === 'NORMAL', 'debería nacer NORMAL');
+    const act = await actualizarCategoria(cat.id, { modo_resumen: 'OCULTA' });
+    assert(act.modo_resumen === 'OCULTA', 'actualizarCategoria debería aplicar OCULTA');
+    const reLeida = (await listarCategorias()).find((c) => c.id === cat.id);
+    assert(reLeida && reLeida.modo_resumen === 'OCULTA', 'listarCategorias debería devolver el modo actualizado');
+  });
+
+  await verificar('§2.15: listarClientesAgrupados propaga categoria_modo_resumen; los totales del grupo (Σ) siguen siendo reales; "Sin categoría" es NORMAL', async () => {
+    const cat = await crearCategoria({ nombre: 'Cat Agrupado Modo Verify', color: 'naranja', modo_resumen: 'NO_SUMA' });
+    const cli = await crearCliente({ nombre: 'Cliente Modo Grupo Verify', categoria_id: cat.id });
+    await registrarCargo({ cliente_id: cli.id, monto_centavos: 10000, fecha: hoy(), concepto: 'Agua' });
+
+    const { grupos } = await listarClientesAgrupados({});
+    const grupo = grupos.find((g) => g.categoria_id === cat.id);
+    assert(grupo, 'debería aparecer el grupo recién creado');
+    assert(grupo.categoria_modo_resumen === 'NO_SUMA', `el grupo debería exponer categoria_modo_resumen NO_SUMA, expone "${grupo.categoria_modo_resumen}"`);
+    // La fila Σ NO se recorta por el modo: el total del grupo es real.
+    assert(grupo.totales.saldo_centavos === 10000, `el total del grupo debería ser real (10000), es ${grupo.totales.saldo_centavos}`);
+    const sinCat = grupos.find((g) => g.categoria_id === null);
+    if (sinCat) assert(sinCat.categoria_modo_resumen === 'NORMAL', '"Sin categoría" siempre debería ser NORMAL');
+    // §2.15: restaurar NORMAL para no contaminar la DB compartida del verify —
+    // los tests posteriores de obtenerCalendarioGlobalMovimientos cruzan contra
+    // resumenMensual, que NO filtra por categoría (invariante válida solo sin
+    // exclusiones; la exclusión se verifica en los tests §2.15 de acá).
+    await actualizarCategoria(cat.id, { modo_resumen: 'NORMAL' });
+  });
+
+  await verificar('§2.15: en modo-día, una categoría fuera del balance NO aporta a cobradoCentavos ni a los conteos (pero conserva su estado_dia en la fila)', async () => {
+    const catFuera = await crearCategoria({ nombre: 'Cat Dia Fuera Verify', color: 'amarillo', modo_resumen: 'NO_SUMA' });
+    const cliFuera = await crearCliente({ nombre: 'Cliente Dia Fuera Verify', categoria_id: catFuera.id });
+    await registrarAbono({ cliente_id: cliFuera.id, monto_centavos: 4000, fecha: hoy() });
+
+    const { grupos, resumenDia } = await listarClientesAgrupados({ fecha: hoy() });
+    const grupoFuera = grupos.find((g) => g.categoria_id === catFuera.id);
+    assert(grupoFuera.totales.abonos_mes_centavos === 4000, 'el total del grupo fuera debería ser real (4000)');
+    const filaFuera = grupoFuera.clientes.find((c) => c.id === cliFuera.id);
+    assert(filaFuera.estado_dia === 'ABONO', 'el cliente fuera debería conservar estado_dia ABONO en su fila');
+
+    // cobrado/conteos esperados = SOLO clientes de grupos NORMAL con abono hoy
+    // (recomputado del mismo snapshot, robusto ante el resto de datos de la suite).
+    let cobradoEsperado = 0, abonaronEsperado = 0;
+    for (const g of grupos) {
+      if (g.categoria_modo_resumen !== 'NORMAL') continue;
+      for (const c of g.clientes) {
+        if (c.estado_dia === 'ABONO') { cobradoEsperado += c.abonos_mes_centavos; abonaronEsperado += 1; }
+      }
+    }
+    assert(resumenDia.cobradoCentavos === cobradoEsperado, `cobradoCentavos (${resumenDia.cobradoCentavos}) debería excluir categorías fuera del balance (esperado ${cobradoEsperado})`);
+    assert(resumenDia.abonaron === abonaronEsperado, `abonaron (${resumenDia.abonaron}) debería excluir categorías fuera del balance (esperado ${abonaronEsperado})`);
+    await actualizarCategoria(catFuera.id, { modo_resumen: 'NORMAL' }); // §2.15: limpieza de la DB compartida del verify
+  });
+
+  await verificar('§2.15: en modo-día, una categoría fuera del balance TAMPOCO aporta a dijeronNo ni a sinVisitar (pero conserva su estado_dia real en la fila)', async () => {
+    const catFuera = await crearCategoria({ nombre: 'Cat Dia Fuera Conteos Verify', color: 'gris', modo_resumen: 'NO_SUMA' });
+    const cliDijoNo = await crearCliente({ nombre: 'Cliente Dia Fuera DijoNo Verify', categoria_id: catFuera.id });
+    const cliSinVisitar = await crearCliente({ nombre: 'Cliente Dia Fuera SinVisitar Verify', categoria_id: catFuera.id });
+    // (i) visita sin abono hoy => estado_dia CERO (candidato natural a "dijeronNo" si no se excluyera).
+    await registrarVisitaSinAbono({ cliente_id: cliDijoNo.id, fecha: hoy() });
+    // (ii) cliSinVisitar: sin abono ni visita ese día => estado_dia SIN_VISITA, sin acción adicional.
+
+    const { grupos, resumenDia } = await listarClientesAgrupados({ fecha: hoy() });
+    const grupoFuera = grupos.find((g) => g.categoria_id === catFuera.id);
+    const filaDijoNo = grupoFuera.clientes.find((c) => c.id === cliDijoNo.id);
+    const filaSinVisitar = grupoFuera.clientes.find((c) => c.id === cliSinVisitar.id);
+    assert(filaDijoNo.estado_dia === 'CERO', `el cliente con visita-$0 debería conservar estado_dia CERO en su fila, tiene ${filaDijoNo.estado_dia}`);
+    assert(filaSinVisitar.estado_dia === 'SIN_VISITA', `el cliente sin registro debería conservar estado_dia SIN_VISITA en su fila, tiene ${filaSinVisitar.estado_dia}`);
+
+    // dijeronNo/sinVisitar esperados = SOLO clientes de grupos NORMAL (mismo enfoque
+    // robusto que el test de cobradoCentavos/abonaron de arriba: recomputado del mismo
+    // snapshot, no contamina ni asume nada sobre el resto de los datos de la suite).
+    let dijeronNoEsperado = 0, sinVisitarEsperado = 0;
+    for (const g of grupos) {
+      if (g.categoria_modo_resumen !== 'NORMAL') continue;
+      for (const c of g.clientes) {
+        if (c.estado_dia === 'CERO') dijeronNoEsperado += 1;
+        if (c.estado_dia === 'SIN_VISITA') sinVisitarEsperado += 1;
+      }
+    }
+    assert(resumenDia.dijeronNo === dijeronNoEsperado, `dijeronNo (${resumenDia.dijeronNo}) debería excluir categorías fuera del balance (esperado ${dijeronNoEsperado})`);
+    assert(resumenDia.sinVisitar === sinVisitarEsperado, `sinVisitar (${resumenDia.sinVisitar}) debería excluir categorías fuera del balance (esperado ${sinVisitarEsperado})`);
+    await actualizarCategoria(catFuera.id, { modo_resumen: 'NORMAL' }); // §2.15: limpieza de la DB compartida del verify
+  });
+
+  await verificar('§2.15: obtenerCalendarioGlobalMovimientos excluye categorías fuera del balance (calendario y totales del mes); "Sin categoría" y NORMAL entran', async () => {
+    const anioMes = hoy().slice(0, 7);
+    const catOculta = await crearCategoria({ nombre: 'Cat Global Oculta Verify', color: 'morado', modo_resumen: 'OCULTA' });
+    const cliOculto = await crearCliente({ nombre: 'Cliente Global Oculto Verify', categoria_id: catOculta.id });
+    const cliNormal = await crearCliente({ nombre: 'Cliente Global Normal Verify' }); // sin categoría => cuenta
+
+    const abonosAntes = (await obtenerCalendarioGlobalMovimientos(anioMes)).totalesMes.abonosCentavos;
+    await registrarAbono({ cliente_id: cliNormal.id, monto_centavos: 3000, fecha: hoy() });
+    await registrarAbono({ cliente_id: cliOculto.id, monto_centavos: 5000, fecha: hoy() });
+    const despues = await obtenerCalendarioGlobalMovimientos(anioMes);
+
+    assert(
+      despues.totalesMes.abonosCentavos === abonosAntes + 3000,
+      `totalesMes.abonos debería subir SOLO por el cliente que cuenta (+3000): antes ${abonosAntes}, después ${despues.totalesMes.abonosCentavos}`
+    );
+    const diaHoy = despues.dias.get(hoy());
+    assert(diaHoy && diaHoy.movimientos.some((m) => m.cliente_id === cliNormal.id), 'el movimiento de un cliente que cuenta SÍ debería aparecer en el calendario de Global');
+    assert(!(diaHoy && diaHoy.movimientos.some((m) => m.cliente_id === cliOculto.id)), 'el movimiento de una categoría OCULTA NO debería aparecer en el calendario de Global');
+    await actualizarCategoria(catOculta.id, { modo_resumen: 'NORMAL' }); // §2.15: limpieza de la DB compartida del verify
   });
 
   // --- obtenerCalendarioMovimientos: saldoAcumulado por fecha == calcularSaldo(cliente, fecha) ---
@@ -2212,6 +2438,43 @@ export async function ejecutarVerificacion() {
     // la tabla nueva ya es funcional de punta a punta tras la migración
     const visita = await registrarVisitaSinAbono({ cliente_id: clienteId, fecha: hoy() });
     assert(visita && visita.id, 'registrarVisitaSinAbono debería funcionar sobre una DB recién migrada v3->v4');
+  });
+
+  await verificar('Migración v4->v5 (§2.15): importarRespaldo() agrega modo_resumen a categorias existentes (NORMAL por default)', async () => {
+    const categoriaId = uuidV7();
+    const clienteId = uuidV7();
+    const dbV4 = crearDbV4VaciaConDatos({ categoriaId, clienteId });
+    const bytes = dbV4.export();
+    dbV4.close();
+    const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+
+    // (1) no debería lanzar — si importarRespaldo() lanza, el test falla acá mismo con su error.
+    await importarRespaldo(arrayBuffer);
+    assert(esModoDemo() === false, 'URGENTE: importarRespaldo() debería seguir marcando modo_demo=0 (no reactiva D1)');
+
+    // (2) la categoría preexistente (creada SIN la columna modo_resumen, inexistente en v4)
+    // debería quedar en NORMAL, el DEFAULT del ALTER TABLE de MIGRACION_V4_A_V5.
+    const categorias = await listarCategorias();
+    const categoriaMigrada = categorias.find((c) => c.id === categoriaId);
+    assert(categoriaMigrada, 'la categoría del respaldo v4 debería existir tras importar');
+    assert(
+      categoriaMigrada.modo_resumen === 'NORMAL',
+      `una categoría v4 migrada debería quedar en modo_resumen NORMAL (el default), quedó "${categoriaMigrada.modo_resumen}"`
+    );
+
+    // preserva el resto de los datos (mismo espíritu que las migraciones anteriores).
+    const { clientes } = await listarClientes({ busqueda: 'Cliente Migracion V4 Verify', tamanioPagina: 5 });
+    assert(clientes.length === 1, 'el cliente del respaldo v4 debería existir tras importar');
+    assert(clientes[0].id === clienteId, 'el id del cliente importado debería coincidir con el del archivo v4');
+    assert(clientes[0].categoria_id === categoriaId, 'la categoría del cliente v4 debería preservarse (v4->v5 no la toca)');
+
+    // (3) schema_version quedó en '5' (SCHEMA_VERSION vigente en esta etapa del proyecto).
+    const dbInterna = _dbInternaParaVerificacion();
+    const filaVersion = dbInterna.exec("SELECT valor FROM meta WHERE clave='schema_version'");
+    assert(
+      filaVersion.length && filaVersion[0].values[0][0] === SCHEMA_VERSION,
+      `schema_version tras importar debería ser ${SCHEMA_VERSION}`
+    );
   });
 
   // ============================================================

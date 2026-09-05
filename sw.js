@@ -21,7 +21,7 @@
 // reinstala el SW cuando el archivo sw.js cambia byte a byte — sin bump acá,
 // una actualización de la app puede quedar servida desde caché vieja.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE_NAME = `agus-soporte-${VERSION}`;
 
 // App shell: TODO lo que la app necesita para arrancar y operar sin red.

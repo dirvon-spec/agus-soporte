@@ -20,8 +20,18 @@
 // ledger no admite ABONO de $0, así que es una tabla aparte, sin impacto en
 // saldos/calendarios. Migración v3->v4 en MIGRACION_V3_A_V4 más abajo (solo
 // CREATE TABLE + índice, sin lógica de datos: la tabla nace vacía).
+//
+// v5 (§2.15, gate del dueño 4-sep-2026): `categorias` gana `modo_resumen`
+// (NORMAL / NO_SUMA / OCULTA) para poder dejar categorías FUERA de los
+// agregados del negocio (Balance general, Abonos/Cargos y calendario en
+// Global). NORMAL = participa como siempre; NO_SUMA = sigue visible en la
+// lista de Clientes pero no entra a ningún total; OCULTA = además se va a una
+// sección colapsable y no aparece en Global. Los totales POR GRUPO (fila Σ)
+// siguen siendo reales para las tres — solo cambia su participación en los
+// AGREGADOS. Migración v4->v5 en MIGRACION_V4_A_V5 (un ALTER TABLE ADD COLUMN
+// con CHECK de una sola columna — permitido, mismo caso que v1->v2).
 
-export const SCHEMA_VERSION = '4';
+export const SCHEMA_VERSION = '5';
 
 export const DDL = `
 -- ============================================================
@@ -35,6 +45,7 @@ CREATE TABLE IF NOT EXISTS categorias (
   id            TEXT PRIMARY KEY,
   nombre        TEXT NOT NULL CHECK (length(trim(nombre)) >= 1),
   color         TEXT NOT NULL,
+  modo_resumen  TEXT NOT NULL DEFAULT 'NORMAL' CHECK (modo_resumen IN ('NORMAL','NO_SUMA','OCULTA')),
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
   deleted_at    TEXT
@@ -217,4 +228,15 @@ export const MIGRACION_V3_A_V4 = [
     deleted_at    TEXT
   )`,
   'CREATE INDEX IF NOT EXISTS idx_visitas_sin_abono_cliente_fecha ON visitas_sin_abono (cliente_id, fecha)',
+];
+
+/**
+ * Migración v4 -> v5 (§2.15): agrega `modo_resumen` a `categorias` SIN TOCAR
+ * DATOS (todas las categorías existentes quedan en 'NORMAL' por el DEFAULT).
+ * Es un ALTER TABLE ADD COLUMN con CHECK de UNA sola columna — permitido por
+ * SQLite (a diferencia de un CHECK multi-columna), mismo caso que v1->v2.
+ * Array plano de SQL puro (como v1->v2 y v3->v4): no requiere backfill en JS.
+ */
+export const MIGRACION_V4_A_V5 = [
+  "ALTER TABLE categorias ADD COLUMN modo_resumen TEXT NOT NULL DEFAULT 'NORMAL' CHECK (modo_resumen IN ('NORMAL','NO_SUMA','OCULTA'))",
 ];

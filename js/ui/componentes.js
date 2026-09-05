@@ -213,20 +213,54 @@ export function claseSaldo(centavos) {
 }
 
 /**
- * §2.14 (fix de unificación, hallazgo de Agustín): "Balance general" —
- * cartera total de TODA la cuenta, calculada UNA sola vez acá para que
- * Clientes y Global jamás vuelvan a divergir. Suma de `saldo_centavos` (ya
- * histórico total, incluye futuros, excluye archivados) de los grupos que
- * entrega `listarClientesAgrupados()` — mismo dato, misma fórmula, en
- * ambas pantallas. NO es `totalesMes.carteraPendienteCentavos` (que sale de
- * `resumenMensual`: solo saldos positivos, incluye clientes dados de baja,
- * acotado al mes) — esa es una métrica DISTINTA a propósito y no debe
- * confundirse con esta.
- * @param {Array<{totales:{saldo_centavos:number}}>} grupos
+ * §2.14 (fix de unificación, hallazgo de Agustín) + §2.15 (categorías fuera
+ * del balance): "Balance general" — cartera total de TODA la cuenta, calculada
+ * UNA sola vez acá para que Clientes y Global jamás vuelvan a divergir. Suma de
+ * `saldo_centavos` (ya histórico total, incluye futuros, excluye archivados) de
+ * los grupos que entrega `listarClientesAgrupados()` — mismo dato, misma
+ * fórmula, en ambas pantallas — EXCLUYENDO las categorías marcadas fuera del
+ * balance (§2.15, modo_resumen NO_SUMA/OCULTA). NO es
+ * `totalesMes.carteraPendienteCentavos` (que sale de `resumenMensual`: solo
+ * saldos positivos, incluye clientes dados de baja, acotado al mes) — esa es
+ * una métrica DISTINTA a propósito y no debe confundirse con esta.
+ * @param {Array<{categoria_modo_resumen?:string, totales:{saldo_centavos:number}}>} grupos
  * @returns {number}
  */
 export function calcularBalanceGeneral(grupos) {
+  return grupos.reduce((acc, g) => (grupoParticipaEnBalance(g) ? acc + g.totales.saldo_centavos : acc), 0);
+}
+
+/**
+ * §2.15: un grupo participa de los AGREGADOS del negocio (balance general y
+ * tarjetas de resumen) solo si su categoría está en modo NORMAL. Un grupo sin
+ * el campo (contrato anterior a §2.15) participa — compat: nunca esconde datos
+ * por un dato ausente. Los totales POR GRUPO (fila Σ) NO usan esto: siempre son
+ * reales, incluso para categorías fuera del balance.
+ * @param {{categoria_modo_resumen?:string}} grupo
+ * @returns {boolean}
+ */
+export function grupoParticipaEnBalance(grupo) {
+  return !grupo.categoria_modo_resumen || grupo.categoria_modo_resumen === 'NORMAL';
+}
+
+/**
+ * §2.15: balance de TODA la cartera SIN excluir nada — para la línea de
+ * transparencia "Balance real" que se muestra cuando hay categorías fuera.
+ * @param {Array<{totales:{saldo_centavos:number}}>} grupos
+ * @returns {number}
+ */
+export function calcularBalanceReal(grupos) {
   return grupos.reduce((acc, g) => acc + g.totales.saldo_centavos, 0);
+}
+
+/**
+ * §2.15: cuántos grupos (categorías con clientes) están fuera del balance —
+ * para el conteo de la línea de transparencia ("· N fuera").
+ * @param {Array<{categoria_modo_resumen?:string}>} grupos
+ * @returns {number}
+ */
+export function contarGruposFueraDeBalance(grupos) {
+  return grupos.reduce((acc, g) => (grupoParticipaEnBalance(g) ? acc : acc + 1), 0);
 }
 
 const formateadorCorto = new Intl.NumberFormat('es-MX', {
@@ -707,9 +741,24 @@ export function bolitaHtml(color, extraClase = '') {
  * Sheet para crear o editar una categoría (nombre + paleta de 12 colores).
  * @param {{categoria?: object|null, onGuardado?: (cat:object)=>void, onEliminada?: (id:string)=>void}} cfg
  */
+// §2.15: los 3 modos de participación de una categoría en los totales, para el
+// control segmentado del sheet de categoría. `t` = etiqueta, `s` = subtítulo.
+const ESTADOS_MODO_RESUMEN = [
+  { id: 'NORMAL', t: 'Cuenta', s: 'y se ve' },
+  { id: 'NO_SUMA', t: 'No suma', s: 'pero se ve' },
+  { id: 'OCULTA', t: 'Oculta', s: 'del resumen' },
+];
+const MODO_RESUMEN_AYUDA = {
+  NORMAL: 'Suma al Balance general y aparece en Global, como siempre.',
+  NO_SUMA: 'Sigue visible en la lista de Clientes, pero no entra al Balance general ni a Global.',
+  OCULTA: 'Fuera de los totales y de Global; en Clientes se guarda en una sección aparte para seguir cobrándoles.',
+};
+
 export function abrirSheetCategoria({ categoria = null, onGuardado, onEliminada } = {}) {
   abrirSheet((host) => {
     let colorSeleccionado = categoria ? categoria.color : PALETA_COLORES_CATEGORIA[0];
+    // §2.15: modo de participación en los totales (NORMAL/NO_SUMA/OCULTA).
+    let modoResumenSel = categoria && categoria.modo_resumen ? categoria.modo_resumen : 'NORMAL';
     let error = {};
     // Lo ya tipeado en Nombre sobrevive a los re-render que dispara elegir un
     // color (si no se capturara acá, cada render() reconstruye el <form> desde
@@ -740,6 +789,16 @@ export function abrirSheetCategoria({ categoria = null, onGuardado, onEliminada 
             </div>
             ${errorCampo(error.color)}
           </div>
+          <div class="campo">
+            <label>En los totales del negocio</label>
+            <div class="seg-modo" role="group" aria-label="Cómo participa esta categoría en los totales del negocio">
+              ${ESTADOS_MODO_RESUMEN.map((m) => `
+                <button type="button" class="seg-modo-btn ${modoResumenSel === m.id ? 'seg-modo-activo' : ''}" data-modo="${m.id}" aria-pressed="${modoResumenSel === m.id}">
+                  <span class="seg-modo-t">${m.t}</span><span class="seg-modo-s">${m.s}</span>
+                </button>`).join('')}
+            </div>
+            <p class="texto-secundario seg-modo-ayuda">${escapeHtml(MODO_RESUMEN_AYUDA[modoResumenSel])}</p>
+          </div>
           ${errorGeneral(error.general)}
           <div class="acciones-formulario acciones-formulario-columna">
             <button type="submit" class="btn btn-primario btn-ancho">${categoria ? 'Guardar cambios' : 'Crear categoría'}</button>
@@ -750,6 +809,9 @@ export function abrirSheetCategoria({ categoria = null, onGuardado, onEliminada 
       host.querySelectorAll('.bolita-color').forEach((b) => {
         b.addEventListener('click', () => { colorSeleccionado = b.dataset.color; render(); });
       });
+      host.querySelectorAll('.seg-modo-btn').forEach((b) => {
+        b.addEventListener('click', () => { modoResumenSel = b.dataset.modo; render(); });
+      });
       const form = host.querySelector('#form-categoria');
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -759,8 +821,8 @@ export function abrirSheetCategoria({ categoria = null, onGuardado, onEliminada 
         if (Object.keys(error).length > 0) { render(); return; }
         try {
           const resultado = categoria
-            ? await actualizarCategoria(categoria.id, { nombre, color: colorSeleccionado })
-            : await crearCategoria({ nombre, color: colorSeleccionado });
+            ? await actualizarCategoria(categoria.id, { nombre, color: colorSeleccionado, modo_resumen: modoResumenSel })
+            : await crearCategoria({ nombre, color: colorSeleccionado, modo_resumen: modoResumenSel });
           cerrarSheet();
           mostrarToast(categoria ? 'Categoría actualizada.' : 'Categoría creada.', 'exito');
           if (onGuardado) onGuardado(resultado);

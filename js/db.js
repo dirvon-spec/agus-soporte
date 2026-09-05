@@ -3,7 +3,7 @@
 // aislar la capa y facilitar el reemplazo futuro por un driver nativo de Capacitor.
 // Ningún error se traga: todo se relanza con {code, message} vía crearError().
 
-import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2, MIGRACION_V2_A_V3, MIGRACION_V3_A_V4 } from './schema.js';
+import { DDL, SCHEMA_VERSION, MIGRACION_V1_A_V2, MIGRACION_V2_A_V3, MIGRACION_V3_A_V4, MIGRACION_V4_A_V5 } from './schema.js';
 import { generarSeed } from './seed.js';
 import { calcularEstadosCalendario, Estado } from './calendar.js';
 import { crearError } from './utils/errors.js';
@@ -1130,7 +1130,7 @@ function aplicarMigracionV2AV3(dbObjetivo) {
 async function migrarEsquemaSiHaceFalta() {
   const versionInicial = obtenerMetaInterno('schema_version');
   if (versionInicial === SCHEMA_VERSION) return;
-  if (!['1', '2', '3'].includes(versionInicial)) {
+  if (!['1', '2', '3', '4'].includes(versionInicial)) {
     throw crearError(
       'DB_ERROR',
       `La base local tiene un schema_version desconocido ("${versionInicial}") y no se puede migrar automáticamente.`,
@@ -1161,7 +1161,13 @@ async function migrarEsquemaSiHaceFalta() {
     if (versionInicial === '1' || versionInicial === '2') {
       aplicarMigracionV2AV3(db);
     }
+    // V3_A_V4 es idempotente (CREATE TABLE/INDEX IF NOT EXISTS): re-aplicarla
+    // sobre una base que ya está en v4 es un no-op seguro; para v1/v2/v3 es la
+    // que las lleva a v4. V4_A_V5 (ALTER TABLE ADD COLUMN) NO es idempotente,
+    // pero acá solo se llega con versionInicial < v5 (v5 retorna arriba), así
+    // que todas las bases que llegan necesitan la columna nueva exactamente una vez.
     for (const sql of MIGRACION_V3_A_V4) db.run(sql);
+    for (const sql of MIGRACION_V4_A_V5) db.run(sql);
     setMetaInterno('schema_version', SCHEMA_VERSION);
     db.run('COMMIT;');
   } catch (e) {
@@ -1506,9 +1512,10 @@ export async function exportarBytesCrudosSinAbrir() {
 }
 
 /**
- * Valida ANTES de reemplazar nada: schema_version soportada (v1..v4; v1/v2/v3
- * se migran en memoria encadenando MIGRACION_V1_A_V2, aplicarMigracionV2AV3 y
- * MIGRACION_V3_A_V4 antes de aceptar — §2.8/§2.9/§2.11) + cero huérfanos.
+ * Valida ANTES de reemplazar nada: schema_version soportada (v1..v5; v1..v4
+ * se migran en memoria encadenando MIGRACION_V1_A_V2, aplicarMigracionV2AV3,
+ * MIGRACION_V3_A_V4 y MIGRACION_V4_A_V5 antes de aceptar —
+ * §2.8/§2.9/§2.11/§2.15) + cero huérfanos.
  *
  * R-002 (auditoría independiente, POSTMORTEM 2-sep-2026): funciona en MODO
  * SEGURO (`permitirEnModoSeguro: true`), igual que restaurarSnapshot(). Los
@@ -1547,11 +1554,11 @@ export async function importarRespaldo(arrayBuffer, { permitirSinCopiaPrevia = f
     if (!filaVersion) {
       throw new Error('sin schema_version');
     }
-    if (!['1', '2', '3', '4'].includes(filaVersion.valor)) {
+    if (!['1', '2', '3', '4', '5'].includes(filaVersion.valor)) {
       throw new Error(`schema_version "${filaVersion.valor}" no soportada`);
     }
     if (filaVersion.valor !== SCHEMA_VERSION) {
-      // Un respaldo v1, v2 o v3 es válido, pero se migra en memoria (mismas
+      // Un respaldo v1..v4 es válido, pero se migra en memoria (mismas
       // sentencias que initDb()) ANTES de correr la validación de huérfanos.
       dbCandidata.run('BEGIN;');
       if (filaVersion.valor === '1') {
@@ -1560,7 +1567,11 @@ export async function importarRespaldo(arrayBuffer, { permitirSinCopiaPrevia = f
       if (filaVersion.valor === '1' || filaVersion.valor === '2') {
         aplicarMigracionV2AV3(dbCandidata);
       }
+      // V3_A_V4 es idempotente (IF NOT EXISTS); V4_A_V5 (ADD COLUMN) no lo es,
+      // pero acá solo se llega con valor !== v5, así que la columna se agrega
+      // exactamente una vez. Mismo encadenado que migrarEsquemaSiHaceFalta().
       for (const sql of MIGRACION_V3_A_V4) dbCandidata.run(sql);
+      for (const sql of MIGRACION_V4_A_V5) dbCandidata.run(sql);
       dbCandidata.run("UPDATE meta SET valor = ? WHERE clave = 'schema_version'", [SCHEMA_VERSION]);
       dbCandidata.run('COMMIT;');
     }
@@ -1612,7 +1623,7 @@ export async function importarRespaldo(arrayBuffer, { permitirSinCopiaPrevia = f
   db = dbCandidata;
   ejecutarSQL('PRAGMA foreign_keys = ON;');
   setMetaInterno('modo_demo', '0');
-  modoSeguro = false; // el archivo candidato ya se validó contra un schema_version reconocido (v1..v4) más arriba
+  modoSeguro = false; // el archivo candidato ya se validó contra un schema_version reconocido (v1..v5) más arriba
   motivoModoSeguro = null;
   // ¿Puede importarRespaldo() dejar la app inconsistente si falla a mitad de
   // camino? (pedido explícito del post-mortem, item 4). Ya está blindado en
@@ -1860,7 +1871,27 @@ export async function restaurarSnapshot(clave, { permitirSinCopiaPrevia = false 
  * @param {{nombre:string, color:string}} datos
  * @returns {Promise<object>}
  */
-export async function crearCategoria({ nombre, color }) {
+// §2.15: modos de participación de una categoría en los AGREGADOS del negocio.
+// NORMAL = cuenta como siempre; NO_SUMA = visible en Clientes pero fuera de
+// TODO total (balance, abonos/cargos, calendario); OCULTA = además va a la
+// sección colapsable de Clientes y no aparece en Global. Los totales POR GRUPO
+// (fila Σ) siguen siendo reales para las tres — solo cambia su participación
+// en los agregados (esa exclusión la aplica la UI vía calcularBalanceGeneral y
+// obtenerCalendarioGlobalMovimientos, NO se re-decide acá).
+export const MODOS_RESUMEN = ['NORMAL', 'NO_SUMA', 'OCULTA'];
+
+/** Normaliza/valida un modo_resumen. undefined/null => 'NORMAL' (default del
+ *  schema). Lanza VALIDATION_ERROR si el valor no es uno de MODOS_RESUMEN. */
+function normalizarModoResumen(valor) {
+  if (valor === undefined || valor === null) return 'NORMAL';
+  const v = String(valor).trim().toUpperCase();
+  if (!MODOS_RESUMEN.includes(v)) {
+    throw crearError('VALIDATION_ERROR', 'Modo de resumen inválido para la categoría.', { campo: 'modo_resumen' });
+  }
+  return v;
+}
+
+export async function crearCategoria({ nombre, color, modo_resumen }) {
   verificarEscritura();
 
   const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
@@ -1871,6 +1902,7 @@ export async function crearCategoria({ nombre, color }) {
   if (colorLimpio.length < 1) {
     throw crearError('VALIDATION_ERROR', 'El color es obligatorio.', { campo: 'color' });
   }
+  const modoResumenFinal = normalizarModoResumen(modo_resumen);
   // "nombre único-vivo" (2.9): único entre categorías ACTIVAS, no un UNIQUE de
   // SQL — así se puede reusar el nombre de una categoría borrada lógicamente.
   const existente = unaFila('SELECT id FROM categorias WHERE deleted_at IS NULL AND LOWER(nombre) = LOWER(?)', [nombreLimpio]);
@@ -1882,10 +1914,11 @@ export async function crearCategoria({ nombre, color }) {
   const ts = ahoraIso();
   ejecutarSQL('BEGIN;');
   try {
-    db.run('INSERT INTO categorias (id, nombre, color, created_at, updated_at, deleted_at) VALUES (?,?,?,?,?,NULL)', [
+    db.run('INSERT INTO categorias (id, nombre, color, modo_resumen, created_at, updated_at, deleted_at) VALUES (?,?,?,?,?,?,NULL)', [
       id,
       nombreLimpio,
       colorLimpio,
+      modoResumenFinal,
       ts,
       ts,
     ]);
@@ -1901,7 +1934,7 @@ export async function crearCategoria({ nombre, color }) {
 
 /**
  * @param {string} id
- * @param {{nombre?:string, color?:string}} cambios
+ * @param {{nombre?:string, color?:string, modo_resumen?:string}} cambios
  * @returns {Promise<object>}
  */
 export async function actualizarCategoria(id, cambios = {}) {
@@ -1924,11 +1957,12 @@ export async function actualizarCategoria(id, cambios = {}) {
   if (colorFinal.length < 1) {
     throw crearError('VALIDATION_ERROR', 'El color es obligatorio.', { campo: 'color' });
   }
+  const modoResumenFinal = cambios.modo_resumen !== undefined ? normalizarModoResumen(cambios.modo_resumen) : actual.modo_resumen;
 
   const ts = ahoraIso();
   ejecutarSQL('BEGIN;');
   try {
-    db.run('UPDATE categorias SET nombre=?, color=?, updated_at=? WHERE id=?', [nombreFinal, colorFinal, ts, id]);
+    db.run('UPDATE categorias SET nombre=?, color=?, modo_resumen=?, updated_at=? WHERE id=?', [nombreFinal, colorFinal, modoResumenFinal, ts, id]);
     db.run('COMMIT;');
   } catch (e) {
     db.run('ROLLBACK;');
@@ -2302,9 +2336,11 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
 
   const SIN_CATEGORIA = '__sin_categoria__';
   const balde = new Map();
-  balde.set(SIN_CATEGORIA, { categoria_id: null, categoria_nombre: 'Sin categoría', categoria_color: null, clientes: [] });
+  // §2.15: "Sin categoría" siempre participa en los agregados (NORMAL fijo) —
+  // no es una fila de `categorias`, así que no puede marcarse fuera del balance.
+  balde.set(SIN_CATEGORIA, { categoria_id: null, categoria_nombre: 'Sin categoría', categoria_color: null, categoria_modo_resumen: 'NORMAL', clientes: [] });
   for (const cat of categorias) {
-    balde.set(cat.id, { categoria_id: cat.id, categoria_nombre: cat.nombre, categoria_color: cat.color, clientes: [] });
+    balde.set(cat.id, { categoria_id: cat.id, categoria_nombre: cat.nombre, categoria_color: cat.color, categoria_modo_resumen: cat.modo_resumen || 'NORMAL', clientes: [] });
   }
 
   // §2.12: fecha futura → los conteos de "visita" (abonó/dijo-que-no/sin-visitar)
@@ -2331,25 +2367,34 @@ export async function listarClientesAgrupados({ anioMes, fecha, busqueda = '' } 
       tiene_movimientos: !!fila.tiene_movimientos,
     };
 
+    const clave = fila.categoria_id && balde.has(fila.categoria_id) ? fila.categoria_id : SIN_CATEGORIA;
+    // §2.15: una categoría fuera del balance (NO_SUMA/OCULTA) no aporta a NINGÚN
+    // agregado del día — ni a los montos (cobrado) ni a los conteos del semáforo.
+    // El cliente igual conserva su estado_dia (su fila muestra el semáforo real)
+    // y se agrega a su grupo (la fila Σ del grupo sigue siendo real); lo único
+    // que se suprime es su contribución a las 3 tarjetas y a la sublínea de arriba.
+    const cuentaEnAgregados = balde.get(clave).categoria_modo_resumen === 'NORMAL';
+
     if (modoDia) {
       if (fila.tiene_abono_dia) {
-        // "Registrado" es real incluso a futuro (adelanto ya asentado) — CUENTA siempre.
+        // "Registrado" es real incluso a futuro (adelanto ya asentado).
         clienteAgregado.estado_dia = 'ABONO';
-        abonaron += 1;
-        cobradoCentavos += fila.abonos_mes_centavos;
+        if (cuentaEnAgregados) {
+          abonaron += 1;
+          cobradoCentavos += fila.abonos_mes_centavos;
+        }
       } else if (esFuturo) {
         // Neutro: la UI lo pinta SIN semáforo (no es "sin visitar", es "todavía no llega ese día").
         clienteAgregado.estado_dia = 'FUTURO';
       } else if (fila.tiene_visita_cero_dia) {
         clienteAgregado.estado_dia = 'CERO';
-        dijeronNo += 1;
+        if (cuentaEnAgregados) dijeronNo += 1;
       } else {
         clienteAgregado.estado_dia = 'SIN_VISITA';
-        sinVisitar += 1;
+        if (cuentaEnAgregados) sinVisitar += 1;
       }
     }
 
-    const clave = fila.categoria_id && balde.has(fila.categoria_id) ? fila.categoria_id : SIN_CATEGORIA;
     balde.get(clave).clientes.push(clienteAgregado);
   }
 
@@ -3349,13 +3394,16 @@ export async function resumenMensual(anioMes) {
  * completo del día (incluye AJUSTE, con concepto:null) para el popover.
  *
  * INCLUYE movimientos de clientes archivados (misma filosofía A-001: la
- * historia por fecha no se falsea porque alguien se haya archivado después).
- * `totalesMes` reutiliza resumenMensual() (ya corregido por A-001) en vez de
- * duplicar esa lógica.
+ * historia por fecha no se falsea porque alguien se haya archivado después),
+ * PERO §2.15 EXCLUYE los de categorías marcadas fuera del balance
+ * (modo_resumen NO_SUMA/OCULTA) — tanto del calendario diario como de las
+ * tarjetas Abonos/Cargos del mes, que se derivan de esas mismas filas ya
+ * filtradas. `carteraPendienteCentavos` se conserva desde resumenMensual()
+ * (reporte completo, sin filtrar por categoría) y hoy no se muestra en Global.
  *
- * Rendimiento: 1 query para todos los movimientos del rango (con el nombre
- * del cliente ya resuelto vía JOIN) + resumenMensual() internamente hace sus
- * propias queries acotadas — nunca una consulta por día.
+ * Rendimiento: 1 query para todos los movimientos del rango (con nombre de
+ * cliente y su categoría resueltos vía JOIN) + resumenMensual() para la
+ * cartera — nunca una consulta por día.
  *
  * @param {string} anioMes 'YYYY-MM'
  * @returns {Promise<{
@@ -3387,15 +3435,32 @@ export async function obtenerCalendarioGlobalMovimientos(anioMes) {
     dias.set(fecha, { abonosCentavos: 0, cargosCentavos: 0, movimientos: [] });
   }
 
+  // §2.15: las categorías fuera del balance (NO_SUMA/OCULTA) no participan de
+  // NINGÚN agregado de Global. Se excluyen desde la propia consulta con un LEFT
+  // JOIN a categorias: un movimiento entra solo si su cliente no tiene categoría
+  // (Sin categoría SIEMPRE cuenta) o su categoría está en 'NORMAL'. Una categoría
+  // borrada (deleted_at) no matchea el JOIN => cat.id IS NULL => se INCLUYE
+  // (se trata como "sin categoría": nunca se esconden datos por una categoría
+  // que ya no existe).
   const filas = todasLasFilas(
     `SELECT m.cliente_id, c.nombre AS cliente_nombre, m.tipo, m.monto_centavos, m.fecha, m.servicio, m.referencia
      FROM movimientos m
      JOIN clientes c ON c.id = m.cliente_id
+     LEFT JOIN categorias cat ON cat.id = c.categoria_id AND cat.deleted_at IS NULL
      WHERE m.deleted_at IS NULL AND m.tipo IN ('CARGO','ABONO','AJUSTE') AND m.fecha BETWEEN ? AND ?
+       AND (cat.id IS NULL OR cat.modo_resumen = 'NORMAL')
      ORDER BY m.fecha ASC, m.created_at ASC`,
     [primerDia, ultimoDiaMes]
   );
 
+  // Los totales del mes (tarjetas de Global) se suman desde estas MISMAS filas
+  // ya filtradas — antes salían de resumenMensual(), que a propósito NO conoce
+  // categorías (es el reporte completo, con todo). Derivarlos de `filas` los
+  // hace respetar la exclusión de §2.15 sin tocar resumenMensual ni sus
+  // consumidores/tests. Sin exclusiones el resultado es idéntico a resumenMensual
+  // (mismos movimientos, mismo mes completo, incluye clientes archivados).
+  let totalAbonosMesCentavos = 0;
+  let totalCargosMesCentavos = 0;
   for (const fila of filas) {
     if (!dias.has(fila.fecha)) {
       // Día futuro con movimientos (adelanto): entra al mapa recién acá, on-demand.
@@ -3410,17 +3475,19 @@ export async function obtenerCalendarioGlobalMovimientos(anioMes) {
       montoCentavos: fila.monto_centavos,
       referencia: fila.referencia,
     });
-    if (fila.tipo === 'ABONO') diaAgg.abonosCentavos += fila.monto_centavos;
-    if (fila.tipo === 'CARGO') diaAgg.cargosCentavos += fila.monto_centavos;
+    if (fila.tipo === 'ABONO') { diaAgg.abonosCentavos += fila.monto_centavos; totalAbonosMesCentavos += fila.monto_centavos; }
+    if (fila.tipo === 'CARGO') { diaAgg.cargosCentavos += fila.monto_centavos; totalCargosMesCentavos += fila.monto_centavos; }
   }
 
-  // resumenMensual() nunca acotó su rango a hoy (fecha BETWEEN primerDia AND
-  // ultimoDia del mes completo) — ya era future-inclusive antes de §2.12, así
-  // que no necesitó cambios para que totalesMes refleje también los adelantos.
+  // carteraPendienteCentavos se conserva desde resumenMensual() (reporte
+  // completo, SIN filtrar por categoría) para no romper el contrato ni sus
+  // consumidores/tests: hoy la UI de Global NO la muestra (esa tarjeta usa
+  // calcularBalanceGeneral sobre los grupos, que ya excluye por §2.15). Abonos
+  // y cargos del mes, en cambio, salen de las filas filtradas de arriba.
   const resumen = await resumenMensual(anioMes);
   const totalesMes = {
-    abonosCentavos: resumen.totalAbonosCentavos,
-    cargosCentavos: resumen.totalCargosCentavos,
+    abonosCentavos: totalAbonosMesCentavos,
+    cargosCentavos: totalCargosMesCentavos,
     carteraPendienteCentavos: resumen.carteraPendienteCentavos,
   };
 

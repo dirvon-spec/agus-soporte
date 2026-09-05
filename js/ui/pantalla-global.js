@@ -18,7 +18,7 @@ import {
   escapeHtml, bolitaHtml, Iconos,
   abrirSheetCorregirMonto, eliminarMovimientoConDeshacer, abrirSheetSeleccionarCliente,
   bannerModoDemoHtml, wireBannerModoDemo, abrirSheetIniciarModoReal,
-  calcularBalanceGeneral, dispararImportarRespaldo,
+  calcularBalanceGeneral, calcularBalanceReal, contarGruposFueraDeBalance, dispararImportarRespaldo,
   panelCopiasAutomaticasHtml, renderCopiasAutomaticas,
   edicionBloqueada, motivoEdicionBloqueada, ejecutarExportarRespaldoConConfirmacion,
 } from './componentes.js';
@@ -143,6 +143,11 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
       listarClientesAgrupados({}),
     ]);
     const balanceGeneralCentavos = calcularBalanceGeneral(gruposBalance);
+    // §2.15: transparencia — balance real (toda la cartera) + cuántas categorías
+    // quedaron fuera. Las tarjetas Abonos/Cargos y el calendario ya vienen
+    // filtrados desde obtenerCalendarioGlobalMovimientos.
+    const gruposFueraDeBalance = contarGruposFueraDeBalance(gruposBalance);
+    const balanceRealCentavos = calcularBalanceReal(gruposBalance);
 
     const primerDiaSemana = diaSemanaLunes(primerDia);
     const totalCeldas = primerDiaSemana + ultimoDiaNum;
@@ -178,6 +183,8 @@ export async function renderPantallaGlobal(contenedor, { anioMes } = {}) {
             <span class="tarjeta-resumen-monto ${claseSaldo(balanceGeneralCentavos)}">${montoOGuion(balanceGeneralCentavos)}</span>
           </div>
         </div>
+        ${gruposFueraDeBalance > 0 ? `
+        <p class="linea-balance-real">Balance real: <strong>${montoOGuion(balanceRealCentavos)}</strong> · ${gruposFueraDeBalance} ${gruposFueraDeBalance === 1 ? 'categoría' : 'categorías'} fuera del balance</p>` : ''}
 
         <div class="calendario-mensual-wrap calendario-global-wrap">
           <div class="calendario-nav">

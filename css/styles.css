@@ -2341,3 +2341,114 @@ button.fila-excel-monto:focus-visible {
   from { opacity: 0; transform: translateX(-50%) translateY(8px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
+
+/* ============================================================
+   §2.15: categorías fuera del balance (modo_resumen NORMAL/NO_SUMA/OCULTA)
+   ============================================================ */
+
+/* Control segmentado de 3 estados en el sheet Editar/Nueva categoría. */
+.seg-modo {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--espaciado-xs);
+  background: var(--color-fondo-secundario);
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio-borde);
+  padding: 3px;
+}
+
+.seg-modo-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-texto-secundario);
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.8rem;
+  line-height: 1.15;
+  border-radius: var(--radio-borde-chico);
+  cursor: pointer;
+}
+
+.seg-modo-btn .seg-modo-s {
+  font-size: 0.68rem;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+.seg-modo-btn.seg-modo-activo {
+  background: var(--color-fondo);
+  box-shadow: var(--sombra);
+  color: var(--color-texto);
+}
+
+/* El estado activo se tiñe con la semántica de cada modo. */
+.seg-modo-btn[data-modo="NORMAL"].seg-modo-activo { color: var(--color-exito); }
+.seg-modo-btn[data-modo="NO_SUMA"].seg-modo-activo { color: var(--color-advertencia); }
+.seg-modo-btn[data-modo="OCULTA"].seg-modo-activo { color: var(--color-texto); }
+
+.seg-modo-btn:focus-visible {
+  outline: 2px solid var(--color-primario);
+  outline-offset: 2px;
+}
+
+.seg-modo-ayuda {
+  margin: var(--espaciado-sm) 0 0;
+}
+
+/* Badge "no suma" junto al título del grupo y a su fila Σ (categorías NO_SUMA). */
+.badge-fuera {
+  display: inline-block;
+  vertical-align: middle;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--color-advertencia);
+  background: var(--color-advertencia-bg);
+  border: 1px solid var(--color-advertencia);
+}
+
+/* Línea de transparencia bajo el Balance general (Clientes y Global). En
+   Clientes vive dentro de la grilla .tarjetas-resumen-dia (ocupa su propia
+   fila completa); en Global es un bloque suelto — grid-column no molesta ahí. */
+.linea-balance-real {
+  grid-column: 1 / -1;
+  margin: var(--espaciado-xs) 0 0;
+  text-align: center;
+  font-size: 0.76rem;
+  color: var(--color-texto-secundario);
+}
+
+.linea-balance-real strong {
+  color: var(--color-texto);
+  font-weight: 650;
+}
+
+/* Sección colapsable "Ocultas del resumen" en Clientes (grupos OCULTA). */
+.grupo-ocultas {
+  margin-top: var(--espaciado-md);
+  border: 1px dashed var(--color-borde);
+  border-radius: var(--radio-borde);
+  padding: var(--espaciado-sm) var(--espaciado-md);
+  background: var(--color-fondo-secundario);
+}
+
+.grupo-ocultas > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--color-texto-secundario);
+}
+
+.grupo-ocultas-nota {
+  margin: var(--espaciado-sm) 0;
+  font-size: 0.72rem;
+  color: var(--color-texto-secundario);
+}

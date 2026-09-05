@@ -26,7 +26,8 @@ import {
   activarArrastreOrden, PALETA_COLORES_CATEGORIA,
   bannerModoDemoHtml, wireBannerModoDemo, dispararImportarRespaldo,
   iconoTemaHtml, alternarTema, temaActivo, wireCambioTemaSistema,
-  calcularBalanceGeneral, almacenamientoPersistenteDenegado,
+  calcularBalanceGeneral, calcularBalanceReal, contarGruposFueraDeBalance, grupoParticipaEnBalance,
+  almacenamientoPersistenteDenegado,
   edicionBloqueada, motivoEdicionBloqueada,
   estadoRespaldoUi, ejecutarExportarRespaldoConConfirmacion, suscribirseACambioRespaldo,
 } from './componentes.js';
@@ -167,7 +168,7 @@ function filaSumaHtml(grupo) {
   return `
     <li class="lista-item fila-suma-grupo fila-excel" style="${colorEstilo}">
       <span class="asa-arrastre-vacia" aria-hidden="true"></span>
-      <span class="fila-suma-etiqueta">Σ ${escapeHtml(grupo.categoria_nombre)}</span>
+      <span class="fila-suma-etiqueta">Σ ${escapeHtml(grupo.categoria_nombre)}${grupo.categoria_modo_resumen === 'NO_SUMA' ? ' <span class="badge-fuera">no suma</span>' : ''}</span>
       <span class="fila-excel-monto monto-positivo" title="${escapeHtml(textoAbonos)}">${montoSpan(textoAbonos)}</span>
       <span class="fila-excel-monto monto-negativo col-cargo" title="${escapeHtml(textoCargos)}">${montoSpan(textoCargos)}</span>
       <span class="fila-excel-monto ${claseSaldo(grupo.totales.saldo_centavos)}" title="${escapeHtml(textoSaldo)}">${montoSpan(textoSaldo)}</span>
@@ -353,7 +354,9 @@ export async function renderPantallaClientes(contenedor) {
    * `listarClientesAgrupados` ya entrega (en modo-día, `cargos_mes_centavos`
    * es el total del DÍA, no del mes) — cero queries nuevas. */
   function sumarCargosDelDia(grupos) {
-    return grupos.reduce((acc, g) => acc + g.totales.cargos_mes_centavos, 0);
+    // §2.15: solo los grupos que participan del balance suman a la tarjeta
+    // "Cargos del día" (las categorías fuera del balance no aportan a ningún total).
+    return grupos.reduce((acc, g) => (grupoParticipaEnBalance(g) ? acc + g.totales.cargos_mes_centavos : acc), 0);
   }
 
   /** §2.13/§2.14: 3 tarjetas — Abonos del día (verde) · Cargos del día (rojo)
@@ -372,9 +375,14 @@ export async function renderPantallaClientes(contenedor) {
     const cargosDiaCentavos = sumarCargosDelDia(grupos);
     const abonosDiaCentavos = resumenDia.cobradoCentavos;
     const balanceGeneralCentavos = calcularBalanceGeneral(grupos);
+    // §2.15: si hay categorías fuera del balance, se muestra el "Balance real"
+    // (toda la cartera) para que el número recortado de arriba no se lea mal.
+    const gruposFueraDeBalance = contarGruposFueraDeBalance(grupos);
+    const balanceRealCentavos = calcularBalanceReal(grupos);
     const textoAbonos = formatearCentavos(abonosDiaCentavos);
     const textoCargos = formatearCentavos(cargosDiaCentavos);
     const textoBalance = montoOGuion(balanceGeneralCentavos);
+    const textoBalanceReal = montoOGuion(balanceRealCentavos);
 
     elTarjetas.innerHTML = `
       <div class="tarjeta-resumen-dia">
@@ -389,6 +397,8 @@ export async function renderPantallaClientes(contenedor) {
         <span class="tarjeta-resumen-dia-etiqueta">Balance general</span>
         <span class="tarjeta-resumen-dia-monto ${claseSaldo(balanceGeneralCentavos)} ${claseLongitudMonto(textoBalance)}">${escapeHtml(textoBalance)}</span>
       </div>
+      ${gruposFueraDeBalance > 0 ? `
+      <p class="linea-balance-real">Balance real: <strong>${escapeHtml(textoBalanceReal)}</strong> · ${gruposFueraDeBalance} ${gruposFueraDeBalance === 1 ? 'categoría' : 'categorías'} fuera del balance</p>` : ''}
     `;
 
     if (resumenDia.esFuturo) {
@@ -528,15 +538,26 @@ export async function renderPantallaClientes(contenedor) {
       return;
     }
 
-    elLista.innerHTML = grupos.map((grupo) => `
+    // §2.15: los grupos OCULTA se apartan a una sección colapsable (siguen
+    // accesibles para cobrar). NORMAL y NO_SUMA quedan en la lista de trabajo;
+    // NO_SUMA lleva su badge "no suma" en el título y en la fila Σ.
+    const gruposVisibles = grupos.filter((g) => g.categoria_modo_resumen !== 'OCULTA');
+    const gruposOcultos = grupos.filter((g) => g.categoria_modo_resumen === 'OCULTA');
+    const htmlGrupo = (grupo) => `
       <section class="grupo-clientes">
-        <h3 class="grupo-titulo">${bolitaHtml(grupo.categoria_color)} ${escapeHtml(grupo.categoria_nombre)}</h3>
+        <h3 class="grupo-titulo">${bolitaHtml(grupo.categoria_color)} ${escapeHtml(grupo.categoria_nombre)}${grupo.categoria_modo_resumen === 'NO_SUMA' ? ' <span class="badge-fuera">no suma</span>' : ''}</h3>
         <ul class="lista lista-grupo" data-categoria-id="${grupo.categoria_id ?? ''}">
           ${grupo.clientes.map((c) => filaClienteHtml(c, grupo.categoria_color)).join('')}
           ${filaSumaHtml(grupo)}
         </ul>
-      </section>
-    `).join('');
+      </section>`;
+    elLista.innerHTML = gruposVisibles.map(htmlGrupo).join('')
+      + (gruposOcultos.length ? `
+      <details class="grupo-ocultas">
+        <summary>${Iconos.cajaArchivo()} Ocultas del resumen (${gruposOcultos.length})</summary>
+        <p class="grupo-ocultas-nota">No entran al Balance general ni a Global. Siguen acá para poder cobrarles.</p>
+        ${gruposOcultos.map(htmlGrupo).join('')}
+      </details>` : '');
 
     elLista.querySelectorAll('.lista-grupo').forEach((ul) => {
       ul.querySelectorAll('[data-accion="ver-persona"]').forEach((btn) => {
